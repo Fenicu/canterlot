@@ -349,6 +349,14 @@ impl CloudService {
         }
 
         let mut conn = self.pool.acquire().await?;
+        // Автоматическое окно закончилось само, не став готовым: владелец узнаёт причину и
+        // срок следующей попытки, а новое окно ждёт паузу (`budget::auto_backoff`).
+        let backoff = budget::auto_backoff(&mut conn, now).await?;
+        if let Some(backoff) = &backoff
+            && let Err(error) = self.alert_auto_failed(backoff).await
+        {
+            warn_db("cloud_auto_failed_push", &error);
+        }
         let waiting = budget::waiting_cloud_minutes(&mut conn, &self.config).await?;
         if waiting < budget::MIN_WAITING_MINUTES {
             if budget::episode_active(&mut conn).await? {
@@ -389,8 +397,12 @@ impl CloudService {
             && budget_kopecks > 0
             && block.is_none()
             && fits
+            // Недоступность раннеров отмечается и во время паузы: период непрерывный.
             && self.all_static_runners_down(&mut conn, now).await?
         {
+            if backoff.is_some_and(|backoff| now < backoff.retry_at) {
+                return Ok(());
+            }
             drop(conn);
             let config = self.config.clone();
             let registry = self.registry.clone();
@@ -487,6 +499,43 @@ impl CloudService {
             }
         }
         Ok(())
+    }
+
+    /// Пуш о неудачном автоматическом окне, один на окно: отметка в `alert_state` окна и строка
+    /// очереди фиксируются вместе, поэтому следующие проходы в очередь не стучатся.
+    async fn alert_auto_failed(&self, backoff: &budget::AutoBackoff) -> Result<(), sqlx::Error> {
+        let backoff = backoff.clone();
+        crate::db::in_tx(&self.pool, move |conn| {
+            Box::pin(async move {
+                let marked = sqlx::query(
+                    "update cloud_windows
+                        set alert_state = alert_state || '{\"auto_failed\": true}'::jsonb
+                      where id = $1 and not alert_state ? 'auto_failed'",
+                )
+                .bind(backoff.window_id)
+                .execute(&mut *conn)
+                .await?
+                .rows_affected();
+                if marked == 0 {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                crate::notify::enqueue_cloud_alert_in_tx(
+                    conn,
+                    &format!("cloud:auto_failed:{}", backoff.window_id),
+                    &json!({
+                        "code": "auto_failed",
+                        "window_id": backoff.window_id,
+                        "name": backoff.name,
+                        "reason": backoff.reason,
+                        "failures": backoff.failures,
+                        "retry_at": crate::conversations::time(backoff.retry_at),
+                    }),
+                )
+                .await?;
+                Ok(())
+            })
+        })
+        .await
     }
 
     /// Все статичные раннеры, которые могли бы взять ожидающую работу, недоступны или на

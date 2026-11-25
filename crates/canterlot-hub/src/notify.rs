@@ -820,6 +820,25 @@ fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
                 money("reservation_kopecks").unwrap_or_else(|| "?".to_owned())
             ),
         ),
+        "auto_failed" => {
+            let reason = match payload["reason"].as_str().unwrap_or_default() {
+                "ready_timeout" => "раннер не подключился за отведённое время".to_owned(),
+                "create_failed" => "провайдер не создал машину".to_owned(),
+                "vm_broken" => "машина остановилась или сломалась".to_owned(),
+                "gone" => "машина пропала из каталога".to_owned(),
+                other => format!("причина: {}", clip(other, TITLE_CHARS)),
+            };
+            (
+                "Облако: автоматическое окно не заработало".to_owned(),
+                format!(
+                    "Окно {name} закончилось без готового раннера ({reason}). Неудач подряд: {}. \
+                     Следующая автоматическая попытка не раньше {}; окно, созданное вручную, \
+                     паузу не ждёт.",
+                    payload["failures"].as_i64().unwrap_or(1),
+                    moscow_moment(payload["retry_at"].as_str())
+                ),
+            )
+        }
         "stray_server_deleted" => (
             "Облако: удалена лишняя машина".to_owned(),
             format!("Машина {name} в каталоге раннеров не принадлежала ни одному окну; удалена."),
@@ -2569,6 +2588,7 @@ mod tests {
     fn every_emitted_cloud_alert_code_renders_a_title() {
         let codes = [
             "auto_started",
+            "auto_failed",
             "budget_80",
             "budget_100",
             "stray_server_deleted",

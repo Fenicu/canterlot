@@ -383,6 +383,83 @@ pub async fn waiting_cloud_minutes(
     .await
 }
 
+/// Первая пауза автоматического режима после окна, которое само закончилось, не став готовым.
+pub const AUTO_RETRY_BASE: TimeDelta = TimeDelta::minutes(30);
+/// Потолок паузы: при постоянной причине неготовности остаётся одна попытка в сутки.
+pub const AUTO_RETRY_MAX: TimeDelta = TimeDelta::hours(24);
+/// Окна старше этого срока в серию неудач не входят.
+const AUTO_FAILURE_MEMORY: TimeDelta = TimeDelta::days(7);
+/// Столько последних законченных окон просматривается ради серии.
+const AUTO_FAILURE_SCAN: i64 = 32;
+
+/// Пауза перед следующим автоматическим окном после `failures` неудач подряд: каждая
+/// следующая вдвое длиннее, до потолка.
+pub fn auto_retry_delay(failures: u32) -> TimeDelta {
+    let doublings = failures.saturating_sub(1).min(8);
+    (AUTO_RETRY_BASE * 2_i32.pow(doublings)).min(AUTO_RETRY_MAX)
+}
+
+/// Серия автоматических окон, которые закончились сами, не дождавшись готового раннера.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoBackoff {
+    /// Последнее неудачное окно серии.
+    pub window_id: Uuid,
+    pub name: String,
+    /// Чем оно закончилось: причина сноса или ошибка создания.
+    pub reason: String,
+    pub failures: u32,
+    /// Раньше этого момента автоматический режим новое окно не создаёт.
+    pub retry_at: DateTime<Utc>,
+}
+
+/// Память автоматического режима о неудаче живёт в самих окнах. Серию составляют последние
+/// автоматические окна без `ready_at`; её обрывает окно, которое стало готовым, от кого бы
+/// оно ни было: значит, машины снова поднимаются. Окно, которое удалил владелец, неудачей не
+/// считается. Без такой памяти постоянная причина неготовности (не проходит SSH несущей,
+/// сломан образ, отказ создания) сменяла бы окно окном на каждом проходе, пока есть бюджет.
+pub async fn auto_backoff(
+    conn: &mut PgConnection,
+    now: DateTime<Utc>,
+) -> Result<Option<AutoBackoff>, sqlx::Error> {
+    type Row = (Uuid, String, String, bool, bool, DateTime<Utc>, String);
+    let rows: Vec<Row> = sqlx::query_as(
+        "select id, name, trigger, ready_at is not null,
+                delete_reason is not distinct from $3
+                  or (state = 'failed' and last_error is not distinct from 'canceled'),
+                coalesce(delete_confirmed_at, delete_requested_at, create_called_at, created_at),
+                coalesce(delete_reason, last_error, state)
+           from cloud_windows
+          where state <> all($1) and created_at >= $2
+          order by created_at desc
+          limit $4",
+    )
+    .bind(windows::billing_states())
+    .bind(now - AUTO_FAILURE_MEMORY)
+    .bind(windows::REASON_OWNER)
+    .bind(AUTO_FAILURE_SCAN)
+    .fetch_all(conn)
+    .await?;
+    let mut failures = 0_u32;
+    let mut last: Option<(Uuid, String, String, DateTime<Utc>)> = None;
+    for (id, name, trigger, ready, by_owner, ended_at, reason) in rows {
+        if ready {
+            break;
+        }
+        if trigger != windows::Trigger::Auto.as_str() || by_owner {
+            continue;
+        }
+        failures += 1;
+        last.get_or_insert((id, name, reason, ended_at));
+    }
+    Ok(last.map(|(window_id, name, reason, ended_at)| AutoBackoff {
+        window_id,
+        name,
+        reason,
+        failures,
+        retry_at: ended_at + auto_retry_delay(failures),
+    }))
+}
+
 /// Живое окно уже есть?
 pub async fn has_live_window(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar("select exists(select 1 from cloud_windows where state = any($1))")

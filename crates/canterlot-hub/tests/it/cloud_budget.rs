@@ -1661,6 +1661,176 @@ async fn automatic_start_alert_is_keyed_by_the_window_not_the_month() -> TestRes
     Ok(())
 }
 
+fn create_posts(rig: &Rig) -> usize {
+    rig._fake
+        .requests()
+        .iter()
+        .filter(|request| request.method == "POST" && request.path == "/compute/v1/instances")
+        .count()
+}
+
+/// Раннер автоматического окна не подключается: окно уходит по `ready_timeout`. Следующее
+/// автоматическое окно ждёт растущую паузу, а владелец узнаёт о каждой неудаче.
+#[tokio::test]
+async fn auto_mode_backs_off_after_a_window_that_never_became_ready() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, true).await;
+    let _carrier = testkit::fake_session(&rig.registry, rig.carrier, &["runners_v1"], true);
+    let runner = rig.static_runner("runner-a").await;
+    rig.seed_waiting(60).await;
+    let t0 = now_micros();
+    // Три часа модельного времени, проход раз в минуту. Раннер облака не подключается.
+    for minute in 0..=180 {
+        let at = t0 + TimeDelta::minutes(minute);
+        rig.observe_at(runner, at).await;
+        rig.service.tick(at).await;
+    }
+    let rows: Vec<(String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
+        "select state, delete_reason, created_at from cloud_windows order by created_at",
+    )
+    .fetch_all(&rig.pool)
+    .await?;
+    // Было семь окон за три часа; с паузами 30 и 60 минут их три, четвёртое ждёт 120 минут.
+    assert_eq!(rows.len(), 3, "{rows:#?}");
+    for row in &rows {
+        assert_eq!(row.0, "ended", "{rows:#?}");
+        assert_eq!(row.1.as_deref(), Some("ready_timeout"), "{rows:#?}");
+    }
+    let ended: Vec<DateTime<Utc>> = sqlx::query_scalar(
+        "select delete_confirmed_at from cloud_windows
+          where delete_confirmed_at is not null order by created_at",
+    )
+    .fetch_all(&rig.pool)
+    .await?;
+    assert!(rows[1].2 - ended[0] >= TimeDelta::minutes(30), "{rows:#?}");
+    assert!(rows[2].2 - ended[1] >= TimeDelta::minutes(60), "{rows:#?}");
+    assert_eq!(rig.push_count("auto_started").await, 3);
+    assert_eq!(
+        rig.push_count("auto_failed").await,
+        3,
+        "one push per window that ended without a ready runner"
+    );
+    let failures: Vec<i64> = sqlx::query_scalar(
+        "select (payload->>'failures')::bigint from owner_pushes
+          where payload->>'code' = 'auto_failed' and payload->>'reason' = 'ready_timeout'
+          order by 1",
+    )
+    .fetch_all(&rig.pool)
+    .await?;
+    assert_eq!(failures, [1, 2, 3]);
+    Ok(())
+}
+
+/// Провайдер отвечает на создание определённым отказом: окно заканчивается `failed` без
+/// расхода. Раньше следующий же проход создавал новое окно и снова звал провайдера.
+#[tokio::test]
+async fn auto_mode_backs_off_after_a_definite_create_refusal() -> TestResult {
+    use crate::support::fake_yandex::CreateMode;
+    let pool = canterlot_hub::testkit::db().await;
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, true).await;
+    let _carrier = testkit::fake_session(&rig.registry, rig.carrier, &["runners_v1"], true);
+    let runner = rig.static_runner("runner-a").await;
+    rig.seed_waiting(60).await;
+    rig._fake.control().create = CreateMode::Error {
+        http: 400,
+        code: 3,
+        message: "Illegal argument subnetId".into(),
+    };
+    let t0 = now_micros();
+    // Десять минут набирается недоступность раннера, затем двадцать минут проходов по 10 секунд.
+    for step in 0..=(30 * 6) {
+        let at = t0 + TimeDelta::seconds(10 * step);
+        rig.observe_at(runner, at).await;
+        rig.service.tick(at).await;
+    }
+    let windows: i64 = sqlx::query_scalar("select count(*) from cloud_windows")
+        .fetch_one(&rig.pool)
+        .await?;
+    assert_eq!(windows, 1, "one window, then the pause");
+    assert_eq!(create_posts(&rig), 1);
+    assert_eq!(rig.push_count("auto_started").await, 1);
+    assert_eq!(rig.push_count("auto_failed").await, 1);
+
+    // Пауза прошла: вторая попытка, после неё пауза вдвое длиннее.
+    for step in 0..=(35 * 6) {
+        let at = t0 + TimeDelta::minutes(30) + TimeDelta::seconds(10 * step);
+        rig.observe_at(runner, at).await;
+        rig.service.tick(at).await;
+    }
+    assert_eq!(create_posts(&rig), 2);
+    assert_eq!(rig.push_count("auto_failed").await, 2);
+    Ok(())
+}
+
+/// Окно, которое стало готовым, серию неудач обрывает; окно, удалённое владельцем, неудачей
+/// не считается.
+#[tokio::test]
+async fn auto_backoff_counts_only_windows_that_failed_on_their_own() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let rig = Rig::new(pool).await;
+    let now = now_micros();
+    let rig = &rig;
+    let ended = |trigger: &'static str, minutes_ago: i64, ready: bool, reason: &'static str| async move {
+        let id = rig.insert_window("ended", Some(0), 0).await;
+        let at = now - TimeDelta::minutes(minutes_ago);
+        sqlx::query(
+            "update cloud_windows set trigger = $2, created_at = $3, delete_confirmed_at = $3,
+                    delete_reason = $4, ready_at = case when $5 then $3 end
+              where id = $1",
+        )
+        .bind(id)
+        .bind(trigger)
+        .bind(at)
+        .bind(reason)
+        .bind(ready)
+        .execute(&rig.pool)
+        .await
+        .unwrap();
+        id
+    };
+    let backoff = || async {
+        let mut conn = rig.pool.acquire().await.unwrap();
+        budget::auto_backoff(&mut conn, now).await.unwrap()
+    };
+    assert_eq!(backoff().await, None, "no windows, no pause");
+
+    ended("auto", 300, false, "ready_timeout").await;
+    ended("auto", 200, true, "idle").await;
+    assert_eq!(backoff().await, None, "a ready window ends the streak");
+
+    ended("auto", 100, false, "owner").await;
+    assert_eq!(
+        backoff().await,
+        None,
+        "the owner's own deletion is not a failure"
+    );
+
+    let first = ended("auto", 90, false, "ready_timeout").await;
+    let state = backoff().await.expect("one failure");
+    assert_eq!((state.window_id, state.failures), (first, 1));
+    assert_eq!(
+        state.retry_at,
+        now - TimeDelta::minutes(90) + TimeDelta::minutes(30)
+    );
+
+    // Окно владельца без готовности серию не продолжает и не обрывает.
+    ended("owner", 60, false, "ready_timeout").await;
+    let last = ended("auto", 10, false, "vm_broken").await;
+    let state = backoff().await.expect("two failures");
+    assert_eq!((state.window_id, state.failures), (last, 2));
+    assert_eq!(state.reason, "vm_broken");
+    assert_eq!(
+        state.retry_at,
+        now - TimeDelta::minutes(10) + TimeDelta::minutes(60)
+    );
+    assert_eq!(budget::auto_retry_delay(1), TimeDelta::minutes(30));
+    assert_eq!(budget::auto_retry_delay(4), TimeDelta::hours(4));
+    assert_eq!(budget::auto_retry_delay(40), TimeDelta::hours(24));
+    Ok(())
+}
+
 #[tokio::test]
 async fn budget_marker_rolls_back_with_its_push() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
