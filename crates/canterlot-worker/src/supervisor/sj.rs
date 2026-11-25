@@ -3,7 +3,7 @@ use std::{
     path::Path,
 };
 
-use canterlot_journal::{Journal, JournalId, JournalOptions};
+use canterlot_journal::{Journal, JournalError, JournalId, JournalOptions};
 use canterlot_proto::{
     limits::{MAX_EVENT_BATCH_BYTES, MAX_SJ_BATCH_RECORDS, check_record_batch},
     worker::{
@@ -191,8 +191,11 @@ impl Sj {
         Ok(seq)
     }
 
+    /// Пишет накопленные записи на диск. При отказе записи они остаются в памяти:
+    /// следующий вызов открывает журнал заново и повторяет запись.
     pub fn flush(&mut self) -> Result<(), SupervisorError> {
         if !self.pending.is_empty() {
+            self.heal()?;
             let payloads: Vec<&[u8]> = self.pending.iter().map(Vec::as_slice).collect();
             self.journal.append_batch(&payloads)?;
             self.pending.clear();
@@ -204,9 +207,35 @@ impl Sj {
         Ok(())
     }
 
+    /// Журнал после ошибки I/O отклоняет изменения, пока не открыт заново.
+    fn heal(&mut self) -> Result<(), SupervisorError> {
+        if !self.journal.needs_reopen() {
+            return Ok(());
+        }
+        let before = self.journal.last_seq();
+        self.journal.reopen()?;
+        let after = self.journal.last_seq();
+        if after < before {
+            // Пропали записи, которые уже были выданы: продолжать с тех же номеров нельзя.
+            return Err(JournalError::Corrupted {
+                from_seq: after + 1,
+            }
+            .into());
+        }
+        // Откат оборванного пакета мог не пройти: тогда его начало уже лежит в журнале.
+        let written = usize::try_from(after - before)
+            .unwrap_or(usize::MAX)
+            .min(self.pending.len());
+        self.pending.drain(..written);
+        Ok(())
+    }
+
+    /// Намерение встаёт в очередь записи и тогда, когда прежние записи не легли на
+    /// диск: запись об исходе, которая пойдёт следом, не должна опережать его в журнале.
     pub fn intent(&mut self, body: Body) -> Result<(), SupervisorError> {
-        self.flush()?;
+        let earlier = self.flush();
         self.append(body)?;
+        earlier?;
         self.flush()
     }
 
@@ -222,7 +251,8 @@ impl Sj {
     }
 
     pub fn fully_acked(&self) -> bool {
-        self.journal.acked_seq() >= self.journal.last_seq()
+        // Записи, которые ещё не легли на диск, хабу не ушли.
+        self.pending.is_empty() && self.journal.acked_seq() >= self.journal.last_seq()
     }
 
     /// Ack за пределами журнала игнорируется: хаб не может подтвердить ненаписанное.

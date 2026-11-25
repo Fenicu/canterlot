@@ -38,6 +38,14 @@ pub enum SupervisorError {
     Decode(#[from] prost::DecodeError),
 }
 
+impl SupervisorError {
+    /// Отказ записи журнала исполнения: диск полон, квота, ошибка носителя. Журнал при
+    /// этом цел, и запись можно повторить, когда хранилище вернётся.
+    fn is_storage_failure(&self) -> bool {
+        matches!(self, Self::Journal(JournalError::Io(_)))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SupervisorSpec {

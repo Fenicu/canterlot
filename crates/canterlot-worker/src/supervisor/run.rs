@@ -178,6 +178,8 @@ enum StopCause {
     AuthRequired,
     CliIncompatible,
     ContextExhausted,
+    /// Журнал исполнения не пишется: вывод CLI сохранять некуда.
+    StorageFailure,
 }
 
 struct StopState {
@@ -274,7 +276,12 @@ struct Supervisor {
     media_jobs: mpsc::UnboundedSender<MediaJob>,
     shares: ShareQueue,
     share_jobs: mpsc::UnboundedSender<ShareJob>,
+    /// Журнал исполнения не пишется: когда повторить запись.
+    storage_retry: Option<Instant>,
 }
+
+/// Как часто повторяется запись журнала, пока хранилище отказывает.
+const STORAGE_RETRY: Duration = Duration::from_secs(2);
 
 /// Сколько простой после конца хода ждёт доказательства вливания, прежде чем
 /// приём будет назван неподтверждённым: обычно новый ход стартует сразу.
@@ -484,6 +491,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         media_jobs,
         shares: ShareQueue::default(),
         share_jobs,
+        storage_retry: None,
     };
     if !recovered {
         supervisor.record(Body::JournalOpened(JournalOpened {
@@ -736,36 +744,105 @@ impl Supervisor {
         ));
         let (control_tx, mut control_rx) = mpsc::unbounded_channel::<Control>();
         loop {
-            if let Some(code) = self.after_event().await? {
+            let finished = self.after_event().await;
+            if let Some(code) = self.survive_storage_failure(finished)? {
                 accept_task.abort();
                 reaper.abort();
                 recorder.abort();
                 return Ok(code);
             }
             let wake = self.next_wake();
-            tokio::select! {
-                Some(connection) = accepted.recv() => self.on_connection(connection, &control_tx),
-                Some(control) = control_rx.recv() => self.on_control(control).await?,
-                Some(result) = prepared.recv() => self.on_media_prepared(result),
-                Some(result) = share_prepared.recv() => self.on_share_prepared(result).await?,
+            let handled = tokio::select! {
+                Some(connection) = accepted.recv() => {
+                    self.on_connection(connection, &control_tx);
+                    Ok(())
+                }
+                Some(control) = control_rx.recv() => self.on_control(control).await,
+                Some(result) = prepared.recv() => {
+                    self.on_media_prepared(result);
+                    Ok(())
+                }
+                Some(result) = share_prepared.recv() => self.on_share_prepared(result).await,
                 event = adapter_event(&mut self.adapter, self.adapter_exited || matches!(self.lifecycle, Lifecycle::Draining { .. })) => {
-                    self.on_adapter_event(event).await?;
-                    for _ in 0..63 {
-                        if self.adapter_exited || matches!(self.lifecycle, Lifecycle::Draining { .. }) { break; }
-                        let Some(event) = ready_adapter_event(&mut self.adapter).await else { break; };
-                        self.on_adapter_event(event).await?;
-                    }
+                    self.on_adapter_events(event).await
                 },
                 result = close_result(&mut self.closing) => {
                     self.closing = None;
                     self.adapter = result.ok();
+                    Ok(())
                 }
-                result = terminate_result(&mut self.terminate) => self.on_terminate(result).await?,
+                result = terminate_result(&mut self.terminate) => self.on_terminate(result).await,
                 () = async { match wake { Some(at) => sleep_until(at).await, None => std::future::pending().await } } => {
                     self.attach_deadline = None;
+                    Ok(())
                 }
-            }
+            };
+            self.survive_storage_failure(handled)?;
         }
+    }
+
+    /// Событие адаптера и те, что уже готовы следом: одной пачкой до записи в журнал.
+    async fn on_adapter_events(&mut self, event: AdapterEvent) -> Result<(), SupervisorError> {
+        self.on_adapter_event(event).await?;
+        for _ in 0..63 {
+            if self.adapter_exited || matches!(self.lifecycle, Lifecycle::Draining { .. }) {
+                break;
+            }
+            let Some(event) = ready_adapter_event(&mut self.adapter).await else {
+                break;
+            };
+            self.on_adapter_event(event).await?;
+        }
+        Ok(())
+    }
+
+    /// Отказ записи журнала (диск полон) не роняет сопровождение: иначе группа была бы
+    /// убита за 200 мс, а владелец увидел бы «сопровождение умерло» вместо отказа
+    /// хранения. Исполнение уходит в управляемую остановку, записи копятся в памяти и
+    /// ложатся в журнал, когда он снова пишется. Остальные ошибки смертельны как прежде.
+    fn survive_storage_failure<T: Default>(
+        &mut self,
+        result: Result<T, SupervisorError>,
+    ) -> Result<T, SupervisorError> {
+        match result {
+            Err(error) if error.is_storage_failure() => {
+                self.on_storage_failure()?;
+                Ok(T::default())
+            }
+            other => other,
+        }
+    }
+
+    fn on_storage_failure(&mut self) -> Result<(), SupervisorError> {
+        if self.storage_retry.is_none() {
+            tracing::error!(
+                kind = "storage_failure",
+                "execution journal cannot be written; stopping the execution"
+            );
+        }
+        self.storage_retry = Some(Instant::now() + STORAGE_RETRY);
+        if matches!(self.lifecycle, Lifecycle::Starting) {
+            // CLI ещё не запущен и уже не запустится.
+            self.start_attempted = true;
+        }
+        // Записи остановки только встают в очередь записи: диск здесь не трогается.
+        self.begin_stop(StopCause::StorageFailure, false)
+    }
+
+    /// Запись очереди журнала на диск. Пока хранилище отказывает, запись повторяется
+    /// не чаще `STORAGE_RETRY`.
+    fn commit(&mut self) -> Result<(), SupervisorError> {
+        if self.storage_retry.is_some_and(|at| Instant::now() < at) {
+            return Ok(());
+        }
+        let flushed = self.sj.flush();
+        if flushed.is_ok() && self.storage_retry.take().is_some() {
+            tracing::info!(
+                kind = "storage_restored",
+                "execution journal is writable again"
+            );
+        }
+        self.survive_storage_failure(flushed)
     }
 
     fn next_wake(&self) -> Option<Instant> {
@@ -781,6 +858,9 @@ impl Supervisor {
             consider(Instant::now() + Duration::from_millis(25));
         }
         if let Some(at) = self.attach_deadline.filter(|_| self.attached.is_none()) {
+            consider(at);
+        }
+        if let Some(at) = self.storage_retry {
             consider(at);
         }
         if let Some(earliest) = self.agent_calls.values().min() {
@@ -799,12 +879,12 @@ impl Supervisor {
     }
 
     async fn after_event(&mut self) -> Result<Option<ExitCode>, SupervisorError> {
-        self.sj.flush()?;
+        self.commit()?;
         self.drive_stop().await?;
         self.try_transmit().await?;
         self.expire_agent_calls().await;
         self.expire_pending_steers()?;
-        self.sj.flush()?;
+        self.commit()?;
         self.pump_shipping();
         if let Lifecycle::Draining { outcome } = &self.lifecycle
             && self.sj.fully_acked()
@@ -3523,6 +3603,7 @@ impl Supervisor {
             StopCause::AuthRequired => ("failed", "auth_required", "auth_required"),
             StopCause::CliIncompatible => ("failed", "cli_incompatible", "cli_incompatible"),
             StopCause::ContextExhausted => ("failed", "context_exhausted", "context_exhausted"),
+            StopCause::StorageFailure => ("failed", "storage_failure", "storage_failure"),
             StopCause::ProtocolIncompatible => {
                 ("failed", "protocol_incompatible", "protocol_incompatible")
             }
@@ -4013,6 +4094,7 @@ mod tests {
             media_jobs,
             shares: ShareQueue::default(),
             share_jobs,
+            storage_retry: None,
         };
         (dir, supervisor, state)
     }

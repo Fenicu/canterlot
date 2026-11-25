@@ -1047,6 +1047,119 @@ async fn stop_waits_for_group_empty_including_escaped_children() {
     assert!(harness.wait_exit().await.success());
 }
 
+/// Запись в журнал исполнения отказывает, чтение работает. Сначала закрывается каталог:
+/// после этого компактация не создаст новый сегмент, доступный для записи.
+fn set_sj_writable(exec_dir: &Path, writable: bool) {
+    let sj = exec_dir.join("sj");
+    let (dir_mode, file_mode) = if writable {
+        (0o700, 0o600)
+    } else {
+        (0o500, 0o400)
+    };
+    if !writable {
+        fs::set_permissions(&sj, fs::Permissions::from_mode(dir_mode)).unwrap();
+    }
+    for entry in fs::read_dir(&sj).unwrap().flatten() {
+        if entry.file_name().to_string_lossy().starts_with("seg-") {
+            fs::set_permissions(entry.path(), fs::Permissions::from_mode(file_mode)).unwrap();
+        }
+    }
+    if writable {
+        fs::set_permissions(&sj, fs::Permissions::from_mode(dir_mode)).unwrap();
+    }
+}
+
+fn durable_states(exec_dir: &Path) -> Vec<String> {
+    let journal = Journal::open_read_only(&exec_dir.join("sj")).unwrap();
+    journal
+        .read_from(journal.first_seq(), usize::MAX)
+        .unwrap()
+        .into_iter()
+        .filter_map(
+            |record| match RecordBody::decode(record.payload.as_slice()).unwrap().body {
+                Some(Body::ExecutionState(fact)) => Some(fact.state),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+/// Журнал исполнения перестал писаться (как при заполненном диске: чтение работает,
+/// запись нет). Сопровождение не умирает и не убивает CLI за 200 мс: оно штатно
+/// закрывает CLI, а итог `failed(storage_failure)` дописывает, когда запись вернулась.
+#[tokio::test]
+async fn journal_write_failure_stops_the_cli_and_ends_as_storage_failure() {
+    use canterlot_proto::worker::ipc::InterruptRequest;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli("synthetic").await;
+    harness
+        .deliver(
+            Uuid::now_v7(),
+            1,
+            &script(r#"{"delta":"working"},{"hang":true}"#),
+        )
+        .await;
+    harness
+        .wait_records("delta", |b| {
+            b.iter().any(|x| matches!(x, Body::BlockDelta(_)))
+        })
+        .await;
+    let supervisor = harness.pid;
+    let cli = children_of(supervisor, "synthetic-cli");
+    assert_eq!(cli.len(), 1);
+
+    set_sj_writable(&harness.exec_dir, false);
+    // Любая следующая запись в журнал; здесь её вызывает прерывание хода.
+    harness
+        .send(down::Msg::Interrupt(InterruptRequest {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            ..Default::default()
+        }))
+        .await;
+    // Управляющие сообщения обрабатываются по порядку: ответ на следующее значит, что
+    // прерывание уже упёрлось в отказ записи, а сопровождение живо и отвечает.
+    harness.deliver(Uuid::now_v7(), 1, "late input").await;
+    assert!(
+        alive(supervisor),
+        "the supervisor must outlive the storage failure to report it"
+    );
+    let durable = durable_states(&harness.exec_dir);
+    assert!(
+        durable
+            .iter()
+            .all(|state| state == "starting" || state == "running"),
+        "nothing can be written while the journal fails: {durable:?}"
+    );
+
+    set_sj_writable(&harness.exec_dir, true);
+    let bodies = harness
+        .wait_records("closed", |b| {
+            b.iter().any(|x| matches!(x, Body::JournalClosed(_)))
+        })
+        .await;
+    let stopping = index(&bodies, |b| state(b, "stopping")).expect("stopping");
+    let failed = index(
+        &bodies,
+        |b| matches!(b, Body::ExecutionState(f) if f.state == "failed" && f.outcome == "storage_failure"),
+    )
+    .expect("failed(storage_failure)");
+    assert!(stopping < failed);
+    assert!(
+        matches!(bodies.last(), Some(Body::JournalClosed(closed)) if closed.reason == "storage_failure")
+    );
+    assert!(
+        bodies.iter().any(|b| matches!(b, Body::BlockIncomplete(_))),
+        "open blocks end incomplete"
+    );
+    assert!(
+        !alive(cli[0]),
+        "the terminal state is written only after the CLI is gone"
+    );
+    assert!(harness.wait_exit().await.success());
+}
+
 #[tokio::test]
 async fn force_stop_preempts_a_soft_close_in_progress() {
     const STUBBORN: &str = r#"#!/usr/bin/python3

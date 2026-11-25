@@ -104,6 +104,60 @@ fn failed_append_rolls_back_before_reopen() {
 }
 
 #[test]
+fn reopen_in_place_resumes_appends_after_a_write_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut journal = Journal::create(
+        dir.path(),
+        JournalId(uuid::Uuid::now_v7()),
+        JournalOptions::default(),
+    )
+    .unwrap();
+    let id = journal.id();
+    journal.append(b"one").unwrap();
+    journal.ack(1).unwrap();
+    journal.write_hook.fail_after = Some(5);
+    assert!(matches!(journal.append(b"two"), Err(JournalError::Io(_))));
+    assert!(matches!(journal.append(b"two"), Err(JournalError::Io(_))));
+    // Хранилище снова пишет: журнал открывается заново под тем же замком.
+    journal.write_hook.fail_after = None;
+    let report = journal.reopen().unwrap();
+    assert!(report.corrupted_tail.is_none());
+    assert_eq!(journal.id(), id);
+    assert_eq!((journal.last_seq(), journal.acked_seq()), (1, 1));
+    assert_eq!(journal.append(b"two").unwrap(), 2);
+    journal.ack(2).unwrap();
+    drop(journal);
+    let (journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert!(report.corrupted_tail.is_none());
+    assert_eq!((journal.last_seq(), journal.acked_seq()), (2, 2));
+}
+
+#[test]
+fn failed_reopen_leaves_the_journal_readable_and_unwritable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut journal = Journal::create(
+        dir.path(),
+        JournalId(uuid::Uuid::now_v7()),
+        JournalOptions::default(),
+    )
+    .unwrap();
+    journal.append(b"one").unwrap();
+    journal.write_hook.fail_after = Some(0);
+    assert!(matches!(journal.append(b"two"), Err(JournalError::Io(_))));
+    let ack = dir.path().join("ack");
+    let saved = fs::read(&ack).unwrap();
+    fs::remove_file(&ack).unwrap();
+    assert!(journal.reopen().is_err());
+    assert_eq!(journal.last_seq(), 1);
+    assert_eq!(journal.read_from(1, usize::MAX).unwrap().len(), 1);
+    assert!(matches!(journal.append(b"two"), Err(JournalError::Io(_))));
+    fs::write(&ack, saved).unwrap();
+    journal.write_hook.fail_after = None;
+    journal.reopen().unwrap();
+    assert_eq!(journal.append(b"two").unwrap(), 2);
+}
+
+#[test]
 fn batch_uses_one_contiguous_write() {
     let dir = tempfile::tempdir().unwrap();
     let mut journal = Journal::create(

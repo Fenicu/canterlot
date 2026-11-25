@@ -151,79 +151,40 @@ impl Journal {
             format::decode_header(&segment::read_metadata(dir, "header")?)?;
         let lock = lock_directory(dir)?;
         opts.max_record_bytes = max_record_bytes;
-        let acked_seq = format::decode_ack(&segment::read_metadata(dir, "ack")?)?;
-        let mut sealed_from = match fs::read(dir.join("sealed")) {
-            Ok(bytes) => {
-                let from_seq = format::decode_ack(&bytes)?;
-                if from_seq == 0 {
-                    return Err(JournalError::NotAJournal);
-                }
-                Some(from_seq)
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        let paths = segment::list(dir)?;
-        let mut last_seq = paths[0].0 - 1;
-        let mut segments = Vec::new();
-        let mut report = OpenReport::default();
-        for (index, (first_seq, path)) in paths.iter().enumerate() {
-            let (mut segment, corrupted_at) = Segment::scan(
-                path.clone(),
-                *first_seq,
-                &mut last_seq,
-                opts.max_record_bytes,
-            )?;
-            if let Some(stop) = corrupted_at {
-                let offset = stop.offset;
-                let from_seq = next_seq(last_seq)?;
-                // Оборванный хвост — запись последнего сегмента, обрезанная концом
-                // файла: её append не вернулся, номер никому не выдан. Такой хвост
-                // уходит в карантин без печати. Обрыв ниже сохранённого ACK значит,
-                // что получатель запись уже видел, и это порча.
-                let torn = stop.cut
-                    && index + 1 == paths.len()
-                    && sealed_from.is_none()
-                    && acked_seq <= last_seq;
-                if !torn {
-                    let sealed = sealed_from.map_or(from_seq, |prior| prior.min(from_seq));
-                    segment::atomic_replace(dir, "sealed", &format::encode_ack(sealed))?;
-                    sealed_from = Some(sealed);
-                }
-                report.corrupted_tail =
-                    Some(segment::quarantine(dir, &paths[index..], offset, from_seq)?);
-                segment.bytes = offset;
-                if segment.first_seq != next_seq(last_seq)? && offset == 0 {
-                    fs::remove_file(&segment.path)?;
-                    segment::sync_dir(dir)?;
-                } else {
-                    segments.push(segment);
-                }
-                break;
-            }
-            segments.push(segment);
-        }
-        for segment in &segments {
-            OpenOptions::new()
-                .write(true)
-                .open(&segment.path)?
-                .sync_all()?;
-        }
-        segment::sync_dir(dir)?;
+        let (recovered, report) = Recovered::load(dir, max_record_bytes)?;
         let journal = Self {
             dir: dir.to_path_buf(),
             _lock: lock,
             id,
             options: opts,
-            segments,
-            last_seq,
-            acked_seq,
-            sealed_from,
+            segments: recovered.segments,
+            last_seq: recovered.last_seq,
+            acked_seq: recovered.acked_seq,
+            sealed_from: recovered.sealed_from,
             failed: false,
             #[cfg(test)]
             write_hook: tests::WriteHook::default(),
         };
         Ok((journal, report))
+    }
+
+    /// Журнал отклоняет изменения после ошибки I/O, пока не открыт заново.
+    pub fn needs_reopen(&self) -> bool {
+        self.failed
+    }
+
+    /// Открывает журнал заново на месте, под уже взятым замком: так владелец
+    /// продолжает работу после ошибки I/O, когда хранилище снова пишет. Состояние
+    /// читается с диска теми же проверками, что в `open`. При ошибке объект
+    /// остаётся прежним: чтение работает, изменения отклоняются.
+    pub fn reopen(&mut self) -> Result<OpenReport, JournalError> {
+        let (recovered, report) = Recovered::load(&self.dir, self.options.max_record_bytes)?;
+        self.segments = recovered.segments;
+        self.last_seq = recovered.last_seq;
+        self.acked_seq = recovered.acked_seq;
+        self.sealed_from = recovered.sealed_from;
+        self.failed = false;
+        Ok(report)
     }
 
     /// Снимок журнала без lock и записи: см. [`ReadOnlyJournal`].
@@ -449,6 +410,84 @@ impl Journal {
             ));
         }
         Ok(())
+    }
+}
+
+/// Состояние журнала, прочитанное с диска: проверка сегментов, карантин, печать.
+struct Recovered {
+    segments: Vec<Segment>,
+    last_seq: u64,
+    acked_seq: u64,
+    sealed_from: Option<u64>,
+}
+
+impl Recovered {
+    /// Вызывается только владельцем замка каталога.
+    fn load(dir: &Path, max_record_bytes: u32) -> Result<(Self, OpenReport), JournalError> {
+        let acked_seq = format::decode_ack(&segment::read_metadata(dir, "ack")?)?;
+        let mut sealed_from = match fs::read(dir.join("sealed")) {
+            Ok(bytes) => {
+                let from_seq = format::decode_ack(&bytes)?;
+                if from_seq == 0 {
+                    return Err(JournalError::NotAJournal);
+                }
+                Some(from_seq)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let paths = segment::list(dir)?;
+        let mut last_seq = paths[0].0 - 1;
+        let mut segments = Vec::new();
+        let mut report = OpenReport::default();
+        for (index, (first_seq, path)) in paths.iter().enumerate() {
+            let (mut segment, corrupted_at) =
+                Segment::scan(path.clone(), *first_seq, &mut last_seq, max_record_bytes)?;
+            if let Some(stop) = corrupted_at {
+                let offset = stop.offset;
+                let from_seq = next_seq(last_seq)?;
+                // Оборванный хвост — запись последнего сегмента, обрезанная концом
+                // файла: её append не вернулся, номер никому не выдан. Такой хвост
+                // уходит в карантин без печати. Обрыв ниже сохранённого ACK значит,
+                // что получатель запись уже видел, и это порча.
+                let torn = stop.cut
+                    && index + 1 == paths.len()
+                    && sealed_from.is_none()
+                    && acked_seq <= last_seq;
+                if !torn {
+                    let sealed = sealed_from.map_or(from_seq, |prior| prior.min(from_seq));
+                    segment::atomic_replace(dir, "sealed", &format::encode_ack(sealed))?;
+                    sealed_from = Some(sealed);
+                }
+                report.corrupted_tail =
+                    Some(segment::quarantine(dir, &paths[index..], offset, from_seq)?);
+                segment.bytes = offset;
+                if segment.first_seq != next_seq(last_seq)? && offset == 0 {
+                    fs::remove_file(&segment.path)?;
+                    segment::sync_dir(dir)?;
+                } else {
+                    segments.push(segment);
+                }
+                break;
+            }
+            segments.push(segment);
+        }
+        for segment in &segments {
+            OpenOptions::new()
+                .write(true)
+                .open(&segment.path)?
+                .sync_all()?;
+        }
+        segment::sync_dir(dir)?;
+        Ok((
+            Self {
+                segments,
+                last_seq,
+                acked_seq,
+                sealed_from,
+            },
+            report,
+        ))
     }
 }
 
