@@ -248,10 +248,9 @@
   });
   const leaseWait = $derived(feed || laneRoot ? null : leaseWaitOf(chat.activity));
   // С начала хода и до первого блока строка стоит в хвосте ленты: «Прервать» есть сразу.
-  const earlyLive = $derived.by(() => {
-    if (feed || laneRoot || !turn || liveAnswer) return null;
-    return activityLiveLine(chat.activity, now, turnStartedAt);
-  });
+  // Что агент делает сейчас по активности хаба: строка до первого блока и строка карточки, которая держит ход.
+  const turnLine = $derived(feed || laneRoot || !turn ? null : activityLiveLine(chat.activity, now, turnStartedAt));
+  const earlyLive = $derived(liveAnswer ? null : turnLine);
 
   const interruptDone = $derived.by(() => {
     if (feed || laneRoot) return false;
@@ -816,7 +815,7 @@
         {:else if row.kind === 'request' && first?.kind === 'request'}
           <RequestCard request={first.request} onDecision={async () => undefined} {harnessId} {permissionMode} {now} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}
-          <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} settled={settledCards.has(row.key)} notLast={earlierCards.has(row.key)} conversationId={chat.id} {now} {onInfo} costs={laneRoot ? null : chat.runCosts} load={loadBlock} interrupt={feed || laneRoot ? null : interrupt} {leaseWait} {bookmarks} {markable} />
+          <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} {turnLine} settled={settledCards.has(row.key)} notLast={earlierCards.has(row.key)} conversationId={chat.id} {now} {onInfo} costs={laneRoot ? null : chat.runCosts} load={loadBlock} interrupt={feed || laneRoot ? null : interrupt} {leaseWait} {bookmarks} {markable} />
         {:else if row.kind === 'report' && row.report}
           <RoutineReportCard report={row.report} onDismissed={(id) => chat.routineReports.dismiss(id)} />
         {:else if row.kind === 'compaction' && row.entries[0]?.kind === 'compaction'}
