@@ -141,8 +141,19 @@ assert_worker_stopped() {
 # Кластер и база те же, что у дампа: сверка ДО остановки хаба и любого dropdb. Ожидаемые значения
 # печатает cutover в команде отката; без них — запись рядом с дампом (.identity); нет и её — громкое
 # предупреждение (дамп старого прогона).
+# Чтение записи рядом с дампом: код 0 — файл есть (содержимое в stdout), 3 — файла нет, любой
+# другой — чтение не удалось. Оборванное чтение не равно «файла нет»: прежде сбой ssh на этом
+# шаге молча отключал всю сверку идентичности, включая записанный oid фазы.
+remote_record() {
+    ssh_hub "if test -e '$1'; then cat '$1'; else exit 3; fi"
+}
 if [ -z "${EXPECT_SYS}${EXPECT_OID}" ]; then
-    ID_FILE="$(ssh_hub "cat '${DUMP}.identity'" 2>/dev/null)" || ID_FILE=""
+    ID_RC=0
+    ID_FILE="$(remote_record "${DUMP}.identity" 2>/dev/null)" || ID_RC=$?
+    case "${ID_RC}" in
+        0 | 3) ;;
+        *) die "cannot read ${DUMP}.identity (exit ${ID_RC}): a failed read is not a missing record; refusing before the hub stops" ;;
+    esac
     EXPECT_SYS="$(printf '%s\n' "${ID_FILE}" | sed -n 's/^system_identifier=//p' | sed -n 1p)"
     EXPECT_OID="$(printf '%s\n' "${ID_FILE}" | sed -n 's/^database_oid=//p' | sed -n 1p)"
 fi
@@ -152,7 +163,13 @@ fi
 PHASE_FILE="${DUMP}.restore-phase"
 RESTORE_PHASE=""
 RESTORE_OID=""
-if PH_RAW="$(ssh_hub "cat '${PHASE_FILE}'" 2>/dev/null)"; then
+PH_RC=0
+PH_RAW="$(remote_record "${PHASE_FILE}" 2>/dev/null)" || PH_RC=$?
+case "${PH_RC}" in
+    0 | 3) ;;
+    *) die "cannot read ${PHASE_FILE} (exit ${PH_RC}): a failed read is not a missing phase; refusing before the hub stops" ;;
+esac
+if [ "${PH_RC}" = "0" ]; then
     RESTORE_PHASE="$(printf '%s\n' "${PH_RAW}" | sed -n 1p | cut -d' ' -f1)"
     RESTORE_OID="$(printf '%s\n' "${PH_RAW}" | sed -n 1p | cut -s -d' ' -f2)"
     case "${RESTORE_PHASE}" in

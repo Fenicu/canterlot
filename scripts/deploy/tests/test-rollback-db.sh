@@ -710,5 +710,25 @@ grep -q 'stop canterlot-hub' "${FAKE_ROOT}/state/calls.log" && case_fail "hub st
 teardown_case
 case_end
 
+# R33: без --expect-* чтение .identity или файла фазы оборвалось. Это не «записи нет»: отказ до
+# остановки хаба (прежде сбой ssh молча отключал всю сверку, включая записанный oid фазы).
+for rec in identity restore-phase; do
+    case_begin "rollback refuses when the ${rec} record cannot be read"
+    setup_rollback "readfail-${rec}"
+    FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" stop canterlot-worker >/dev/null
+    printf 'system_identifier=7000000000000000001\ndatabase_oid=16384\n' >"${FAKE_ROOT}/hub/backups/can-pre.dump.identity"
+    export FAKE_FAIL_CMD="can-pre.dump.${rec}'"
+    : >"${FAKE_ROOT}/state/calls.log"
+    RC=0
+    bash "${DEPLOY_DIR}/rollback-db.sh" "${FAKE_ROOT}/hub/backups/can-pre.dump" --to "${SHA_PREV}" >"${FAKE_ROOT}/rb.log" 2>&1 || RC=$?
+    unset FAKE_FAIL_CMD
+    assert_eq "${RC}" "1" "exit nonzero"
+    assert_contains "${FAKE_ROOT}/rb.log" "a failed read is not a missing" "the failed read is named"
+    grep -q 'stop canterlot-hub' "${FAKE_ROOT}/state/calls.log" && case_fail "hub stopped" || case_ok "hub untouched"
+    grep -Eq '^(dropdb|createdb) ' "${FAKE_ROOT}/state/calls.log" && case_fail "the database was changed" || case_ok "no dropdb or createdb"
+    teardown_case
+    case_end
+done
+
 printf 'rollback harness: %s passed, %s failed\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]
