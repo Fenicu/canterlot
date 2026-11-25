@@ -431,6 +431,102 @@ async fn delete_is_soft_hides_from_list_and_keeps_revisions() {
     assert_eq!(resolved.text.as_deref(), Some("текст копии"));
 }
 
+/// Пресет читают сессии обоих доменов, поэтому текст от агента проходит тот же детектор
+/// секретов, что и запись памяти. Владелец пишет свой текст без проверки.
+#[tokio::test]
+async fn agent_cannot_put_a_secret_into_a_preset() {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fx::new(pool).await;
+    let conversation = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let agent = Actor::Agent {
+        conversation_id: conversation,
+    };
+    let new = |title: &str, description: Option<&str>, text: &str| NewPreset {
+        title: title.into(),
+        description: description.map(str::to_owned),
+        text: text.into(),
+        purpose: canterlot_hub::presets::PresetPurpose::Instructions,
+    };
+    let secret = "Staging DB: postgres://app:Tr0ub4dor&3xyz@db.internal:5432/app";
+    for (n, body) in [
+        new("Стенд", None, secret),
+        new("Стенд", Some("password: Hunter2Hunter2"), "текст"),
+        new("token: abcd1234efgh", None, "текст"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = presets::create(
+            &f.pool,
+            f.owner,
+            &format!("agent-secret-{n}"),
+            body,
+            agent,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PresetError::Invalid {
+                    field: "looks_like_secret"
+                }
+            ),
+            "{n}: {error:?}"
+        );
+    }
+    let created = presets::create(
+        &f.pool,
+        f.owner,
+        "agent-clean",
+        new("Стенд", None, "секреты просим через secret_request"),
+        agent,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let id: Uuid = created.summary.id.parse().unwrap();
+    let patch = || PresetPatch {
+        title: None,
+        description: None,
+        text: Some(secret.into()),
+        base_revision: 1,
+    };
+    let error = presets::update(
+        &f.pool,
+        f.owner,
+        id,
+        "agent-secret-update",
+        patch(),
+        agent,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PresetError::Invalid {
+                field: "looks_like_secret"
+            }
+        ),
+        "{error:?}"
+    );
+    // Владелец отвечает за свой текст сам.
+    presets::update(
+        &f.pool,
+        f.owner,
+        id,
+        "owner-update",
+        patch(),
+        Actor::Owner,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn agent_actor_is_recorded_as_origin_and_last_edit() {
     let pool = canterlot_hub::testkit::db().await;

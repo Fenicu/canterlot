@@ -346,6 +346,14 @@ pub async fn propose_preset(
     };
     presets::validate_text(&args.text, PresetPurpose::Instructions)
         .map_err(|error| invalid(format!("preset_invalid: {error}")))?;
+    // Пресет читают сессии обоих доменов: текст от агента проходит детектор секретов памяти
+    // ещё до карточки, чтобы пароль не ушёл владельцу в пуше и не лёг в запрос.
+    if crate::memory::secrets::scan(&args.text).is_some() {
+        return Err(invalid(format!(
+            "preset_invalid: {}; ask the owner for secrets with secret_request",
+            presets::FIELD_LOOKS_LIKE_SECRET
+        )));
+    }
     let mut conn = context.pool.acquire().await?;
     let preset = presets::get_for(
         &mut conn,

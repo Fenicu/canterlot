@@ -195,7 +195,26 @@ impl Actor {
             Self::Agent { conversation_id } => Some(*conversation_id),
         }
     }
+
+    /// Пресет общий для владельца: его читают сессии обоих доменов памяти. Поэтому то, что
+    /// пишет агент, проходит тот же детектор секретов, что и запись памяти; иначе пресет
+    /// был бы путём мимо него. Владелец за свой текст отвечает сам.
+    fn check_secrets(&self, fields: &[&str]) -> Result<(), PresetError> {
+        let found = matches!(self, Self::Agent { .. })
+            && fields
+                .iter()
+                .any(|field| crate::memory::secrets::scan(field).is_some());
+        if found {
+            return Err(PresetError::Invalid {
+                field: FIELD_LOOKS_LIKE_SECRET,
+            });
+        }
+        Ok(())
+    }
 }
+
+/// Поле ошибки `Invalid` для текста агента, в котором детектор нашёл секрет.
+pub const FIELD_LOOKS_LIKE_SECRET: &str = "looks_like_secret";
 
 /// Применённый пресет в эффективных настройках: ссылка, название и версии.
 /// Текста здесь нет — только снимок запуска везёт текст.
@@ -651,6 +670,7 @@ async fn create_in_tx(
         &body.text,
         body.purpose,
     )?;
+    actor.check_secrets(&[&title, &description, &body.text])?;
     if title_taken(conn, owner, &title, None).await? {
         return Err(PresetError::TitleTaken);
     }
@@ -810,6 +830,12 @@ pub(crate) async fn update_in_tx(
         .unwrap_or(&current_text_value)
         .to_owned();
     validate_text(&new_text, purpose)?;
+    // Проверяется только то, что агент меняет: прежний текст владельца остаётся как был.
+    actor.check_secrets(&[
+        patch.title.as_deref().unwrap_or_default(),
+        patch.description.as_deref().unwrap_or_default(),
+        patch.text.as_deref().unwrap_or_default(),
+    ])?;
     let next = current + 1;
     sqlx::query(
         "update instruction_presets set title=$3, description=$4, revision=$5, updated_at=clock_timestamp()

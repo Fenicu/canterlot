@@ -762,6 +762,30 @@ async fn a_setting_has_one_open_proposal_per_conversation() {
     assert_eq!(settings_requests(&f.pool).await, 3);
 }
 
+/// Текст пресета от агента проходит детектор секретов уже при предложении: карточка с
+/// паролем владельцу не уходит.
+#[tokio::test]
+async fn a_preset_proposal_with_a_secret_is_refused() {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fx::new(pool).await;
+    let preset = f.new_preset().await;
+    let error = f
+        .call(
+            "settings.propose_preset",
+            json!({"id": preset.to_string(), "reason": "x", "base_revision": 1,
+                   "text": "curl -u admin:S3cr3tPass! https://grafana.internal/api/health"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code.as_str(), "invalid_arguments", "{error:?}");
+    assert!(
+        error.message.contains("looks_like_secret"),
+        "{}",
+        error.message
+    );
+    assert_eq!(settings_requests(&f.pool).await, 0);
+}
+
 /// Часовой предел карточек настроек на разговор: решённые карточки тоже в счёте.
 #[tokio::test]
 async fn settings_proposals_are_capped_per_hour() {
