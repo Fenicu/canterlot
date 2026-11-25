@@ -3,6 +3,9 @@ use uuid::Uuid;
 
 use crate::model::HoldReason;
 
+mod test_db;
+pub use test_db::db;
+
 pub const TEST_OWNER_LOGIN: &str = "owner";
 pub const TEST_ORIGIN: &str = "https://chat.test";
 /// Токен сеанса, заранее заведённого для владельца в каждой тестовой базе
