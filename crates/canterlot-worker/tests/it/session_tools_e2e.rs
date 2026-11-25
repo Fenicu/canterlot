@@ -1201,6 +1201,23 @@ async fn event_after_message_lowers_depth_and_the_rate_limit_stops_the_loop(pool
     }
     fs::write(&sends[CYCLES], "[]").unwrap();
     b.p.submit(first, &hop(&sends[0]), &[]).await;
+    // Обороты идут строго друг за другом: три хода и окно тишины на каждый. Срок держит один
+    // оборот, а не всю цепочку: когда fsync соседей на общем диске идёт по полсекунды, оборот
+    // длится секунды, и общий срок на десять оборотов кончался раньше отказа по пределу.
+    const PAIR_SENDS: i64 = 10;
+    for sent in 1..=PAIR_SENDS {
+        until(&format!("message {sent} of the pair"), async || {
+            let delivered: i64 = sqlx::query_scalar(
+                "select count(*) from inputs where conversation_id=$1 and origin->>'kind'='message'",
+            )
+            .bind(second)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            delivered >= sent
+        })
+        .await;
+    }
     until("pair limit refused", async || {
         b.results(first)
             .await
