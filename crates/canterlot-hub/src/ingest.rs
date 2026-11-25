@@ -3567,6 +3567,7 @@ async fn apply_request_opened(
 
         let slot = RunSlot::from_columns(&slot_str, slot_input, slot_attempt)
             .map_err(|_| IngestError::Database)?;
+        let slot = crate::delivery::run_slot_view(&mut *conn, &slot).await?;
         events::append(
             conn,
             NewEvent {

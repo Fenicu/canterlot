@@ -303,11 +303,19 @@ export interface QueueStateChanged {
           dispatching: {
             input_id: Uuid;
             attempt: number;
+            /**
+             * Команда ввода в слоте: её несут блоки хода в input_command_id; у старых событий поля нет
+             */
+            command_id?: string;
           };
         }
       | {
           running: {
             input_id: Uuid;
+            /**
+             * Команда ввода в слоте: её несут блоки хода в input_command_id; у старых событий поля нет
+             */
+            command_id?: string;
           };
         };
   };

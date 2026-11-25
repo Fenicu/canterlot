@@ -5504,15 +5504,23 @@ export interface components {
             /** Format: int32 */
             weekly_delta_permille: number;
         };
+        /**
+         * @description Слот очереди для клиента. Слот называет ввод (`inputs.id`), а блоки хода несут
+         *     его команду (`input_command_id`); `command_id` связывает их. У стёртого ввода его нет.
+         */
         RunSlot: "free" | {
             dispatching: {
                 /** Format: int32 */
                 attempt: number;
                 /** Format: uuid */
+                command_id?: string;
+                /** Format: uuid */
                 input_id: string;
             };
         } | {
             running: {
+                /** Format: uuid */
+                command_id?: string;
                 /** Format: uuid */
                 input_id: string;
             };

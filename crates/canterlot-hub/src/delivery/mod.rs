@@ -13,8 +13,25 @@ use sqlx::{PgConnection, types::Json};
 use uuid::Uuid;
 
 use crate::events::{self, NewEvent, Scope};
-use crate::model::{HoldReason, PauseReason, RunSlot};
+use crate::model::{HoldReason, PauseReason, RunSlot, RunSlotView};
 use serde_json::json;
+
+/// Слот очереди в том виде, в каком его видит клиент: с командой занявшего его ввода.
+pub(crate) async fn run_slot_view(
+    conn: &mut PgConnection,
+    slot: &RunSlot,
+) -> Result<RunSlotView, sqlx::Error> {
+    let command_id = match slot {
+        RunSlot::Free => None,
+        RunSlot::Dispatching { input_id, .. } | RunSlot::Running { input_id } => {
+            sqlx::query_scalar("select command_id from inputs where id = $1")
+                .bind(input_id)
+                .fetch_optional(&mut *conn)
+                .await?
+        }
+    };
+    Ok(RunSlotView::new(slot, command_id))
+}
 
 #[derive(sqlx::FromRow)]
 pub(crate) struct LockedQueue {
@@ -74,6 +91,7 @@ impl LockedQueue {
         .rows_affected()
             != 0;
         if changed {
+            let slot = run_slot_view(&mut *conn, slot).await?;
             events::append(
                 conn,
                 NewEvent {

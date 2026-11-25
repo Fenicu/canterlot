@@ -5,7 +5,7 @@ use crate::{
     events::{self, Scope},
     groups::{self, Group},
     history::{self, HistoryCursor, HistoryPage, InputView},
-    model::{HoldView, PauseReason, RunSlot},
+    model::{HoldView, PauseReason, RunSlot, RunSlotView},
     presets::PresetSummary,
     scheduler::{self, ScheduledMessage},
     session::Registry,
@@ -108,7 +108,7 @@ pub struct QueueView {
     pub queued: Vec<InputView>,
     pub pause_reasons: Vec<PauseReason>,
     pub hold_reasons: Vec<HoldView>,
-    pub run_slot: RunSlot,
+    pub run_slot: RunSlotView,
 }
 #[derive(Serialize, ToSchema)]
 pub struct MachinesSnapshot {
@@ -209,6 +209,7 @@ pub async fn conversation_with_registry(
         row.try_get("run_slot_attempt")?,
     )
     .map_err(|_| sqlx::Error::Protocol("invalid run slot".into()))?;
+    let run_slot = crate::delivery::run_slot_view(&mut *conn, &run_slot).await?;
     let mut holds = detail.holds.clone();
     let machine = detail.attributes.machine.id;
     if !queued.is_empty()

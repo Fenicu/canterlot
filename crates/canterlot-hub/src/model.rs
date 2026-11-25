@@ -428,6 +428,45 @@ impl RunSlot {
     }
 }
 
+/// Слот очереди для клиента. Слот называет ввод (`inputs.id`), а блоки хода несут
+/// его команду (`input_command_id`); `command_id` связывает их. У стёртого ввода его нет.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[schema(as = RunSlot)]
+pub enum RunSlotView {
+    Free,
+    Dispatching {
+        input_id: Uuid,
+        attempt: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false)]
+        command_id: Option<Uuid>,
+    },
+    Running {
+        input_id: Uuid,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false)]
+        command_id: Option<Uuid>,
+    },
+}
+
+impl RunSlotView {
+    pub fn new(slot: &RunSlot, command_id: Option<Uuid>) -> Self {
+        match *slot {
+            RunSlot::Free => Self::Free,
+            RunSlot::Dispatching { input_id, attempt } => Self::Dispatching {
+                input_id,
+                attempt,
+                command_id,
+            },
+            RunSlot::Running { input_id } => Self::Running {
+                input_id,
+                command_id,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandKind {
