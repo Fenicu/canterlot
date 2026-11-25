@@ -3541,4 +3541,5 @@ async fn wake_with_a_live_execution_still_sends_the_resume_text(pool: PgPool) {
 }
 
 // Лимиты по учётным записям: у двух подписок одного провайдера свои удержания и пробуждения.
+#[path = "crunch/limit_accounts.rs"]
 mod limit_accounts;
