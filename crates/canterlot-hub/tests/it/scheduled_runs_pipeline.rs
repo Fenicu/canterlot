@@ -598,6 +598,86 @@ async fn replay_after_dispatch_commit_does_not_duplicate_work() {
     let _ = session_id;
 }
 
+async fn runs_of(pool: &PgPool, schedule_id: &str) -> i64 {
+    sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
+        .bind(Uuid::parse_str(schedule_id).unwrap())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn toggle(f: &Fixture, id: &str, action: &str) {
+    let revision: i64 = sqlx::query_scalar("select revision from schedules where id=$1")
+        .bind(Uuid::parse_str(id).unwrap())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    let response = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/schedules/{id}/{action}"),
+            Some(&format!("{action}-{}", Uuid::now_v7())),
+            Some(json!({"base_revision": revision})),
+        )
+        .await;
+    assert_eq!(
+        response.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+}
+
+/// Пауза нужна, чтобы срабатывание не случилось. «Возобновить» не должно запускать то, что
+/// пришлось на паузу, даже внутри окна catch-up: следующее срабатывание считается от момента
+/// возобновления.
+#[tokio::test]
+async fn resume_does_not_fire_the_occurrence_that_passed_while_paused() {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let now = Utc::now();
+    toggle(&f, &id, "pause").await;
+    // Срабатывание пришлось на паузу: десять минут назад, окно catch-up — тридцать.
+    due(&pool, &id, now - TimeDelta::minutes(10)).await;
+    scheduler(&f).tick(now).await.unwrap();
+    assert_eq!(
+        runs_of(&pool, &id).await,
+        0,
+        "a paused schedule does not fire"
+    );
+
+    toggle(&f, &id, "resume").await;
+    let next: chrono::DateTime<Utc> =
+        sqlx::query_scalar("select next_fire_at from schedules where id=$1")
+            .bind(Uuid::parse_str(&id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(next > now, "the next occurrence is counted from the resume");
+    scheduler(&f)
+        .tick(now + TimeDelta::seconds(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        runs_of(&pool, &id).await,
+        0,
+        "the occurrence that fell into the pause is neither run nor recorded"
+    );
+
+    // Повторное «Возобновить» у включённого расписания просроченный момент не сдвигает:
+    // иначе оно съело бы срабатывание, которое тик ещё не успел заявить.
+    due(&pool, &id, now - TimeDelta::minutes(1)).await;
+    toggle(&f, &id, "resume").await;
+    scheduler(&f)
+        .tick(now + TimeDelta::seconds(10))
+        .await
+        .unwrap();
+    assert_eq!(runs_of(&pool, &id).await, 1);
+}
+
 #[tokio::test]
 async fn stranded_claimed_is_readmitted_and_young_prechecking_survives() {
     let pool = canterlot_hub::testkit::db().await;

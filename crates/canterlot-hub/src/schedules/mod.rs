@@ -772,24 +772,41 @@ pub async fn set_enabled(
         None,
         move |conn| {
             Box::pin(async move {
-                let row: Option<ScheduleRow> =
-                    sqlx::query_as("select * from schedules where id=$1 and owner_id=$2 for update")
-                        .bind(id)
-                        .bind(owner_id)
-                        .fetch_optional(&mut *conn)
-                        .await?;
+                let row: Option<ScheduleRow> = sqlx::query_as(
+                    "select * from schedules where id=$1 and owner_id=$2 for update",
+                )
+                .bind(id)
+                .bind(owner_id)
+                .fetch_optional(&mut *conn)
+                .await?;
                 let mut schedule = row.ok_or(ScheduleError::NotFound)?.into_schedule()?;
                 if schedule.revision != base_revision {
                     return Err(ScheduleError::StaleRevision);
                 }
+                // Возобновление считает следующее срабатывание от этого момента. Пока расписание
+                // стояло на паузе, тик его момент не двигал, и просроченный момент внутри окна
+                // catch-up запустился бы сразу: владелец ставил паузу как раз затем, чтобы
+                // этого запуска не было. У включённого расписания момент не трогаем: тик мог
+                // ещё не заявить срабатывание, которое уже наступило.
+                if enabled && !schedule.enabled {
+                    let parsed = CronSchedule::parse(&schedule.cron)?;
+                    let tz = cron::timezone(&schedule.timezone)?;
+                    schedule.next_fire_at = parsed
+                        .next_after(Utc::now(), tz)
+                        .ok_or(ScheduleError::Invalid("invalid_cron"))?;
+                }
                 schedule.enabled = enabled;
                 schedule.revision += 1;
-                sqlx::query("update schedules set enabled=$2,revision=$3,updated_at=clock_timestamp() where id=$1")
-                    .bind(id)
-                    .bind(enabled)
-                    .bind(schedule.revision)
-                    .execute(&mut *conn)
-                    .await?;
+                sqlx::query(
+                    "update schedules set enabled=$2,revision=$3,next_fire_at=$4,
+                        updated_at=clock_timestamp() where id=$1",
+                )
+                .bind(id)
+                .bind(enabled)
+                .bind(schedule.revision)
+                .bind(schedule.next_fire_at)
+                .execute(&mut *conn)
+                .await?;
                 changed(conn, &schedule, "schedule_changed", correlation_id).await?;
                 Ok::<Schedule, ScheduleError>(schedule)
             })
