@@ -150,6 +150,46 @@ export function activityLiveLine(
   };
 }
 
+/**
+ * Строка хода внутри карточки, которая держит идущий ход. В основной ленте, что агент делает
+ * сейчас, говорит активность хаба (`turn`, тот же источник, что у шапки и у строки до первого
+ * блока): строка не спорит с шапкой. Единственное уточнение: пока хаб говорит «генерирует»,
+ * идущее рассуждение называется «Рассуждает» — это тот же этап, только точнее. У ветки
+ * субагента своей активности нет (`turn` пуст): фазу дают блоки — идущий блок или вызов
+ * инструмента без результата в конце карточки. В основной ленте вызов без результата бывает
+ * и ожиданием разрешения, поэтому там это правило не действует.
+ */
+export function cardLiveLine(opts: {
+  blocks: BlockModel[];
+  links: { result(id: string): unknown };
+  turn: LiveTurnLine | null;
+  lane: boolean;
+  now: number;
+}): LiveTurnLine {
+  const { blocks, turn } = opts;
+  const active = blocks.findLast((block) => block.state === "streaming");
+  if (turn) {
+    if (turn.phase === "working" && active?.kind === "reasoning")
+      return { phase: "thinking", tool: "", startedAt: active.startedAt ?? turn.startedAt };
+    return turn;
+  }
+  const head = blocks[0]?.createdAt ?? opts.now;
+  if (active) {
+    const phase =
+      active.kind === "tool_call" || active.kind === "tool_result"
+        ? "tool"
+        : active.kind === "reasoning"
+          ? "thinking"
+          : "working";
+    const first = blocks.find((block) => block.state === "streaming");
+    return { phase, tool: toolTitle(active).name, startedAt: first?.startedAt ?? head };
+  }
+  const last = blocks.findLast((block) => block.kind !== "tool_result");
+  if (opts.lane && last?.kind === "tool_call" && !opts.links.result(last.id))
+    return { phase: "tool", tool: toolTitle(last).name, startedAt: last.startedAt ?? last.createdAt };
+  return { phase: "working", tool: "", startedAt: head };
+}
+
 export function toolStatusText(opts: {
   running: boolean;
   error: boolean;

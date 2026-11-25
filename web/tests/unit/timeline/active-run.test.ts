@@ -7,6 +7,7 @@ import { TimelineModel, type TimelineEntry } from "#lib/stores/timeline.js";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import { RoutineReportsModel } from "#lib/routines/reports.js";
 import { liveSlot } from "./live-run.svelte";
+import { liveLineText } from "#lib/timeline/present.js";
 
 vi.mock("#lib/timeline/EventEntry.svelte", () => ({ default: () => undefined }));
 vi.mock("#lib/timeline/UserBubble.svelte", () => ({ default: () => undefined }));
@@ -194,5 +195,24 @@ describe("live turn whose run slot names the input, not its command", () => {
     flushSync();
     expect(liveMode(target)).toEqual({ window: false, line: false });
     expect(detached(target)).toBeNull();
+  });
+
+  const cardLine = (target: HTMLElement) => card(target)?.querySelector("[data-working]")?.textContent ?? "";
+
+  it("a_running_tool_names_the_tool_and_counts_from_the_phase_start_like_the_header", () => {
+    // Шапка берёт `summary || tool_name` и начало фазы: строка карточки говорит то же самое.
+    const slot = liveSlot({ input: INPUT, command: COMMAND, phase: "running_tool", tool: "Bash", summary: "cargo test", since: "2026-11-25T09:58:00.000Z", phaseSince: "2026-11-25T09:59:30.000Z" });
+    const { target } = render([block("text", { text: "Запускаю." }), block("tool_call", { tool: "Bash" })], slot);
+
+    expect(cardLine(target)).toContain(liveLineText("tool", 30_000, "cargo test").split(" · ")[0]!);
+    expect(cardLine(target)).toContain(liveLineText("tool", 30_000, "cargo test").split(" · ")[1]!);
+    expect(cardLine(target)).not.toContain("Генерирует");
+  });
+
+  it("streaming_reasoning_still_shows_its_own_phase_while_the_hub_says_generating", () => {
+    const slot = liveSlot({ input: INPUT, command: COMMAND, phase: "generating" });
+    const { target } = render([block("text", { text: "Посмотрю." }), block("reasoning", { text: "Думаю над схемой", state: "streaming" })], slot);
+
+    expect(cardLine(target)).toContain("Рассуждает");
   });
 });

@@ -18,12 +18,12 @@ export function liveRun(start: string | null): { readonly activeRun: string | nu
  * Активность и слот очереди идущего хода для ленты. Слот называет ввод (`input`), а блоки хода
  * несут его команду (`command`): это разные id, как у хаба. Без `input` ход начал сам CLI и слота нет.
  */
-export function liveSlot(opts: { input: string | null; command: string | null; since?: string; state?: string; phase?: string; tool?: string }) {
+export function liveSlot(opts: { input: string | null; command: string | null; since?: string; state?: string; phase?: string; tool?: string; summary?: string; phaseSince?: string }) {
   const since = opts.since ?? "2026-11-25T09:58:00.000Z";
   let activity = $state<Record<string, unknown> | null>({
     state: opts.state ?? "working",
     since,
-    evidence: { phase: opts.phase ?? "running_tool", tool_name: opts.tool ?? "Bash", phase_since: since },
+    evidence: { phase: opts.phase ?? "running_tool", tool_name: opts.tool ?? "Bash", summary: opts.summary ?? null, phase_since: opts.phaseSince ?? since },
   });
   let runSlot = $state<unknown>(
     opts.input === null ? "free" : { running: opts.command === null ? { input_id: opts.input } : { input_id: opts.input, command_id: opts.command } },

@@ -8,7 +8,7 @@
   import RequestCard from '#lib/requests/RequestCard.svelte';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
   import type { FeedFolds } from '#lib/timeline/folds.js';
-  import { agentTitle, handBackText, isMainAgent, toolTitle } from '#lib/timeline/present.js';
+  import { agentTitle, cardLiveLine, handBackText, isMainAgent, type LiveTurnLine } from '#lib/timeline/present.js';
   import { liveLineQuiet } from '#lib/timeline/reasoning.js';
   import { apiErrorView } from '#lib/timeline/system.js';
   import { shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
@@ -39,6 +39,7 @@
     links,
     harness,
     activeRun = null,
+    turnLine = null,
     settled = false,
     notLast = false,
     conversationId,
@@ -59,6 +60,8 @@
     harness?: { title?: string; provider?: string } | null;
     /** Ход, который идёт сейчас: вызов без результата в нём ещё работает. */
     activeRun?: string | null;
+    /** Что агент делает сейчас по активности хаба; есть только у основной ленты, пока ход идёт. */
+    turnLine?: LiveTurnLine | null;
     /** Ход идёт дальше в более поздней карточке (его разрезало сжатие): здесь живой строки нет. */
     settled?: boolean;
     notLast?: boolean;
@@ -89,11 +92,12 @@
   const run = $derived(all.find((block) => block.inputCommandId)?.inputCommandId ?? null);
   const streaming = $derived(!settled && all.some((block) => block.state === 'streaming'));
   const active = $derived(all.findLast((block) => block.state === 'streaming'));
-  const started = $derived(all.find((block) => block.state === 'streaming')?.startedAt ?? head?.createdAt ?? now);
-  const phase = $derived(active?.kind === 'tool_call' || active?.kind === 'tool_result' ? 'tool' : active?.kind === 'reasoning' ? 'thinking' : 'working');
   const agent = $derived(agentTitle(head?.agent ?? '', harness));
   const working = $derived(!settled && activeRun !== null && head?.inputCommandId === activeRun);
   const live = $derived(working || streaming);
+  // Чем агент занят сейчас: у карточки, которая держит ход, — по активности хаба, как в шапке.
+  const line = $derived(cardLiveLine({ blocks: all, links, turn: working ? turnLine : null, lane: !!laneRoot, now }));
+  const phase = $derived(line.phase);
   const cost = $derived(run && !live && !notLast ? costs?.get(run) : undefined);
   const costText = $derived(cost ? costLine(cost.usage, cost.limit) : '');
   const hintText = $derived(cost ? cacheHintText(cost.cache_hint) : null);
@@ -203,7 +207,7 @@
   {/each}
   {#if live && head}
     <!-- В окне рассуждение идёт строкой без своей подписи: фазу называет строка хода. -->
-    <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} {interrupt} waiting={working ? leaseWait : null} quiet={windowShown && !windowFull ? false : quietLiveLine} />
+    <LiveLine {phase} tool={line.tool} startedAt={line.startedAt} {now} {interrupt} waiting={working ? leaseWait : null} quiet={windowShown && !windowFull ? false : quietLiveLine} />
   {/if}
   {#if head}
     <footer class="byline" data-role="answer-footer">
