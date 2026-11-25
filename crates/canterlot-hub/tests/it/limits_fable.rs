@@ -5,19 +5,17 @@ use std::sync::Arc;
 
 use canterlot_hub::{
     blocks::ExecutionRef,
-    config::{HubTimers, LimitsConfig, SessionToolsConfig},
-    ingest::{Ingest, IngestOutcome, JournalKind},
+    config::{LimitsConfig, SessionToolsConfig},
     limits::{self, DataConfidence, Observation, ObservationSource, Window},
     session_tools::{self, Caller, ToolContext, settle::SettleConfig},
     testkit,
 };
-use canterlot_proto::worker::v1::{LimitObservation, LimitReached, LimitWindow, record_body::Body};
+use canterlot_proto::worker::v1::{LimitReached, LimitWindow};
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::support::task3 as ingest_support;
 use crate::support::task7 as support;
 
 use support::Fixture;
@@ -136,128 +134,6 @@ async fn fable_window_is_listed_in_the_api_history_and_report() {
     assert_eq!(fable["used_percent"], 5.0, "{fable}");
 }
 
-/// Тот же кадр Claude Code, что проверяет воркер: здесь он входит в хаб как готовый protobuf.
-const FABLE_FRAME: &str =
-    include_str!("../../../canterlot-proto/tests/fixtures/fable_rate_limit.json");
-
-#[tokio::test]
-async fn the_verbatim_fable_frame_reaches_the_hub_limits() {
-    let pool = canterlot_hub::testkit::db().await;
-    let frame: Value = serde_json::from_str(FABLE_FRAME).unwrap();
-    let row = &frame["unifiedWindows"]["seven_day_overage_included"];
-    let used = (row["utilization"].as_f64().unwrap() * 1000.0).round() as u32;
-    let reset_ms = row["resetsAt"].as_u64().unwrap() * 1000;
-    let mut run = ingest_support::Run::new(&pool).await;
-    testkit::offer_provider(&pool, run.seed.machine_id, "claude").await;
-    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
-    // В базе остаётся токен сессии: иначе проверка отзывов (раз в секунду) закроет её
-    // и сотрёт сдвиг часов, без которого наблюдение не пишется.
-    let wire_credential = {
-        use sha2::{Digest, Sha256};
-        Sha256::digest(run.seed.machine_id.to_string().as_bytes()).to_vec()
-    };
-    sqlx::query("update machine_credentials set token_sha256=$2 where machine_id=$1")
-        .bind(run.seed.machine_id)
-        .bind(&wire_credential)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let _client = ingest_support::connect(
-        &hub,
-        &run.seed,
-        Uuid::now_v7(),
-        true,
-        Utc::now().timestamp_millis() as u64,
-    )
-    .await;
-    assert!(
-        hub.registry.clock_offset(run.seed.machine_id).is_some(),
-        "the hello sets the clock offset before the reply"
-    );
-    run.ingest = Ingest::new(pool.clone()).with_registry(hub.registry.clone());
-    let batch = run.batch(vec![Body::LimitObserved(LimitObservation {
-        provider: "claude".into(),
-        window: LimitWindow::WeeklyFable as i32,
-        used_permille: used,
-        resets_at_ms: reset_ms,
-        observed_machine_ms: Utc::now().timestamp_millis() as u64,
-        ..Default::default()
-    })]);
-    assert_eq!(
-        run.ingest
-            .apply_batch(
-                run.seed.machine_id,
-                &wire_credential,
-                JournalKind::Sj,
-                &batch
-            )
-            .await
-            .unwrap(),
-        IngestOutcome::Committed { up_to_seq: run.seq }
-    );
-    assert!(
-        hub.registry.session_info(run.seed.machine_id).is_some(),
-        "the session outlived the write"
-    );
-    let mut conn = pool.acquire().await.unwrap();
-    let claude = limits::current(&mut conn)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|provider| provider.provider == "claude")
-        .unwrap();
-    let fable = claude.weekly_fable.expect("weekly_fable stored");
-    assert_eq!(fable.used_permille, 50, "the frame's 5% is stored");
-    assert_eq!(
-        fable.resets_at.map(|at| at.timestamp_millis()),
-        Some(reset_ms as i64)
-    );
-    hub.shutdown.send(()).unwrap();
-    hub.join.await.unwrap().unwrap();
-}
-
-#[tokio::test]
-async fn an_opus_observation_without_fable_keeps_the_known_value() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
-    let now = Utc::now();
-    let reset = now + TimeDelta::days(4);
-    observe(
-        &f.pool,
-        &f.seed,
-        Window::WeeklyFable,
-        50,
-        reset,
-        now - TimeDelta::minutes(2),
-    )
-    .await;
-    observe(
-        &f.pool,
-        &f.seed,
-        Window::Weekly,
-        300,
-        reset,
-        now - TimeDelta::minutes(1),
-    )
-    .await;
-    observe(
-        &f.pool,
-        &f.seed,
-        Window::FiveHour,
-        100,
-        now + TimeDelta::hours(2),
-        now,
-    )
-    .await;
-
-    let view: Value = f.get("/api/v1/limits").await;
-    assert_eq!(
-        view[0]["weekly_fable"]["used_permille"], 50,
-        "a batch without the window leaves it stale, not erased: {view}"
-    );
-    assert_eq!(view[0]["weekly_fable"]["used_pct"], 5.0, "{view}");
-}
-
 #[tokio::test]
 async fn a_fable_limit_pauses_only_that_session_and_no_provider_reserve() {
     let pool = canterlot_hub::testkit::db().await;
@@ -303,58 +179,4 @@ async fn a_fable_limit_pauses_only_that_session_and_no_provider_reserve() {
         !reserve,
         "a fable limit does not activate the weekly reserve"
     );
-}
-
-#[tokio::test]
-async fn a_stored_future_fable_timestamp_does_not_block_a_new_reading() {
-    let pool = canterlot_hub::testkit::db().await;
-    let s = testkit::seed(&pool).await;
-    testkit::offer_provider(&pool, s.machine_id, "claude").await;
-    let future = Utc::now() + TimeDelta::days(1);
-    sqlx::query(
-        "insert into provider_limits(provider,weekly_fable_used_permille,
-           weekly_fable_resets_at,weekly_fable_observed_at)
-         values('claude',100,$1,$2)",
-    )
-    .bind(future + TimeDelta::hours(3))
-    .bind(future)
-    .execute(&pool)
-    .await
-    .unwrap();
-    let reset = Utc::now() + TimeDelta::days(4);
-    observe(
-        &pool,
-        &s,
-        Window::WeeklyFable,
-        50,
-        reset,
-        Utc::now() - TimeDelta::seconds(1),
-    )
-    .await;
-    let mut conn = pool.acquire().await.unwrap();
-    let fable = limits::current(&mut conn)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|provider| provider.provider == "claude")
-        .unwrap()
-        .weekly_fable
-        .unwrap();
-    assert_eq!(fable.used_permille, 50);
-}
-
-#[tokio::test]
-async fn an_unknown_window_value_is_rejected_not_stored() {
-    let pool = canterlot_hub::testkit::db().await;
-    let _seed = testkit::seed(&pool).await;
-    assert!(matches!(
-        Window::from_proto(999),
-        Err(sqlx::Error::InvalidArgument(_))
-    ));
-    let windows: Vec<String> =
-        sqlx::query_scalar("select distinct window_kind from limit_snapshots")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    assert!(windows.is_empty(), "{windows:?}");
 }

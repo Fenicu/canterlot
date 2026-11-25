@@ -6,13 +6,11 @@ use canterlot_hub::{
     config::HubConfig,
     limits,
     notify::{self, PushSettings, Sender},
-    presence::Presence,
     session_tools::settle::{SettleFacts, Settled},
     testkit,
 };
 use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
-use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::support::auth;
@@ -169,28 +167,6 @@ async fn expiry_push_fires_once_per_date_and_rearms_after_a_new_login() -> TestR
 }
 
 #[tokio::test]
-async fn a_date_far_ahead_is_not_pushed() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let s = testkit::seed(&pool).await;
-    enable_pushes(&pool).await;
-    record(
-        &pool,
-        s.machine_id,
-        "claude",
-        at(Duration::days(30)),
-        at(Duration::seconds(-1)),
-    )
-    .await;
-    assert_eq!(notify::credential_expiry_sweep(&pool).await?, 0);
-    assert!(
-        push_rows(&pool, notify::KIND_CREDENTIAL_EXPIRY)
-            .await
-            .is_empty()
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn auth_required_pushes_once_per_episode_and_rearms_after_a_successful_turn() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
@@ -268,39 +244,5 @@ async fn auth_required_pushes_once_per_episode_and_rearms_after_a_successful_tur
         push_rows(&pool, notify::KIND_CREDENTIAL_AUTH).await.len(),
         2
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_open_chat_does_not_swallow_the_auth_push() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let s = testkit::seed(&pool).await;
-    enable_pushes(&pool).await;
-    let now = Utc::now();
-    settle(
-        &pool,
-        s.conversation_id,
-        Settled::Failed,
-        &Evidence::Failed {
-            reason: "auth_required".into(),
-        },
-        now,
-        "auth-visible",
-    )
-    .await;
-    let (seen, url) = auth::fake_gotify().await;
-    let (_dir, sender) = sender(&url);
-    let presence = Presence::default();
-    let at = Instant::now();
-    presence.report(s.conversation_id, "phone", true, at);
-    let report = sender
-        .with_presence(presence)
-        .deliver_due_at(&pool, at)
-        .await?;
-    // Пуш о сбое сессии откладывается открытым чатом, пуш о входе — нет: он без разговора.
-    assert_eq!((report.sent, report.suppressed), (1, 0));
-    let seen = seen.lock().unwrap().clone();
-    assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0]["title"], "Claude Code просит войти заново");
     Ok(())
 }

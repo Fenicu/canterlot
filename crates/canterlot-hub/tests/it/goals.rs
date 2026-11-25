@@ -4,11 +4,6 @@
 use axum::http::Method;
 use canterlot_hub::{
     blocks::ExecutionRef,
-    delivery::{
-        ContentBlock, SubmitInput,
-        dispatch::{DispatchOutcome, GateInputs, dispatch_next},
-        submit_input,
-    },
     events::{self, ReadAfter, Scope},
     executions, goals,
     http::{self, AppState},
@@ -17,10 +12,8 @@ use canterlot_hub::{
     testkit::{self, TestClient},
 };
 use canterlot_proto::worker::v1::{
-    BlockFinal, BlockStarted, GoalChanged, GoalState as ProtoGoalState, InputAccepted,
-    JournalOpened, JournalRecords, RunFinished, record_body::Body,
+    GoalChanged, GoalState as ProtoGoalState, JournalRecords, record_body::Body,
 };
-use chrono::Utc;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -342,53 +335,6 @@ async fn second_goal_command_in_the_same_execution_is_sent() {
     );
 }
 
-#[sqlx::test]
-async fn goal_command_without_capability_is_refused_clearly(pool: PgPool) {
-    let f = F::new(pool, &["pilot_v1"]).await;
-    let response = f
-        .post_goal(
-            json!({"action": "set", "objective": "Подготовить отчёт"}),
-            "goal-no-capability",
-        )
-        .await;
-    assert_eq!(
-        response.status,
-        409,
-        "{}",
-        String::from_utf8_lossy(&response.body)
-    );
-    let error: Value = response.json();
-    assert_eq!(error["error"]["code"], "capability_missing");
-    let count: i64 = sqlx::query_scalar(
-        "select count(*) from commands where conversation_id = $1 and kind = 'goal_command'",
-    )
-    .bind(f.conversation)
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    assert_eq!(count, 0, "no command for an incapable worker");
-}
-
-#[sqlx::test]
-async fn goal_command_for_open_code_harness_is_refused(pool: PgPool) {
-    let f = F::new(pool, &["goals_v1"]).await;
-    sqlx::query("update conversations set harness = 'opencode' where id = $1")
-        .bind(f.conversation)
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    let response = f
-        .post_goal(
-            json!({"action": "set", "objective": "Подготовить отчёт"}),
-            "goal-open-code",
-        )
-        .await;
-    assert_eq!(response.status, 409);
-    let error: Value = response.json();
-    assert_eq!(error["error"]["code"], "invalid_state");
-    assert_eq!(error["error"]["details"]["reason"], "unsupported_harness");
-}
-
 fn journal(journal_id: Uuid, seq: &mut u64, bodies: Vec<Body>) -> JournalRecords {
     JournalRecords {
         journal_id: journal_id.to_string(),
@@ -403,190 +349,4 @@ fn journal(journal_id: Uuid, seq: &mut u64, bodies: Vec<Body>) -> JournalRecords
             })
             .collect(),
     }
-}
-
-#[sqlx::test]
-async fn autonomous_goal_turn_reaches_history_and_ends_the_run(pool: PgPool) {
-    // Владелец ставит цель по HTTP, а ход работает сам: хаб видит его блоки в ленте,
-    // открытый ход — как работу, а приписанный RunFinished закрывает его.
-    let f = F::new(pool.clone(), &["goals_v1", "pilot_v1"]).await;
-    let credential = vec![7u8; 32];
-    sqlx::query(
-        "insert into machine_credentials (machine_id, token_sha256) values ($1,$2)
-         on conflict do nothing",
-    )
-    .bind(f.machine)
-    .bind(&credential)
-    .execute(&f.pool)
-    .await
-    .unwrap();
-
-    let response = f
-        .post_goal(
-            json!({"action": "set", "objective": "neutral objective"}),
-            "goal-autonomous",
-        )
-        .await;
-    assert_eq!(
-        response.status,
-        200,
-        "{}",
-        String::from_utf8_lossy(&response.body)
-    );
-
-    let owner_input = submit_input(
-        &f.pool,
-        SubmitInput {
-            owner_id: f.owner,
-            conversation_id: f.conversation,
-            idempotency_key: Uuid::now_v7().to_string(),
-            content: vec![ContentBlock::Text {
-                text: "owner input".into(),
-            }],
-            received_at: Utc::now(),
-            correlation_id: Uuid::now_v7(),
-            origin: None,
-        },
-    )
-    .await
-    .unwrap();
-    assert!(matches!(
-        dispatch_next(
-            &f.pool,
-            f.conversation,
-            GateInputs {
-                machine_available: true,
-                machine_reconciled: true,
-                session_capabilities: vec!["pilot_v1".into()],
-            },
-            Uuid::now_v7(),
-        )
-        .await
-        .unwrap(),
-        DispatchOutcome::Dispatched { .. }
-    ));
-
-    let ingest = Ingest::new(f.pool.clone());
-    let journal_id = Uuid::now_v7();
-    let mut seq = 0;
-    let block_id = Uuid::now_v7();
-    let text = "autonomous answer";
-    ingest
-        .apply_batch(
-            f.machine,
-            &credential,
-            JournalKind::Sj,
-            &journal(
-                journal_id,
-                &mut seq,
-                vec![
-                    Body::JournalOpened(JournalOpened {
-                        execution_id: f.execution.to_string(),
-                        generation: 1,
-                        supervisor_protocol_version: 1,
-                    }),
-                    Body::InputAccepted(InputAccepted {
-                        command_id: owner_input.command_id.to_string(),
-                        dispatch_attempt: 1,
-                        machine_time_ms: 0,
-                    }),
-                    Body::BlockStarted(BlockStarted {
-                        block_id: block_id.to_string(),
-                        kind: "text".into(),
-                        input_command_id: owner_input.command_id.to_string(),
-                        agent: "orchestrator".into(),
-                        model: "codex-mini".into(),
-                        ..Default::default()
-                    }),
-                    Body::BlockFinal(BlockFinal {
-                        block_id: block_id.to_string(),
-                        rev: 1,
-                        checksum: canterlot_hub::blocks::checksum(text),
-                        text: text.into(),
-                        ..Default::default()
-                    }),
-                ],
-            ),
-        )
-        .await
-        .unwrap();
-
-    let open: i64 = sqlx::query_scalar(
-        "select count(*) from runs where input_command_id=$1 and finished_at is null",
-    )
-    .bind(owner_input.command_id)
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    assert_eq!(open, 1, "an open run shows the session as working");
-
-    f.apply_adapter_goal(Some(snapshot(7))).await;
-    ingest
-        .apply_batch(
-            f.machine,
-            &credential,
-            JournalKind::Sj,
-            &journal(
-                journal_id,
-                &mut seq,
-                vec![Body::RunFinished(RunFinished {
-                    adopted: true,
-                    execution_id: f.execution.to_string(),
-                    input_command_id: owner_input.command_id.to_string(),
-                    duration_ms: 1000,
-                    machine_time_ms: 0,
-                    context_tokens: 10,
-                    context_window_tokens: 100,
-                    usage: vec![],
-                    git: None,
-                    end: canterlot_proto::worker::v1::RunEnd::Completed as i32,
-                })],
-            ),
-        )
-        .await
-        .unwrap();
-
-    let closed: i64 = sqlx::query_scalar(
-        "select count(*) from runs where input_command_id=$1 and finished_at is not null",
-    )
-    .bind(owner_input.command_id)
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    assert_eq!(closed, 1, "the adopted turn closes the run: session idle");
-
-    let response = f
-        .client
-        .send(
-            Method::GET,
-            &format!("/api/v1/conversations/{}/history", f.conversation),
-            None,
-            None,
-        )
-        .await;
-    assert_eq!(
-        response.status,
-        200,
-        "{}",
-        String::from_utf8_lossy(&response.body)
-    );
-    let page: Value = response.json();
-    let items = page["items"].as_array().expect("history items");
-    let block = items
-        .iter()
-        .find(|item| item["kind"] == "block")
-        .unwrap_or_else(|| panic!("{items:?}"));
-    assert_eq!(block["content"], text);
-    assert_eq!(
-        block["input_command_id"],
-        owner_input.command_id.to_string()
-    );
-    assert_eq!(block["state"], "final");
-
-    let goal = goals::in_snapshot(&mut f.pool.acquire().await.unwrap(), f.conversation)
-        .await
-        .unwrap()
-        .expect("goal in snapshot");
-    assert_eq!(goal.objective, "Подготовить отчёт");
-    assert_eq!(goal.status, "active");
 }

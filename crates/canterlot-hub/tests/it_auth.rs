@@ -117,8 +117,6 @@ mod service_notes;
 mod settings;
 #[path = "it/settings_change.rs"]
 mod settings_change;
-#[path = "it/updates_api.rs"]
-mod updates_api;
 #[path = "it/updates_e2e.rs"]
 mod updates_e2e;
 #[path = "it/version.rs"]

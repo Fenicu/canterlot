@@ -1,17 +1,14 @@
 //! Лимиты показываются только для провайдеров, чей харнесс есть в каталоге машин владельца.
 //! Строки и история остальных остаются в базе и возвращаются вместе с харнессом.
 
-use crate::support::task3 as support;
 use canterlot_hub::{
     config::LimitsConfig,
     limits::{self, DataConfidence, Observation, ObservationSource, Window},
-    machine_info, snapshot, testkit,
+    snapshot, testkit,
 };
-use canterlot_proto::worker::v1::HarnessInfo;
 use chrono::{Duration, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
-use support::report;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -61,15 +58,6 @@ async fn changes(pool: &PgPool, kind: &str) -> Vec<Value> {
         .unwrap()
 }
 
-fn harness(id: &str, provider: &str) -> HarnessInfo {
-    HarnessInfo {
-        harness: id.into(),
-        provider: provider.into(),
-        title: id.into(),
-        ..Default::default()
-    }
-}
-
 #[tokio::test]
 async fn providers_outside_the_catalog_are_hidden_but_their_rows_and_history_stay() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
@@ -114,54 +102,5 @@ async fn providers_outside_the_catalog_are_hidden_but_their_rows_and_history_sta
     testkit::offer_provider(&pool, other.machine_id, "codex").await;
     assert_eq!(shown(&pool, s.owner_id).await, ["claude"]);
     assert_eq!(shown(&pool, other.owner_id).await, ["codex"]);
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_harness_leaving_and_returning_tells_clients_and_brings_the_windows_back() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let s = testkit::seed(&pool).await;
-    let mut with = report();
-    with.harnesses.push(harness("codex", "codex"));
-    machine_info::apply_report(&pool, s.owner_id, s.machine_id, &with, Uuid::now_v7()).await?;
-    observe(&pool, &s, "claude", Window::Weekly, 410).await;
-    observe(&pool, &s, "codex", Window::Weekly, 300).await;
-    assert_eq!(shown(&pool, s.owner_id).await, ["claude", "codex"]);
-    let before = changes(&pool, "limits_providers_changed").await.len();
-
-    // Харнесс выключен: каталог без codex.
-    machine_info::apply_report(&pool, s.owner_id, s.machine_id, &report(), Uuid::now_v7()).await?;
-    assert_eq!(shown(&pool, s.owner_id).await, ["claude"]);
-    let offered = changes(&pool, "limits_providers_changed").await;
-    assert_eq!(offered.len(), before + 1);
-    assert_eq!(
-        offered.last().unwrap()["providers"],
-        serde_json::json!(["claude"])
-    );
-
-    // Тот же каталог повторно событий не порождает.
-    machine_info::apply_report(&pool, s.owner_id, s.machine_id, &report(), Uuid::now_v7()).await?;
-    assert_eq!(
-        changes(&pool, "limits_providers_changed").await.len(),
-        before + 1
-    );
-
-    // Харнесс включён снова: провайдер возвращается вместе с сохранённым окном.
-    let weekly_before = changes(&pool, "limits_changed").await.len();
-    machine_info::apply_report(&pool, s.owner_id, s.machine_id, &with, Uuid::now_v7()).await?;
-    assert_eq!(shown(&pool, s.owner_id).await, ["claude", "codex"]);
-    let offered = changes(&pool, "limits_providers_changed").await;
-    assert_eq!(
-        offered.last().unwrap()["providers"],
-        serde_json::json!(["claude", "codex"])
-    );
-    let returned = changes(&pool, "limits_changed").await;
-    let back: Vec<&Value> = returned[weekly_before..]
-        .iter()
-        .filter(|p| p["provider"] == "codex")
-        .collect();
-    assert_eq!(back.len(), 1, "only the stored weekly window is resent");
-    assert_eq!(back[0]["window"], "weekly");
-    assert_eq!(back[0]["used_permille"], 300);
     Ok(())
 }

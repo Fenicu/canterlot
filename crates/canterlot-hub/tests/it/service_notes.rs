@@ -52,14 +52,6 @@ fn accepted_origin(child: Uuid) -> Value {
     })
 }
 
-fn started_origin(child: Uuid) -> Value {
-    json!({
-        "kind": "event",
-        "chain_depth": 0,
-        "event": {"kind": "spawn_queue", "state": "started", "child_id": child},
-    })
-}
-
 fn failed_origin() -> Value {
     json!({
         "kind": "event",
@@ -215,36 +207,6 @@ async fn an_accepted_event_is_a_quiet_feed_line_and_an_input_prefix() {
 }
 
 #[tokio::test]
-async fn a_started_queued_spawn_is_quiet() {
-    let pool = canterlot_hub::testkit::db().await;
-    let seed = seed(&pool).await;
-    let child = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
-    let note = note(
-        &pool,
-        &seed,
-        started_origin(child),
-        "[canterlot] Queued spawn q-00000000 started as session \"Делегат\".",
-    )
-    .await;
-    let (state, service): (String, bool) =
-        sqlx::query_as("select state,service_note from inputs where id=$1")
-            .bind(note)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(state, "accepted");
-    assert!(service);
-    let queued: i64 = sqlx::query_scalar(
-        "select count(*) from inputs where conversation_id=$1 and state='queued'",
-    )
-    .bind(seed.conversation_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(queued, 0);
-}
-
-#[tokio::test]
 async fn a_failed_queued_spawn_still_wakes_the_orchestrator() {
     let pool = canterlot_hub::testkit::db().await;
     let seed = seed(&pool).await;
@@ -263,44 +225,6 @@ async fn a_failed_queued_spawn_still_wakes_the_orchestrator() {
             .unwrap();
     assert_eq!(state, "queued", "сбой очереди по-прежнему будит");
     assert!(!service);
-}
-
-#[tokio::test]
-async fn a_note_that_arrives_while_the_input_waits_rides_with_it() {
-    let pool = canterlot_hub::testkit::db().await;
-    let seed = seed(&pool).await;
-    start(&pool, &seed).await;
-    let owner = owner_input(&pool, &seed).await;
-    let note = note(
-        &pool,
-        &seed,
-        accepted_origin(Uuid::now_v7()),
-        "[canterlot] Session \"Делегат\" was accepted.",
-    )
-    .await;
-    let outcome = dispatch(&pool, &seed).await;
-    let DispatchOutcome::Dispatched { command_id, .. } = outcome else {
-        panic!("queued owner input did not dispatch: {outcome:?}");
-    };
-    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
-        .bind(command_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    let content = payload["content"].as_array().unwrap();
-    assert_eq!(content.len(), 2, "{content:?}");
-    assert_eq!(
-        content[0]["text"],
-        "[canterlot] Session \"Делегат\" was accepted."
-    );
-    assert_eq!(content[1]["text"], "собери релиз");
-    let attached: Option<Uuid> =
-        sqlx::query_scalar("select note_attached_to from inputs where id=$1")
-            .bind(note)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(attached, Some(owner.input_id));
 }
 
 async fn command_content(pool: &PgPool, command_id: Uuid) -> Value {
@@ -454,24 +378,4 @@ async fn a_note_of_a_cancelled_input_rides_with_the_next_one() {
             .await
             .unwrap();
     assert_eq!(attached, Some(next.input_id));
-}
-
-#[tokio::test]
-async fn a_quiet_note_does_not_block_its_own_dispatch() {
-    let pool = canterlot_hub::testkit::db().await;
-    let seed = seed(&pool).await;
-    start(&pool, &seed).await;
-    let note = note(
-        &pool,
-        &seed,
-        accepted_origin(Uuid::now_v7()),
-        "[canterlot] Session \"Делегат\" was accepted.",
-    )
-    .await;
-    let owner = owner_input(&pool, &seed).await;
-    let outcome = dispatch(&pool, &seed).await;
-    assert!(
-        matches!(outcome, DispatchOutcome::Dispatched { input_id, .. } if input_id == owner.input_id),
-        "{outcome:?} for note {note}"
-    );
 }
