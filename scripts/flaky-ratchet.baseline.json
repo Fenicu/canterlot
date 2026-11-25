@@ -1,5 +1,12 @@
 {
-  "allowances": {},
+  "allowances": {
+    "crates/canterlot-worker/tests/it/carrier.rs": {
+      "rust_clock": {
+        "count": 1,
+        "reason": "зазоры запросов токена против паузы: монотонные часы, порог вдвое ниже минимума, нагрузка зазоры только растягивает"
+      }
+    }
+  },
   "counts": {
     "crates/canterlot-hub/src/http/preview.rs": {
       "rust_sleep": 1
@@ -244,6 +251,9 @@
     },
     "crates/canterlot-worker/tests/it/canterlot_mcp_presets.rs": {
       "rust_sleep": 1
+    },
+    "crates/canterlot-worker/tests/it/carrier.rs": {
+      "rust_clock": 1
     },
     "crates/canterlot-worker/tests/it/claude_code_containment.rs": {
       "rust_sleep": 2

@@ -957,6 +957,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_token_pause_grows_to_the_max_and_a_steady_worker_resets_it() {
+        let timings = Timings {
+            token_retry_min: Duration::from_secs(2),
+            token_retry_max: Duration::from_secs(4),
+            ..Timings::default()
+        };
+        let mut gate = TokenGate::new(&timings);
+        assert!(gate.allows());
+        gate.requested();
+        assert!(!gate.allows());
+        assert_eq!(gate.interval, Duration::from_secs(4));
+        gate.requested();
+        assert_eq!(gate.interval, Duration::from_secs(4));
+        assert!(!gate.allows());
+        gate.steady();
+        assert!(gate.allows());
+        assert_eq!(gate.interval, Duration::from_secs(2));
+    }
+
+    #[test]
     fn the_output_tail_keeps_the_last_bytes_on_a_character_boundary() {
         let text = "ж".repeat(2000);
         let tail = tail_of(&text, "");
