@@ -25,7 +25,7 @@ function decls(path: string, selector: string, prop: string): { base: string[]; 
   return out;
 }
 
-const scaled = tokens.match(/@media \(min-width: 118rem\) and \(min-height: 56rem\) \{\s*:root \{([^{}]*)\}/g)!.at(-1)!;
+const scaled = tokens.match(/@media \(min-width: 118rem\) and \(min-height: 56rem\), \(min-width: 62rem\) and \(min-height: 112rem\) \{\s*:root \{([^{}]*)\}/g)!.at(-1)!;
 
 describe('dense rows for a mouse', () => {
   it('row_tokens_scale_with_the_ui', () => {
