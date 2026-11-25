@@ -22,7 +22,7 @@
     onpick
   }: {
     open: boolean;
-    now: number;
+    now: () => number;
     blocked?: boolean;
     panelId: string;
     onclose: () => void;
@@ -30,7 +30,9 @@
   } = $props();
 
   const touch = isTouchPrimary();
-  const options = $derived(presets(now));
+  // Время берётся заново при каждом открытии: окно живёт в документе между открытиями, а чат стоит открытым часами.
+  let base = $state(0);
+  const options = $derived(presets(base));
   let selected = $state(0);
   let date = $state('');
   let time = $state('');
@@ -69,7 +71,9 @@
       openedAt = performance.now();
       opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       selected = 0;
-      sync(presets(now)[0]?.at ?? now);
+      const at = now();
+      base = at;
+      sync(presets(at)[0]?.at ?? at);
     }
     if (!open) armed = false;
   });
@@ -132,7 +136,7 @@
     <Field label="Дата">{#snippet children({ id })}<input {id} type="date" bind:value={date} oninput={editFields} />{/snippet}</Field>
     <Field label="Время">{#snippet children({ id })}<input {id} type="time" bind:value={time} oninput={editFields} />{/snippet}</Field>
   </div>
-  <p class="zone">{zoneLine(now)}</p>
+  <p class="zone">{zoneLine(base)}</p>
   {#if blocked}
     <Button variant="primary" full disabled reason="Станет доступно, когда загрузятся файлы" onclick={confirm}>
       Запланировать на {clockLabel}

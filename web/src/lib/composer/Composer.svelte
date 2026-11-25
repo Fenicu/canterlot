@@ -101,7 +101,7 @@
   let snippetsOpen = $state(false);
   let SnippetsSheet = $state<Component<{ open: boolean; projectKey: string; text: string; onclose: () => void; oninsert: (body: string) => void }> | null>(null);
   // Окно «Отправить позже» открывают нечасто: чанк едет только вместе с ним.
-  let SendLater = $state<Component<{ open: boolean; now: number; blocked?: boolean; panelId: string; onclose: () => void; onpick: (at: number) => void }> | null>(null);
+  let SendLater = $state<Component<{ open: boolean; now: () => number; blocked?: boolean; panelId: string; onclose: () => void; onpick: (at: number) => void }> | null>(null);
 
   $effect(() => {
     if (later && !SendLater) import('#lib/composer/SendLater.svelte').then((m) => { SendLater = m.default; });
@@ -812,7 +812,7 @@
   {#if SendLater}
     <SendLater
       open={later}
-      now={clock.serverNow()}
+      now={() => clock.serverNow()}
       blocked={uploadsPending}
       panelId={laterId}
       onclose={() => (later = false)}
