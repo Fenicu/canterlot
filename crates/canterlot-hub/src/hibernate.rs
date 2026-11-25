@@ -171,7 +171,8 @@ async fn candidates(pool: &PgPool) -> Result<Vec<Candidate>, sqlx::Error> {
            and not exists(select 1 from plan_tasks p where p.executor_conversation_id=c.id
                           and p.state='in_progress')
            and not exists(select 1 from inputs i where i.conversation_id=c.id
-                          and i.state in ('queued','dispatched','on_machine','transmitting'))
+                          and i.state in ('queued','dispatched','on_machine','transmitting',
+                                          'acceptance_unconfirmed'))
            and not exists(select 1 from requests r where r.conversation_id=c.id
                           and r.state='open')
            and not exists(select 1 from secret_requests sr where sr.conversation_id=c.id
@@ -180,7 +181,8 @@ async fn candidates(pool: &PgPool) -> Result<Vec<Candidate>, sqlx::Error> {
                           and (q.run_slot<>'free'
                                or jsonb_array_length(q.hold_reasons)>0
                                or q.pause_reasons @> '[{"reason":"limit_reached"}]'::jsonb
-                               or q.pause_reasons @> '[{"reason":"session_stuck"}]'::jsonb))"#,
+                               or q.pause_reasons @> '[{"reason":"session_stuck"}]'::jsonb
+                               or q.pause_reasons @> '[{"reason":"unconfirmed_delivery"}]'::jsonb))"#,
     )
     .bind(DEFAULT_IDLE_MINUTES)
     .fetch_all(pool)
@@ -254,7 +256,15 @@ pub async fn hibernate_in_tx(
     // Проекция активности отстаёт от очереди: ввод успевает дойти до агента раньше, чем
     // проектор пересчитает сессию, и `idle` с давней отметкой ещё стоит. Поэтому идущий
     // ход проверяется по первичным данным — слоту очереди и фазе исполнения.
+    //
+    // Неопределённый исход передачи (`AcceptanceUndetermined`) освобождает слот, хотя CLI
+    // мог ввод получить и работать; до прояснения исхода сессию не усыпляем.
     if queue.slot()? != RunSlot::Free
+        || queue
+            .pause_reasons
+            .0
+            .iter()
+            .any(|reason| matches!(reason, PauseReason::UnconfirmedDelivery { .. }))
         || executions::turn_in_progress(&mut *conn, conversation_id).await?
     {
         return Ok(false);
@@ -265,7 +275,8 @@ pub async fn hibernate_in_tx(
             and coalesce((d.activity_evidence->>'process_alive')::bool,false)=true
             and coalesce((d.activity_evidence->>'background_work')::int,0)=0
             and not exists(select 1 from inputs i where i.conversation_id=d.conversation_id
-                           and i.state in ('queued','dispatched','on_machine','transmitting'))
+                           and i.state in ('queued','dispatched','on_machine','transmitting',
+                                           'acceptance_unconfirmed'))
             and not exists(select 1 from requests r where r.conversation_id=d.conversation_id
                            and r.state='open')
             and not exists(select 1 from secret_requests sr where sr.conversation_id=d.conversation_id

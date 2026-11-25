@@ -473,6 +473,53 @@ async fn running_turn_blocks_despite_a_stale_idle_projection() -> TestResult {
     Ok(())
 }
 
+/// Исход передачи не определён: слот освобождён паузой `unconfirmed_delivery`, а CLI мог
+/// ввод получить и работать. Ни обход, ни перепроверка под замком очереди такую сессию
+/// не усыпляют, пока исход не прояснился.
+#[tokio::test]
+async fn undetermined_acceptance_blocks_hibernation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let (seed, run) = setup(&pool).await;
+    owner_input(&pool, seed.conversation_id, "работай").await?;
+    let input = dispatch_with_receipts(
+        &pool,
+        &seed,
+        vec![
+            InputReceipt::Stored,
+            InputReceipt::TransmissionStarted,
+            InputReceipt::AcceptanceUndetermined,
+        ],
+    )
+    .await?;
+    assert_eq!(
+        slot_and_state(&pool, &seed, input).await,
+        ("free".to_owned(), "acceptance_unconfirmed".to_owned())
+    );
+    assert_eq!(hibernate::sweep(&pool, &Presence::default()).await?, 0);
+    let mut conn = pool.acquire().await?;
+    assert!(
+        !hibernate::hibernate_in_tx(&mut conn, seed.conversation_id).await?,
+        "the recheck under the queue lock refuses too"
+    );
+    drop(conn);
+    // Пауза держит и без строки ввода в этом состоянии.
+    sqlx::query("update inputs set state='rejected' where id=$1")
+        .bind(input)
+        .execute(&pool)
+        .await?;
+    let mut conn = pool.acquire().await?;
+    assert!(!hibernate::hibernate_in_tx(&mut conn, seed.conversation_id).await?);
+    drop(conn);
+    assert!(stop_command(&pool, seed.conversation_id).await.is_none());
+    let requested: bool =
+        sqlx::query_scalar("select hibernate_requested from executions where id=$1")
+            .bind(run.execution_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(!requested);
+    Ok(())
+}
+
 /// Ход без ввода (агент проснулся сам): слот свободен, но фаза исполнения рабочая.
 #[tokio::test]
 async fn self_started_turn_blocks_despite_a_stale_idle_projection() -> TestResult {
