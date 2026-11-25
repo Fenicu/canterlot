@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick, type Snippet } from 'svelte';
+  import { onMount, onDestroy, tick, untrack, type Snippet } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import IconButton from './IconButton.svelte';
   import { leave } from './exit';
+  import { dropLayer, isTopLayer, pushLayer } from './layers';
   // `marker` — приглушённая пометка в строке заголовка: заголовок тогда держится одной строкой и режется многоточием.
   // `feed` — лист с лентой чата: фон ленты, тело без своей прокрутки и отступов, прокручивает сама лента.
   let { open, title, subtitle, marker, feed = false, routeKey, onclose, onrevive, actions, children }: { open: boolean; title: string; subtitle?: string; marker?: string; feed?: boolean; routeKey?: string; onclose: () => void; onrevive?: () => void; actions?: Snippet; children: Snippet } = $props();
@@ -12,11 +13,11 @@
   let heading: HTMLHeadingElement | undefined;
   let mounted = $state(false);
   let opener: HTMLElement | null = null;
-  let shell: HTMLElement | null = null;
-  let previousInert = false;
+  let layer: object | null = null;
   let entry = $state(false);
   function restore() {
-    if (shell) shell.inert = previousInert;
+    dropLayer(layer);
+    layer = null;
     opener?.focus({ preventScroll: true });
   }
   /** Закрытый лист ещё доигрывает уход: скрыт для чтения с экрана и ничего не принимает. */
@@ -75,8 +76,6 @@
   onDestroy(() => { if (dialog?.open) restore(); });
   function show() {
     opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    shell = document.getElementById('app-shell');
-    previousInert = shell?.inert ?? false;
 
     if (routeKey && page.state.sheet !== routeKey) {
       // eslint-disable-next-line svelte/no-navigation-without-resolve
@@ -90,7 +89,7 @@
     // Сам showModal ставит фокус на «Закрыть», и без указателя на нём загорается кольцо.
     // Заголовок принимает фокус тихо, а Tab ведёт дальше по листу.
     heading?.focus({ preventScroll: true });
-    if (shell) shell.inert = true;
+    layer = pushLayer();
   }
   // Хозяин вернул лист, пока тот уходил: Svelte оживил тот же экземпляр со всем его состоянием, а `open` мог не
   // меняться, и эффект ниже молчит. `onrevive` даёт обёртке сбросить своё «закрыто» (см. `ConfirmDialog`).
@@ -105,7 +104,9 @@
     if (open && !dialog.open) show();
     else if (!open && dialog.open) close();
   });
-  $effect(() => { if (mounted && entry && routeKey && page.state.sheet !== routeKey) close(); });
+  // Шаг назад снял запись листа: лист закрывается. Запись слоя, открытого поверх, тоже меняет состояние страницы,
+  // но это шаг вперёд: накрытый лист остаётся под ним, как лист без своего ключа.
+  $effect(() => { if (mounted && entry && routeKey && page.state.sheet !== routeKey && untrack(() => isTopLayer(layer))) close(); });
 </script>
 <dialog bind:this={dialog} class:feed-sheet={feed} aria-labelledby={id} aria-modal="true" out:leave|global={{ before: leaving, revive }} onkeydown={keydown} onpointerdown={(event) => { pressedBackdrop = overBackdrop(event); }} onclick={backdropClick} oncancel={(event) => { event.preventDefault(); close(); }}>
   <div class="handle" aria-hidden="true"></div>

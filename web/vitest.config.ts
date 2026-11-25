@@ -16,7 +16,10 @@ export default defineConfig({
       $lib: new URL('./src/lib', import.meta.url).pathname,
       '#lib': new URL('./src/lib', import.meta.url).pathname,
       // Карточки ленты строят ссылки через `resolve`; в юнит-тестах приложение живёт в корне.
-      '$app/paths': new URL('./tests/unit/stubs/app-paths.ts', import.meta.url).pathname
+      '$app/paths': new URL('./tests/unit/stubs/app-paths.ts', import.meta.url).pathname,
+      // Листы кладут запись в историю и читают состояние страницы; роутера в юнит-тестах нет.
+      '$app/state': new URL('./tests/unit/stubs/app-state.svelte.ts', import.meta.url).pathname,
+      '$app/navigation': new URL('./tests/unit/stubs/app-navigation.ts', import.meta.url).pathname
     }
   },
   test: {

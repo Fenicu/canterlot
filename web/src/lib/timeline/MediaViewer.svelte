@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import Icon from '#lib/ui/Icon.svelte';
+  import { dropLayer, pushLayer } from '#lib/ui/layers.js';
   import { durationMs, fadeMs } from '#lib/motion.js';
   import { declaredSize, downloadName, isVideoShot, shotCaption, shotPreviewSrc, shotSrc, videoPlayable, type ViewerShot } from '#lib/viewer/shots.js';
   import { Gallery, galleryId, galleryPosition, mergeGalleryShots, type GalleryAnchor, type GalleryItem } from '#lib/viewer/gallery.js';
@@ -116,8 +117,7 @@
   let swipeX = 0;
   let drag: Point = { x: 0, y: 0 };
   let opener: HTMLElement | null = null;
-  let shell: HTMLElement | null = null;
-  let previousInert = false;
+  let layer: object | null = null;
   let entry = $state(false);
   let closing = false;
   let settleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -433,7 +433,7 @@
     clearTimeout(tapTimer);
     await leave();
     if (dialog.open) dialog.close();
-    if (shell) shell.inert = previousInert;
+    dropLayer(layer);
     restoreFocus();
     if (!fromHistory && entry && page.state.sheet === ROUTE_KEY) history.back();
     entry = false;
@@ -743,8 +743,6 @@
 
   onMount(() => {
     opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : thumbOf(shot)?.closest('button, a') ?? null;
-    shell = document.getElementById('app-shell');
-    previousInert = shell?.inert ?? false;
     collectPreviews();
     if (gallery) {
       untrack(() => {
@@ -758,7 +756,7 @@
     }
     dialog.showModal();
     stage.focus({ preventScroll: true });
-    if (shell) shell.inert = true;
+    layer = pushLayer();
     measure();
     refit();
     paintNow();
@@ -795,8 +793,8 @@
     if (frame) cancelAnimationFrame(frame);
     if (dialog?.open) {
       dialog.close();
-      if (shell) shell.inert = previousInert;
     }
+    dropLayer(layer);
   });
 </script>
 
