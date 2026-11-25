@@ -48,7 +48,7 @@ fn fixture_lines() -> Vec<serde_json::Value> {
 }
 
 fn fake_version_script(dir: &TempDir, output: &str) -> PathBuf {
-    let script = dir.path().join("codex");
+    let script = dir.path().join(format!("codex-{}", Uuid::now_v7()));
     fake_exec::write_executable(&script, format!("#!/bin/sh\necho \"{output}\"\n"), 0o755);
     script
 }
