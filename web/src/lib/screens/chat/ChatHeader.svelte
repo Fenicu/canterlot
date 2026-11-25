@@ -369,10 +369,10 @@
 			>
 				<Icon name="list" />
 			</button>
-			{#if pane.lane && delegated}
+			{#if pane.desktop && delegated}
 				<button type="button" class="pane-action" aria-pressed={pane.shown === 'delegation'} onclick={() => pane.toggleDelegation()}>{running > 0 ? `Делегирование · ${running}` : 'Делегирование'}</button>
 			{/if}
-			{#if !pane.lane && delegated && onOpenDelegation}
+			{#if !pane.desktop && delegated && onOpenDelegation}
 				<button
 					type="button"
 					class="icon-button delegation-btn"

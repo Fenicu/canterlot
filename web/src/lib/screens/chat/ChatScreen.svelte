@@ -116,6 +116,7 @@
 	let infoRunId = $state<string | null>(null);
 	// Редкие панели не входят в маршрут чата: подгружаются, когда их открывают.
 	let TodoPanel = $state<Component<{ chat: ChatStore; lane?: string | null }> | null>(null);
+	let DockPanel = $state<Component<{ chat: ChatStore; stacked?: boolean; dock?: boolean; onclose?: () => void }> | null>(null);
 	let SessionSettings = $state<Component<{ chat: ChatStore; machine?: MachineRecord | null; desktop?: boolean; onclose?: () => void }> | null>(null);
 	let Diagnostics = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
 	let InfoSheet = $state<Component<{ chat: ChatStore; runId: string; onclose: () => void }> | null>(null);
@@ -157,6 +158,9 @@
 		if (showGoal && !GoalSheet) import('./GoalSheet.svelte').then((m) => { GoalSheet = m.default; });
 		if (showSide && !SideChat) import('./SideChat.svelte').then((m) => { SideChat = m.default; });
 	});
+	$effect(() => {
+		if (pane.docked && !DockPanel) import('./DelegationPanel.svelte').then((m) => { DockPanel = m.default; });
+	});
 	// Список задач показывается не в каждом ходу: панель догружается вместе с ним.
 	$effect(() => {
 		if (todos && todos.items.length > 0 && !TodoPanel) import('./TodoPanel.svelte').then((m) => { TodoPanel = m.default; });
@@ -171,7 +175,7 @@
 	$effect.pre(() => pane.forChat(chat.id));
 	function openPlan(): void {
 		pane.openPlan();
-		if (pane.lane) pane.open('delegation');
+		if (pane.desktop) pane.open('delegation');
 		else showDelegation = true;
 	}
 	const parentTitle = $derived.by(() => {
@@ -376,8 +380,15 @@
 
 	<SpawnQueueStrip {chat} />
 
-	<!-- Пока план стоит в панели стола, полоса плана из колонки уходит. -->
-	{#if hasPlan && !pane.planDocked}<PlanStrip orchestratorId={chat.id} onopen={openPlan} />{/if}
+	<!-- Пока план стоит в панели стола, полоса плана из колонки уходит. Стоя панель встаёт на её место:
+	     высота задана заранее, поэтому догрузка содержимого не сдвигает ленту. -->
+	{#if pane.docked}
+		<div class="lane-dock" data-role="lane-dock">
+			<div class="dock-surface">
+				{#if DockPanel}<DockPanel {chat} stacked dock onclose={() => pane.closeDelegation()} />{/if}
+			</div>
+		</div>
+	{:else if hasPlan && !pane.planDocked}<PlanStrip orchestratorId={chat.id} onopen={openPlan} />{/if}
 
 	<PendingStrip {chat} />
 
@@ -439,7 +450,7 @@
 		/>
 	{/if}
 
-	{#if showDelegation && !pane.lane}
+	{#if showDelegation && !pane.desktop}
 		<DelegationSheet {chat} onclose={() => (showDelegation = false)} />
 	{/if}
 
@@ -537,6 +548,26 @@
 	/* Открытый запрос важнее ленты: на сжатой клавиатурой высоте место отдаётся карточке. */
 	.screen:has(> .request-cards-slot) > :global(.feed-wrap) {
 		min-height: 0;
+	}
+
+	/* Нижняя панель стола стоя: треть колонки чата со своей прокруткой, лента над ней сжимается. */
+	.lane-dock {
+		flex: 0 0 var(--dock-height);
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		padding: var(--s2) var(--gutter) var(--s0);
+		box-sizing: border-box;
+	}
+
+	.dock-surface {
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+		border-radius: var(--radius-card);
+		background: var(--bg);
 	}
 
 	.waiting-notice {

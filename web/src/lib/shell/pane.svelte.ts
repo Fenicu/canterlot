@@ -13,15 +13,20 @@ export const LANE_CLOSED_KEY = 'canterlot.lane';
 export interface LaneAutoInput {
 	mode: LayoutMode;
 	width: number;
+	/** Стол стоя: план и делегаты в нижней панели колонки чата, порога ширины нет. */
+	dock?: boolean;
 	/** У открытой сессии есть план или делегаты: шапка показывает «Делегирование». */
 	delegated: boolean;
 	/** Панель закрыли на этом устройстве. */
 	closed: boolean;
 }
 
-/** Панель плана и делегатов открывается сама на столе от порога ширины, если есть что показать и её не закрывали. */
-export function laneAutoOpen({ mode, width, delegated, closed }: LaneAutoInput): boolean {
-	return mode === 'desktop' && laneRoom(width) && delegated && !closed;
+/**
+ * Панель плана и делегатов открывается сама на столе от порога ширины и на столе стоя,
+ * если есть что показать и её не закрывали.
+ */
+export function laneAutoOpen({ mode, width, dock = false, delegated, closed }: LaneAutoInput): boolean {
+	return mode === 'desktop' && (dock || laneRoom(width)) && delegated && !closed;
 }
 
 function deviceStorage(): Storage | null {
@@ -37,7 +42,7 @@ export class Pane {
 	/** Панель, открытая явно. Пока её нет, на широком окне стоит панель плана и делегатов. */
 	view = $state<PaneView | null>(null);
 	mode = $state<LayoutMode>('phone');
-	/** Стол стоя (`dockForm`): правой панели нет. */
+	/** Стол стоя (`dockForm`): правой панели нет, план и делегаты стоят внизу колонки чата. */
 	dock = $state(false);
 	/** Ширина окна в CSS-пикселях: от неё зависит, открывается ли панель сама. */
 	width = $state(0);
@@ -67,23 +72,32 @@ export class Pane {
 		return this.desktop && !this.dock;
 	}
 
-	/** Стол от порога ширины: панель делегирования показывает план и дерево стопкой. */
+	/** Стол от порога ширины и стол стоя: панель делегирования показывает план и дерево стопкой. */
 	get stacked(): boolean {
-		return this.lane && laneRoom(this.width);
+		return this.desktop && (this.dock || laneRoom(this.width));
 	}
 
 	get auto(): boolean {
-		return !this.dock && laneAutoOpen({ mode: this.mode, width: this.width, delegated: this.delegated, closed: this.closed });
+		return laneAutoOpen({ mode: this.mode, width: this.width, dock: this.dock, delegated: this.delegated, closed: this.closed });
 	}
 
-	/** Панель, которую рисует оболочка: явно открытая или открытая сама. */
+	/**
+	 * Панель, которую рисует оболочка: явно открытая или открытая сама. Стоя есть только план и делегаты:
+	 * открытая боком другая панель ждёт поворота обратно, а нижняя панель живёт по своему правилу.
+	 */
 	get shown(): PaneView | null {
+		if (this.dock) return this.view === 'delegation' || this.auto ? 'delegation' : null;
 		return this.view ?? (this.auto ? 'delegation' : null);
 	}
 
 	/** План стоит в панели: полоса плана уходит из колонки чата. */
 	get planDocked(): boolean {
 		return this.stacked && this.shown === 'delegation';
+	}
+
+	/** Стол стоя с открытой панелью: план и делегаты между лентой и полем ввода. */
+	get docked(): boolean {
+		return this.dock && this.shown === 'delegation';
 	}
 
 	toggle(view: PaneView): void {
@@ -106,7 +120,7 @@ export class Pane {
 		this.view = null;
 	}
 
-	/** Крестик или кнопка шапки: на широком окне закрытие запоминается на этом устройстве. */
+	/** Крестик или кнопка шапки: на широком окне и стоя закрытие запоминается на этом устройстве, одна память на обе формы. */
 	closeDelegation(): void {
 		if (this.stacked) this.#remember(true);
 		this.view = null;
