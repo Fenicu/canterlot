@@ -407,6 +407,7 @@ in_array() {
 prev=""
 prev_started=""
 declare -a done_ids=() prev_flaky=() prev_rust=() prev_deploy=() to_rerun=()
+declare -A flaky_pass=()
 if ((rerun)); then
     prev="$log_dir/state.tsv"
     [[ -f "$prev" ]] || die "нет состояния предыдущего завершённого прогона для --rerun-failed на коммите $short"
@@ -419,6 +420,11 @@ if ((rerun)); then
     [[ "$(state_value "$prev" seams)" == 1 ]] && seams_active=1
     mapfile -t done_ids < <(state_values "$prev" rerun_done)
     mapfile -t prev_flaky < <(state_values "$prev" flaky)
+    # Третье поле строки flaky — проход, в котором тест упал (pass-<n>); в состоянии,
+    # записанном до появления логов проходов, его нет.
+    while IFS=$'\t' read -r id pass_name; do
+        [[ -z "$id" || -z "${pass_name:-}" ]] || flaky_pass["$id"]=$pass_name
+    done < <(awk -F '\t' '$1=="flaky"{print $2 "\t" $3}' "$prev")
     mapfile -t prev_rust < <(state_values "$prev" rust_fail)
     mapfile -t prev_deploy < <(state_values "$prev" deploy_fail)
     npm_status=$(state_value "$prev" npm_ci_exit); npm_s=$(state_value "$prev" npm_ci_duration_s)
@@ -463,6 +469,25 @@ if ((rerun)); then
         fi
     done
 fi
+
+# --- логи предыдущего прохода ----------------------------------------------------
+# Следующий проход пишет в те же файлы. Пока он ничего не записал, копия логов шагов,
+# result.txt, failures.txt и state.tsv предыдущего прохода уходит в pass-<n>/ (n = 1, 2, ...).
+# Копия, а не перенос: шаг, который проход пропускает, оставляет свой лог на верхнем уровне
+# (из него собирается result.txt), а читатели вроде release.sh и аттестации смотрят только
+# на верхний уровень, где всегда лежит последний проход.
+prev_pass=""
+archive_previous_pass() {
+    local n=1 f
+    while [[ -e "$log_dir/pass-$n" ]]; do n=$((n + 1)); done
+    for f in npm-ci.log check.log deploy.log web.log result.txt failures.txt state.tsv deploy; do
+        [[ -e "$log_dir/$f" ]] || continue
+        [[ -n "$prev_pass" ]] || { prev_pass=pass-$n; mkdir -p "$log_dir/$prev_pass"; }
+        cp -a "$log_dir/$f" "$log_dir/$prev_pass/$f"
+    done
+    rm -f "$log_dir/failures.txt"
+}
+archive_previous_pass
 
 # Точный фильтр nextest: binary_id(=<id>) & test(=<name>) для каждой идентичности.
 nextest_quote() {
@@ -528,19 +553,49 @@ run_gate_step() {
 # Идентичности канонические: rust|binary|test и deploy|suite. Те же строки идут
 # в состояние и в flaky= аттестации при перезапуске.
 rust_failures() {
-    [[ -f "$junit" ]] || return 0
-    python3 - "$junit" <<'PY'
+    # Упавшие тесты берутся из JUnit и из check.log. Одного JUnit мало: check.sh --all после
+    # воркспейса гоняет canterlot-speech с тем же профилем, и тот перезаписывает junit.xml
+    # (упавшие тесты воркспейса тогда видны только в логе).
+    python3 -I - "$junit" "$log_dir/check.log" <<'PY'
+import os
+import re
 import sys
 import xml.etree.ElementTree as ET
-try:
-    root = ET.parse(sys.argv[1]).getroot()
-except Exception:
-    sys.exit(0)
-for suite in root.iter('testsuite'):
-    binary = suite.get('name', '')
-    for case in suite.iter('testcase'):
-        if any(child.tag in ('failure', 'error') for child in case):
-            print(f"rust|{binary}|{case.get('name', '')}")
+
+junit, log = sys.argv[1:3]
+seen = []
+
+
+def add(ident):
+    if ident not in seen:
+        seen.append(ident)
+
+
+if os.path.isfile(junit):
+    try:
+        root = ET.parse(junit).getroot()
+    except Exception:
+        root = None
+    if root is not None:
+        for suite in root.iter('testsuite'):
+            binary = suite.get('name', '')
+            for case in suite.iter('testcase'):
+                if any(child.tag in ('failure', 'error') for child in case):
+                    add(f"rust|{binary}|{case.get('name', '')}")
+
+# Строка итога nextest: «FAIL [   0.028s] (4385/5330) <binary id> <тест>». TRY n — попытка
+# с повтором, это не итог.
+final = re.compile(
+    r'^\s+(?:FAIL|LEAK-FAIL|TIMEOUT|EXEC-FAIL|ABORT|SIG[A-Z0-9]+) \[\s*[\d.]+s\]\s+'
+    r'(?:\(\s*\d+/\s*\d+\)\s+)?(\S+) (\S.*?)\s*$')
+if os.path.isfile(log):
+    with open(log, errors='replace') as fh:
+        for line in fh:
+            m = final.match(line.rstrip('\n'))
+            if m:
+                add(f"rust|{m.group(1)}|{m.group(2)}")
+for ident in seen:
+    print(ident)
 PY
 }
 
@@ -554,6 +609,112 @@ deploy_failures() {
         name=${f##*/}
         printf 'deploy|%s\n' "${name%.rc}"
     done
+}
+
+# --- причины падений ------------------------------------------------------------
+# failure_reasons <check.log> <каталог deploy> <тестов не больше> <строк на тест> <id>...
+# Для каждого теста печатает «FAIL <binary> <тест>» и строки паники из его вывода в check.log
+# (блок `--- STDERR:` / `--- STDOUT:` важнее встроенного вывода под строкой FAIL; при отсутствии
+# паники — первые строки вывода). Набор выката берёт строки FAIL из deploy/<набор>.log.
+failure_reasons() {
+    python3 -I - "$@" <<'PY'
+import os
+import re
+import sys
+
+log, deploy_dir, max_tests, max_lines = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+ids = sys.argv[5:]
+lines = []
+if os.path.isfile(log):
+    with open(log, errors='replace') as fh:
+        lines = [x.rstrip('\n') for x in fh]
+
+# Граница вывода: строка статуса nextest («FAIL [ 0.028s] (1/2) bin test», «Summary [ 1s] ...»),
+# заголовок итогового блока или линейка.
+status = re.compile(r'^\s*(?:TRY \d+ )?[A-Z][A-Za-z-]*(?: \d+(?:/\d+)?)? \[\s*[\d.]+s\]\s*(?:\(\s*\d+/\s*\d+\)\s*)?(.*)$')
+block = re.compile(r'^--- (STDOUT|STDERR):\s+(.*?)\s+---\s*$')
+rule = re.compile(r'^\s*-{8,}\s*$')
+
+sections = []  # (ключ «binary тест», итоговый ли блок, строки)
+cur = None
+for line in lines:
+    m_status, m_block = status.match(line), block.match(line)
+    if m_status or m_block or rule.match(line):
+        cur = None
+        if m_block:
+            cur = (' '.join(m_block.group(2).split()), True, [])
+        elif m_status and not re.match(r'^\s*(?:TRY \d+ )?(?:PASS|SKIP|Summary|SLOW|FLAKY|Starting|LEAK)\b', line):
+            cur = (' '.join(m_status.group(1).split()), False, [])
+        if cur:
+            sections.append(cur)
+    elif cur is not None:
+        cur[2].append(line)
+
+
+def panic_lines(body):
+    out, grab = [], False
+    for line in body:
+        text = line.strip()
+        if 'panicked at' in line:
+            grab = True
+        elif not text or text.startswith(('note:', 'stack backtrace')):
+            grab = False
+        if grab:
+            out.append(line)
+    return out
+
+
+def reasons(key):
+    mine = [sec for sec in sections if sec[0] == key]
+    for want_block in (True, False):
+        picked = []
+        for sec in mine:
+            if sec[1] == want_block:
+                for line in panic_lines(sec[2]):
+                    if line.strip() and line not in picked:
+                        picked.append(line)
+        if picked:
+            return picked
+    for sec in mine:
+        body = [x for x in sec[2] if x.strip()]
+        if body:
+            return body
+    return None
+
+
+def dedent(body):
+    pad = min(len(x) - len(x.lstrip()) for x in body)
+    return [x[pad:] for x in body]
+
+
+def emit(title, body):
+    print(f'  {title}')
+    if not body:
+        print('    (вывода этого теста в логе нет)')
+        return
+    body = dedent(body)
+    for line in body[:max_lines]:
+        print(f'    {line}')
+    if len(body) > max_lines:
+        print(f'    ... ещё строк: {len(body) - max_lines}')
+
+
+for ident in ids[:max_tests]:
+    kind, _, rest = ident.partition('|')
+    if kind == 'deploy':
+        path = os.path.join(deploy_dir, rest + '.log')
+        body = []
+        if os.path.isfile(path):
+            with open(path, errors='replace') as fh:
+                text = [x.rstrip('\n') for x in fh if x.strip()]
+            body = [x for x in text if x.startswith('FAIL')] or text[-max_lines:]
+        emit(f'FAIL набор выката {rest}', body)
+    else:
+        binary, _, name = rest.partition('|')
+        emit(f'FAIL {binary} {name}', reasons(f'{binary} {name}'))
+if len(ids) > max_tests:
+    print(f'  ... и ещё {len(ids) - max_tests} упавших тестов (см. {log})')
+PY
 }
 
 # --- состояние прогона ---------------------------------------------------------
@@ -593,6 +754,8 @@ if [[ "$check_action" != skip ]]; then
     printf '\n==> scripts/check.sh --all --no-web (%s)\n' "$check_action"
     s=$SECONDS
     check_status=0
+    # Чужой отчёт прежнего прогона не должен сойти за отчёт этого (например, если упал fmt).
+    rm -f "$junit"
     run_gate_step check "$step_check" "$check_action" "$check_sel" >"$log_dir/check.log" 2>&1 || check_status=$?
     check_s=$((SECONDS - s))
     printf '    check.sh --all --no-web: %ds, код %s\n' "$check_s" "$check_status"
@@ -668,12 +831,14 @@ state_add web_duration_s "$web_s"
 state_add web_failed "$(step_failure_kind "$web_status")"
 for id in "${done_ids[@]}" "${to_rerun[@]}"; do state_add rerun_done "$id"; done
 for id in "${prev_flaky[@]}"; do
-    state_add flaky "$id"
+    state_add flaky "$id${flaky_pass[$id]:+$'\t'${flaky_pass[$id]}}"
     in_array "$id" "${flaky_ids[@]}" || flaky_ids+=("$id")
 done
 for id in "${to_rerun[@]}"; do
     if in_array "$id" "${all_failures[@]}"; then continue; fi
-    state_add flaky "$id"
+    # Тест упал в предыдущем проходе, чьи логи только что ушли в $prev_pass.
+    [[ -n "${flaky_pass[$id]:-}" || -z "$prev_pass" ]] || flaky_pass["$id"]=$prev_pass
+    state_add flaky "$id${flaky_pass[$id]:+$'\t'${flaky_pass[$id]}}"
     in_array "$id" "${flaky_ids[@]}" || flaky_ids+=("$id")
 done
 write_state
@@ -691,6 +856,12 @@ mapfile -t failed_rust < <(grep -E '^ +FAIL \[' "$log_dir/check.log" | head || t
     true
 } >"$log_dir/result.txt"
 cat "$log_dir/result.txt"
+if ((${#all_failures[@]})); then
+    {
+        printf '\n==> причины падений (%s)\n' "$log_dir/check.log"
+        failure_reasons "$log_dir/check.log" "$log_dir/deploy" 5 12 "${all_failures[@]}"
+    } | tee "$log_dir/failures.txt"
+fi
 total_s=$((SECONDS - started))
 printf 'гейт %s за %ds\n' "$short" "$total_s"
 
@@ -703,7 +874,15 @@ fi
 if ((rerun)); then
     printf '\n==> отчёт о нестабильных тестах\n'
     if ((${#flaky_ids[@]})); then
-        printf '  %s\n' "${flaky_ids[@]}"
+        for id in "${flaky_ids[@]}"; do
+            printf '  %s\n' "$id"
+            if [[ -n "${flaky_pass[$id]:-}" ]]; then
+                printf '    лог прохода, где тест упал: %s\n' "$log_dir/${flaky_pass[$id]}/check.log"
+                failure_reasons "$log_dir/${flaky_pass[$id]}/check.log" "$log_dir/${flaky_pass[$id]}/deploy" 1 12 "$id" | tail -n +2
+            else
+                printf '    лог прохода, где тест упал, не записан (состояние старого формата)\n'
+            fi
+        done
     else
         printf '  нет\n'
     fi
