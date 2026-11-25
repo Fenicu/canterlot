@@ -79,7 +79,7 @@ pub(crate) fn decimal(value: &str) -> Result<i64, ApiError> {
     value.parse().map_err(|_| invalid())
 }
 pub(crate) fn history_key(value: &str) -> Result<i64, ApiError> {
-    let digits = value.strip_prefix('-').unwrap_or(value);
+    let digits = value.trim_prefix('-');
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return Err(invalid());
     }

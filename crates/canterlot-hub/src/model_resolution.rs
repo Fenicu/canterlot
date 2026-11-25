@@ -21,7 +21,7 @@ use crate::blocks::ExecutionRef;
 const CLAUDE_FAMILIES: &[&str] = &["opus", "sonnet", "haiku", "fable"];
 
 fn base(model: &str) -> &str {
-    model.strip_suffix("[1m]").unwrap_or(model)
+    model.trim_suffix("[1m]")
 }
 
 /// Пара «просили — получили» правдоподобна. Модель сессии меняется между ходами,

@@ -229,7 +229,7 @@ impl Config {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        name.strip_suffix(".gguf").unwrap_or(&name).to_owned()
+        name.trim_suffix(".gguf").to_owned()
     }
 }
 

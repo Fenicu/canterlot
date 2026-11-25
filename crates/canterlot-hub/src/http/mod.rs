@@ -90,7 +90,7 @@ pub fn etag_matches(headers: &axum::http::HeaderMap, etag: &str) -> bool {
             if tag == "*" {
                 return true;
             }
-            tag.strip_prefix("W/").unwrap_or(tag).trim() == etag
+            tag.trim_prefix("W/").trim() == etag
         })
     })
 }

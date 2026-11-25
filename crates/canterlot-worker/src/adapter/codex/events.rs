@@ -2211,7 +2211,7 @@ fn relative_path<'a>(path: &'a str, workdir: Option<&Path>) -> &'a str {
     match workdir {
         Some(root) => path
             .strip_prefix(root.to_string_lossy().as_ref())
-            .map(|rest| rest.strip_prefix('/').unwrap_or(rest))
+            .map(|rest| rest.trim_prefix('/'))
             .unwrap_or(path),
         None => path,
     }

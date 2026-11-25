@@ -85,7 +85,7 @@ impl Parser {
     }
 
     fn finish_line(&mut self, line: &[u8], out: &mut Vec<Frame>) {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let line = line.trim_suffix(b"\r");
         if line.is_empty() {
             if self.oversized {
                 out.push(Frame::Oversized);
@@ -99,7 +99,7 @@ impl Parser {
         let Some(value) = line.strip_prefix(b"data:") else {
             return;
         };
-        let value = value.strip_prefix(b" ").unwrap_or(value);
+        let value = value.trim_prefix(b" ");
         if self.oversized {
             return;
         }

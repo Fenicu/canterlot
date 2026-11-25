@@ -47,7 +47,7 @@ pub struct VersionPolicy {
 
 // Слово версии без подписи CLI, с суффиксами semver.
 fn version_token<'a>(output: &'a str, prefix: &str) -> Result<&'a str, VersionError> {
-    let text = output.strip_prefix(prefix).unwrap_or(output).trim();
+    let text = output.trim_prefix(prefix).trim();
     text.split_whitespace()
         .next()
         .ok_or(VersionError::Unparsable)

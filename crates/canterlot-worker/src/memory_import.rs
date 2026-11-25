@@ -448,12 +448,12 @@ fn decode(source: &str) -> (Vec<PathBuf>, PathBuf, bool) {
         dotted = false;
     }
     let separators = parts.len().saturating_sub(1);
-    let combos: u32 = if separators > MAX_SEPARATORS {
+    let combos = if separators > MAX_SEPARATORS {
         1
     } else {
         1 << separators
     };
-    let join = |mask: u32| {
+    let join = |mask: usize| {
         let mut path = String::new();
         for (index, part) in parts.iter().enumerate() {
             if index > 0 {
@@ -469,7 +469,7 @@ fn decode(source: &str) -> (Vec<PathBuf>, PathBuf, bool) {
         }
         PathBuf::from(path)
     };
-    let candidates: Vec<PathBuf> = (0..combos).map(join).collect();
+    let candidates: Vec<PathBuf> = Vec::from_fn(combos, join);
     let existing: Vec<&PathBuf> = candidates.iter().filter(|path| path.exists()).collect();
     if let [only] = existing.as_slice() {
         return (vec![(*only).clone()], (*only).clone(), false);

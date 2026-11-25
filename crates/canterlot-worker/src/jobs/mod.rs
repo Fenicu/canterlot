@@ -180,7 +180,7 @@ fn read_env_file(path: &Path) -> io::Result<Vec<(String, String)>> {
     let text = fs::read_to_string(path)?;
     let mut vars: Vec<(String, String)> = Vec::new();
     for line in text.lines() {
-        let line = line.strip_suffix('\r').unwrap_or(line);
+        let line = line.trim_suffix('\r');
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
