@@ -20,7 +20,7 @@ use crate::{
     delivery::LockedQueue,
     events::{self, NewEvent, Scope},
     executions,
-    model::PauseReason,
+    model::{PauseReason, RunSlot},
     presence::Presence,
 };
 
@@ -171,13 +171,14 @@ async fn candidates(pool: &PgPool) -> Result<Vec<Candidate>, sqlx::Error> {
            and not exists(select 1 from plan_tasks p where p.executor_conversation_id=c.id
                           and p.state='in_progress')
            and not exists(select 1 from inputs i where i.conversation_id=c.id
-                          and i.state in ('queued','dispatched','on_machine'))
+                          and i.state in ('queued','dispatched','on_machine','transmitting'))
            and not exists(select 1 from requests r where r.conversation_id=c.id
                           and r.state='open')
            and not exists(select 1 from secret_requests sr where sr.conversation_id=c.id
                           and sr.state in ('open','lost'))
            and not exists(select 1 from queue_state q where q.conversation_id=c.id
-                          and (jsonb_array_length(q.hold_reasons)>0
+                          and (q.run_slot<>'free'
+                               or jsonb_array_length(q.hold_reasons)>0
                                or q.pause_reasons @> '[{"reason":"limit_reached"}]'::jsonb
                                or q.pause_reasons @> '[{"reason":"session_stuck"}]'::jsonb))"#,
     )
@@ -249,13 +250,22 @@ pub async fn hibernate_in_tx(
     }
     // Все условия проверяются ещё раз под блокировкой очереди: между выборкой и здесь
     // мог прийти ввод или смениться состояние.
+    //
+    // Проекция активности отстаёт от очереди: ввод успевает дойти до агента раньше, чем
+    // проектор пересчитает сессию, и `idle` с давней отметкой ещё стоит. Поэтому идущий
+    // ход проверяется по первичным данным — слоту очереди и фазе исполнения.
+    if queue.slot()? != RunSlot::Free
+        || executions::turn_in_progress(&mut *conn, conversation_id).await?
+    {
+        return Ok(false);
+    }
     let eligible: bool = sqlx::query_scalar(
         "select d.activity_state='idle'
             and d.activity_evidence->>'kind'='idle'
             and coalesce((d.activity_evidence->>'process_alive')::bool,false)=true
             and coalesce((d.activity_evidence->>'background_work')::int,0)=0
             and not exists(select 1 from inputs i where i.conversation_id=d.conversation_id
-                           and i.state in ('queued','dispatched','on_machine'))
+                           and i.state in ('queued','dispatched','on_machine','transmitting'))
             and not exists(select 1 from requests r where r.conversation_id=d.conversation_id
                            and r.state='open')
             and not exists(select 1 from secret_requests sr where sr.conversation_id=d.conversation_id

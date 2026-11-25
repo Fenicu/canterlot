@@ -8,6 +8,7 @@ use canterlot_hub::{
     delivery::{
         control::request_stop_execution,
         dispatch::{DispatchOutcome, GateInputs, dispatch_next},
+        receipts::{InputReceipt, apply_input_receipt},
         submit::{ContentBlock, SubmitInput, submit_input},
     },
     executions::{self, StartedExecution},
@@ -886,5 +887,117 @@ async fn deliver_once(
     .fetch_one(pool)
     .await?;
     assert_eq!(deliveries, 1, "exactly one delivery of the queued message");
+    Ok(())
+}
+
+fn gate() -> GateInputs {
+    GateInputs {
+        machine_available: true,
+        machine_reconciled: true,
+        session_capabilities: vec!["pilot_v1".into()],
+    }
+}
+
+/// Выдаёт голову очереди и проводит ввод по квитанциям воркера.
+async fn dispatch_with_receipts(
+    pool: &PgPool,
+    seed: &Seed,
+    receipts: Vec<InputReceipt>,
+) -> Result<Uuid, Box<dyn std::error::Error + Send + Sync>> {
+    let (input, command, attempt) =
+        match dispatch_next(pool, seed.conversation_id, gate(), Uuid::now_v7()).await? {
+            DispatchOutcome::Dispatched {
+                input_id,
+                command_id,
+                attempt,
+                ..
+            } => (input_id, command_id, attempt),
+            other => panic!("not dispatched: {other:?}"),
+        };
+    for receipt in receipts {
+        apply_input_receipt(pool, command, attempt, receipt, Uuid::now_v7()).await?;
+    }
+    Ok(input)
+}
+
+async fn slot_and_state(pool: &PgPool, seed: &Seed, input: Uuid) -> (String, String) {
+    let slot: String =
+        sqlx::query_scalar("select run_slot from queue_state where conversation_id=$1")
+            .bind(seed.conversation_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    let state: String = sqlx::query_scalar("select state from inputs where id=$1")
+        .bind(input)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (slot, state)
+}
+
+/// Ввод уже передаётся агенту, а проектор активности ещё не пересчитал сессию: проекция
+/// `idle` с часовой давностью. Обход не должен останавливать процесс посреди хода.
+#[tokio::test]
+async fn transmitting_input_blocks_despite_a_stale_idle_projection() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let (seed, _run) = setup(&pool).await;
+    owner_input(&pool, seed.conversation_id, "работай").await?;
+    let input = dispatch_with_receipts(
+        &pool,
+        &seed,
+        vec![InputReceipt::Stored, InputReceipt::TransmissionStarted],
+    )
+    .await?;
+    assert_eq!(
+        slot_and_state(&pool, &seed, input).await,
+        ("dispatching".to_owned(), "transmitting".to_owned())
+    );
+    assert_eq!(hibernate::sweep(&pool, &Presence::default()).await?, 0);
+    assert!(stop_command(&pool, seed.conversation_id).await.is_none());
+    Ok(())
+}
+
+/// Ввод принят, слот `running`: ход идёт, хотя проекция ещё говорит `idle`.
+#[tokio::test]
+async fn running_turn_blocks_despite_a_stale_idle_projection() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let (seed, run) = setup(&pool).await;
+    owner_input(&pool, seed.conversation_id, "работай").await?;
+    let input = dispatch_with_receipts(
+        &pool,
+        &seed,
+        vec![
+            InputReceipt::Stored,
+            InputReceipt::TransmissionStarted,
+            InputReceipt::Accepted,
+        ],
+    )
+    .await?;
+    assert_eq!(
+        slot_and_state(&pool, &seed, input).await,
+        ("running".to_owned(), "accepted".to_owned())
+    );
+    assert_eq!(hibernate::sweep(&pool, &Presence::default()).await?, 0);
+    assert!(stop_command(&pool, seed.conversation_id).await.is_none());
+    let requested: bool =
+        sqlx::query_scalar("select hibernate_requested from executions where id=$1")
+            .bind(run.execution_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(!requested);
+    Ok(())
+}
+
+/// Ход без ввода (агент проснулся сам): слот свободен, но фаза исполнения рабочая.
+#[tokio::test]
+async fn self_started_turn_blocks_despite_a_stale_idle_projection() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let (seed, run) = setup(&pool).await;
+    sqlx::query("update executions set phase='generating', phase_at=clock_timestamp() where id=$1")
+        .bind(run.execution_id)
+        .execute(&pool)
+        .await?;
+    assert_eq!(hibernate::sweep(&pool, &Presence::default()).await?, 0);
+    assert!(stop_command(&pool, seed.conversation_id).await.is_none());
     Ok(())
 }
