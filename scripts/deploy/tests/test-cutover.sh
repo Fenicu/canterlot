@@ -356,7 +356,7 @@ export FAKE_PG_DBOID=77777
 run_printed
 [ "${RC}" != "0" ] && case_ok "another database oid, no phase record: refused" || case_fail "the restore ran against another database oid"
 assert_contains "${FAKE_ROOT}/rollback.log" "database oid" "refused on the database oid"
-printf 'created 16500\n' >"${PHASE_FILE}"
+printf 'created canterlot_rb_0000abcd 16384 16500\n' >"${PHASE_FILE}"
 run_printed
 [ "${RC}" != "0" ] && case_ok "a phase record for another oid does not excuse 77777" || case_fail "the foreign oid was accepted under a phase record"
 unset FAKE_PG_DBOID
@@ -367,32 +367,39 @@ run_printed
 hub_is "${SHA_PREV}" && case_ok "recovery flipped hub back" || case_fail "recovery did not flip hub"
 [ "$(grep '^MIGR_MAX=' "${FAKE_ROOT}/state/db.txt" | cut -d= -f2)" = "40" ] \
     && case_ok "recovery restored the dump" || case_fail "recovery did not restore the dump"
+assert_eq "$(cut -d' ' -f1 "${PHASE_FILE}")" "restored" "the phase ends as restored"
 # Частичное восстановление: та же напечатанная команда, повторённая, доводит дело до конца
-# (бывшие кейсы test-fastguards.sh; фаза пишется рядом с дампом при любом пути).
-printf 'MIGR_MAX=41\nFAILED=0\nchanged-after-the-dump\n' >"${FAKE_ROOT}/state/db.txt"
+# (бывшие кейсы test-fastguards.sh; фаза пишется рядом с дампом при любом пути). Каждый сценарий —
+# новое восстановление: без прежней записи фазы, на базе с oid из дампа.
+fresh_restore() {
+    rm -f "${PHASE_FILE}"  # lint: local-temp
+    printf 'MIGR_MAX=41\nFAILED=0\nchanged-after-the-dump\n' >"${FAKE_ROOT}/state/db.txt"
+    printf '16384\n' >"${FAKE_ROOT}/state/db-oid"
+}
+fresh_restore
 export FAKE_FAIL_PG_RESTORE=1
 run_printed
 unset FAKE_FAIL_PG_RESTORE
-[ "${RC}" != "0" ] && case_ok "pg_restore after createdb fails: the run fails" || case_fail "the run with a failing pg_restore did not fail"
-assert_eq "$(cut -d' ' -f1-2 "${PHASE_FILE}" 2>/dev/null)" "created 16500" "the phase file records the replacement oid"
+[ "${RC}" != "0" ] && case_ok "pg_restore into the recovery database fails: the run fails" || case_fail "the run with a failing pg_restore did not fail"
+assert_eq "$(cut -d' ' -f1 "${PHASE_FILE}" 2>/dev/null)" "created" "the phase file says created"
+grep -q 'changed-after-the-dump' "${FAKE_ROOT}/state/db.txt" && case_ok "the old database survives the failed pg_restore" || case_fail "the old database changed"
 run_printed
 assert_eq "${RC}" "0" "the rerun of the same printed command succeeds"
 [ "${RC}" = "0" ] || tail -5 "${FAKE_ROOT}/rollback.log"
 grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" && case_ok "the data is restored from the dump" || case_fail "the data was not restored"
 FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub && case_ok "the hub is started" || case_fail "the hub is not running"
-assert_contains "${FAKE_ROOT}/rollback.log" "replacement database oid 16500" "the recorded replacement oid was accepted"
 assert_eq "$(cut -d' ' -f1 "${PHASE_FILE}")" "restored" "the phase ends as restored"
-printf 'MIGR_MAX=41\nFAILED=0\nchanged-after-the-dump\n' >"${FAKE_ROOT}/state/db.txt"
+fresh_restore
 export FAKE_FAIL_CREATEDB=1
 run_printed
 unset FAKE_FAIL_CREATEDB
-[ "${RC}" != "0" ] && case_ok "a failure between dropdb and createdb: the run fails" || case_fail "the run with a failing createdb did not fail"
-assert_eq "$(cut -d' ' -f1 "${PHASE_FILE}" 2>/dev/null)" "dropped" "the phase file says dropped"
-[ ! -f "${FAKE_ROOT}/state/db.txt" ] && case_ok "the database is really missing" || case_fail "the database exists"
+[ "${RC}" != "0" ] && case_ok "a failing createdb of the recovery database: the run fails" || case_fail "the run with a failing createdb did not fail"
+assert_eq "$(cut -d' ' -f1 "${PHASE_FILE}" 2>/dev/null)" "verified" "the phase file says verified"
+grep -q 'changed-after-the-dump' "${FAKE_ROOT}/state/db.txt" && case_ok "the old database survives the failed createdb" || case_fail "the old database changed"
 run_printed
-assert_eq "${RC}" "0" "the rerun continues from dropped and succeeds"
+assert_eq "${RC}" "0" "the rerun continues from verified and succeeds"
 [ "${RC}" = "0" ] || tail -5 "${FAKE_ROOT}/rollback.log"
-grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" && case_ok "the data is restored from the dump after the dropped phase" || case_fail "the data was not restored after the dropped phase"
+grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" && case_ok "the data is restored from the dump after the verified phase" || case_fail "the data was not restored after the verified phase"
 teardown_case
 case_end
 

@@ -11,9 +11,20 @@ if [ -n "${FAKE_PSQL_FAIL_MATCH:-}" ] && [[ "${sql}" == *"${FAKE_PSQL_FAIL_MATCH
     exit 1
 fi
 # -d <база>: у снесённой базы (нет db.txt) соединиться можно только с обслуживающей postgres.
+# База хаба (HUB_PG_DB) — state/db.txt и state/db-oid, любая другая — state/pgdb/<имя>.txt и .oid.
+pg_data() {
+    if [ "$1" = "${HUB_PG_DB:-canterlot}" ]; then printf '%s' "${FAKE_ROOT}/state/db.txt"; else printf '%s' "${FAKE_ROOT}/state/pgdb/$1.txt"; fi
+}
+pg_oid() {
+    if [ "$1" = "${HUB_PG_DB:-canterlot}" ]; then
+        printf '%s' "${FAKE_PG_DBOID:-$(cat "${FAKE_ROOT}/state/db-oid" 2>/dev/null || echo 16384)}"
+    else
+        tr -d '\n' <"${FAKE_ROOT}/state/pgdb/$1.oid"
+    fi
+}
 dbname=""; prevarg=""
 for arg in "$@"; do [ "${prevarg}" = "-d" ] && dbname="${arg}"; prevarg="${arg}"; done
-if [ -n "${dbname}" ] && [ "${dbname}" != "postgres" ] && [ ! -f "${FAKE_ROOT}/state/db.txt" ]; then
+if [ -n "${dbname}" ] && [ "${dbname}" != "postgres" ] && [ ! -f "$(pg_data "${dbname}")" ]; then
     echo "psql: error: connection to server failed: FATAL:  database \"${dbname}\" does not exist" >&2
     exit 2
 fi
@@ -66,6 +77,26 @@ case "${sql}" in
         printf '%s' "${FAKE_HAS_COMPACTIONS:-1}" ;;
     *"from compactions where finished_at is null"*)
         printf '%s' "${FAKE_OPEN_COMP:-0}" ;;
+    *"select oid::text from pg_database where datname = '"*)
+        # oid базы по имени; нет базы — пустой ответ.
+        name="${sql#*datname = \'}"; name="${name%%\'*}"
+        if [ -f "$(pg_data "${name}")" ]; then pg_oid "${name}"; fi ;;
+    *"alter database "*" rename to "*)
+        # Как настоящий ALTER DATABASE … RENAME TO: источник обязан быть, имя назначения — свободно.
+        from="${sql#*alter database }"; from="${from%% *}"
+        to="${sql#* rename to }"; to="${to%% *}"
+        if [ ! -f "$(pg_data "${from}")" ]; then echo "ERROR:  database \"${from}\" does not exist" >&2; exit 1; fi
+        if [ -f "$(pg_data "${to}")" ]; then echo "ERROR:  database \"${to}\" already exists" >&2; exit 1; fi
+        oid="$(pg_oid "${from}")"
+        mkdir -p "${FAKE_ROOT}/state/pgdb"
+        /bin/mv "$(pg_data "${from}")" "$(pg_data "${to}")"
+        /bin/rm -f "${FAKE_ROOT}/state/pgdb/${from}.oid"
+        if [ "${to}" = "${HUB_PG_DB:-canterlot}" ]; then
+            printf '%s\n' "${oid}" >"${FAKE_ROOT}/state/db-oid"
+        else
+            printf '%s\n' "${oid}" >"${FAKE_ROOT}/state/pgdb/${to}.oid"
+        fi
+        printf 'ALTER DATABASE' ;;
     *"select 1 from pg_database"*)
         # Есть ли база: 1, если db.txt на месте.
         if [ -f "${FAKE_ROOT}/state/db.txt" ]; then printf '1'; fi ;;

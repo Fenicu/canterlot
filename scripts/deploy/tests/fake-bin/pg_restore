@@ -38,4 +38,13 @@ if [ "${FAKE_FAIL_PG_RESTORE:-0}" = "1" ]; then
     echo "fake-pg_restore: injected restore failure" >&2
     exit 1
 fi
-cp "${file}" "${FAKE_ROOT}/state/db.txt"
+# -d <база>: база хаба — state/db.txt, любая другая — state/pgdb/<имя>.txt; несуществующая — отказ.
+dbname="${HUB_PG_DB:-canterlot}"; prev=""
+for arg in "$@"; do [ "${prev}" = "-d" ] && dbname="${arg}"; prev="${arg}"; done
+if [ "${dbname}" = "${HUB_PG_DB:-canterlot}" ]; then
+    data="${FAKE_ROOT}/state/db.txt"
+else
+    data="${FAKE_ROOT}/state/pgdb/${dbname}.txt"
+fi
+[ -f "${data}" ] || { echo "pg_restore: error: connection to server failed: FATAL:  database \"${dbname}\" does not exist" >&2; exit 1; }
+cp "${file}" "${data}"

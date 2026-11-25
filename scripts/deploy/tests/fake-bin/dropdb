@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Подмена dropdb/createdb: удаляет/создаёт state/db.txt. Каждый вызов — в журнал.
+# Подмена dropdb/createdb. База хаба (HUB_PG_DB) — state/db.txt и state/db-oid, любая другая
+# (например, имя восстановления rollback-db.sh) — state/pgdb/<имя>.txt и .oid. Каждый вызов — в журнал.
 set -euo pipefail
 [ -n "${FAKE_ROOT:-}" ] || { echo "fake-db: FAKE_ROOT unset" >&2; exit 99; }
 name="$(basename "$0")"
@@ -13,14 +14,29 @@ if [ -n "${FAKE_PG_SOCKET:-}" ]; then
         exit 1
     fi
 fi
+target="${*: -1}"
+if [ "${target}" = "${HUB_PG_DB:-canterlot}" ]; then
+    data="${FAKE_ROOT}/state/db.txt"; oidf="${FAKE_ROOT}/state/db-oid"
+else
+    mkdir -p "${FAKE_ROOT}/state/pgdb"
+    data="${FAKE_ROOT}/state/pgdb/${target}.txt"; oidf="${FAKE_ROOT}/state/pgdb/${target}.oid"
+fi
 if [ "${name}" = "dropdb" ] && [ -n "${FAKE_DROPDB_HOOK:-}" ]; then bash "${FAKE_DROPDB_HOOK}" || true; fi
 if [ "${name}" = "createdb" ] && [ "${FAKE_FAIL_CREATEDB:-0}" = "1" ]; then echo "fake-createdb: injected failure" >&2; exit 1; fi
-# Как настоящий createdb: на существующей базе — отказ.
-if [ "${name}" = "createdb" ] && [ -f "${FAKE_ROOT}/state/db.txt" ]; then
+# Как настоящие: createdb на существующей базе и dropdb несуществующей — отказ.
+if [ "${name}" = "createdb" ] && [ -f "${data}" ]; then
     echo "createdb: error: database creation failed: ERROR:  database already exists" >&2
     exit 1
 fi
+if [ "${name}" = "dropdb" ] && [ ! -f "${data}" ]; then
+    echo "dropdb: error: database removal failed: ERROR:  database \"${target}\" does not exist" >&2
+    exit 1
+fi
 case "${name}" in
-    dropdb) rm -f "${FAKE_ROOT}/state/db.txt" ;;
-    createdb) : >"${FAKE_ROOT}/state/db.txt"; printf '16500\n' >"${FAKE_ROOT}/state/db-oid" ;;
+    dropdb) rm -f "${data}" "${oidf}" ;;
+    createdb)
+        # Каждая новая база получает следующий oid, начиная с 16500.
+        next="$(cat "${FAKE_ROOT}/state/next-oid" 2>/dev/null || echo 16500)"
+        printf '%s\n' "$((next + 1))" >"${FAKE_ROOT}/state/next-oid"
+        : >"${data}"; printf '%s\n' "${next}" >"${oidf}" ;;
 esac
