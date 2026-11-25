@@ -413,8 +413,14 @@ fast_refuse() {
 # База, которую смотрят проверка, дамп и восстановление, — та, к которой подключён работающий
 # хаб: в ней есть клиентские соединения пользователя хаба. Иначе при нескольких кластерах дамп
 # и проверка могли бы взять одну базу, а хаб работать с другой.
+# Идентификатор кластера, проверенный до остановок: перед pg_dump он перечитывается и обязан совпасть.
+DB_SYSID_CHECKED=""
+# $1: fast — пути с пропуском vzdump, full — полный путь. Полный путь тоже сверяет базу до первой
+# остановки (иначе сокет второго кластера с копией той же базы прошёл бы сверку миграций, а дамп
+# стал бы снимком чужой базы), но без источника идентичности идёт дальше: это первый выпуск, его
+# дамп и запишет идентичность для следующих.
 db_identity_check() {
-    local n id sys expected="${HUB_PG_SYSTEM_ID:-}" last
+    local mode="${1:-fast}" n id sys expected="${HUB_PG_SYSTEM_ID:-}" last
     # Источник ожидаемого идентификатора кластера: закреплённый HUB_PG_SYSTEM_ID или запись, которую
     # оставил последний дамп. Нет ни того, ни другого — быстрому пути нечем доказать кластер (число
     # соединений того же пользователя ничего не доказывает): отказ, дальше полный путь, он запишет её.
@@ -424,7 +430,9 @@ db_identity_check() {
             expected="$(ssh_hub "cat '${last}'" 2>/dev/null | sed -n 's/^system_identifier=\([0-9][0-9]*\)$/\1/p' | sed -n 1p)" || expected=""
         fi
     fi
-    [ -n "${expected}" ] || fast_refuse "no identity source for the cluster (neither a pinned HUB_PG_SYSTEM_ID nor a readable .identity file next to an earlier dump in ${HUB_BACKUP_DIR}): the full path takes a dump and records one"
+    if [ -z "${expected}" ] && [ "${mode}" = "fast" ]; then
+        fast_refuse "no identity source for the cluster (neither a pinned HUB_PG_SYSTEM_ID nor a readable .identity file next to an earlier dump in ${HUB_BACKUP_DIR}): the full path takes a dump and records one"
+    fi
     n="$(hub_psql "select count(*) from pg_stat_activity where datname = current_database() and usename = '${HUB_PG_USER}' and backend_type = 'client backend' and pid <> pg_backend_pid()")"
     case "${n}" in
         '' | *[!0-9]* | 0)
@@ -435,6 +443,11 @@ db_identity_check() {
     esac
     id="$(pg_identity)" || { PHASE="eligibility"; fail_mark; fail_code db_identity; die_after "cannot read the cluster identity of ${HUB_PG_DB} on ${HUB_PG_SOCKET}"; }
     sys="${id% *}"
+    DB_SYSID_CHECKED="${sys}"
+    if [ -z "${expected}" ]; then
+        log "database identity: no identity source yet (no pinned HUB_PG_SYSTEM_ID, no .identity next to an earlier dump): first release on this cluster, ${HUB_PG_DB} on ${HUB_PG_SOCKET} has system identifier ${sys} and ${n} connection(s) of the running hub (user ${HUB_PG_USER}); this run's dump records it"
+        return 0
+    fi
     if [ "${sys}" != "${expected}" ]; then
         PHASE="eligibility"
         fail_mark
@@ -458,6 +471,8 @@ release_migrations_last() {
 }
 applied_migrations_check() {
     local manifest rows cmp why="" code="" saved_phase="${PHASE}"
+    # База — та, на которой работает хаб, и тот же кластер: до сверки миграций и до любой остановки.
+    db_identity_check full
     # dry-run до заливки цели: бинаря ещё нет, сверка не выполнена — тот же пропуск NOT RUN, что у
     # остальных проверок цели (без --allow-skipped dry-run не проходит). Боевой прогон и репетиция
     # сюда без залитой цели не доходят: target-check отказывает раньше.
@@ -533,7 +548,7 @@ skip_eligibility() {
     # Чекаут и исполняемая обвязка — это цель, в обоих режимах пропуска (в быстром вместе с классификацией).
     tb="$(python3 -I "${SCRIPT_DIR}/toolkit-bound.py" "${SOURCE_DIR}" "${target_full}" "${SCRIPT_DIR}" 2>&1)" \
         || fast_refuse "the checkout and the executing toolkit are not bound to the target: ${tb}"
-    db_identity_check
+    db_identity_check fast
     # Бинарь цели — чужой для этого прогона код: запускается от учётной записи службы под пределом
     # времени, не от root (проверка байтов залитого дерева сделана target-check до этого).
     manifest="$(ssh_hub "runuser -u '${HUB_SERVICE_USER}' -- timeout ${MANIFEST_TIMEOUT} '${HUB_RELEASES}/${SHA}/bin/canterlot-hub' migrations manifest --json")" \
@@ -1571,6 +1586,11 @@ if DB_IDENTITY="$(pg_identity)"; then
     DB_OID="${DB_IDENTITY#* }"
 else
     cutover_hard "cannot read the cluster identity before the dump"
+fi
+# Кластер под дампом — тот, что сверен до остановок (закрепление, запись прежнего дампа или, у
+# первого выпуска, прочитанный тогда же): иначе точкой восстановления стал бы снимок другой базы.
+if [ -n "${DB_SYSID_CHECKED}" ] && [ "${DB_SYSID}" != "${DB_SYSID_CHECKED}" ]; then
+    cutover_hard "the cluster at ${HUB_PG_SOCKET} now has system identifier ${DB_SYSID}, but ${DB_SYSID_CHECKED} was checked before the stops: no dump of another cluster"
 fi
 run_write "pg_dump" ssh_hub "install -d -m 0700 -o postgres '${HUB_BACKUP_DIR}' && runuser -u postgres -- pg_dump -Fc -Z zstd:3 -f '${HUB_BACKUP_DIR}/${RUN_DUMP}' -h '${HUB_PG_SOCKET}' '${HUB_PG_DB}'" \
     || cutover_hard "pg_dump failed"

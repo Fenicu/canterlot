@@ -101,10 +101,13 @@ case "${sql}" in
         # Есть ли база: 1, если db.txt на месте.
         if [ -f "${FAKE_ROOT}/state/db.txt" ]; then printf '1'; fi ;;
     *"pg_control_system"*)
+        # Идентификатор кластера: FAKE_PG_SYSID, иначе state/pg-sysid (его меняет крючок посреди
+        # прогона), иначе значение стенда по умолчанию.
+        sysid="${FAKE_PG_SYSID:-$(tr -d '\n' <"${FAKE_ROOT}/state/pg-sysid" 2>/dev/null || echo 7000000000000000001)}"
         if [[ "${sql}" == *"pg_database"* ]]; then
-            printf '%s %s' "${FAKE_PG_SYSID:-7000000000000000001}" "${FAKE_PG_DBOID:-$(cat "${FAKE_ROOT}/state/db-oid" 2>/dev/null || echo 16384)}"
+            printf '%s %s' "${sysid}" "${FAKE_PG_DBOID:-$(cat "${FAKE_ROOT}/state/db-oid" 2>/dev/null || echo 16384)}"
         else
-            printf '%s' "${FAKE_PG_SYSID:-7000000000000000001}"
+            printf '%s' "${sysid}"
         fi ;;
     *"from _sqlx_migrations order by version"*)
         if [ -f "${FAKE_ROOT}/state/db-migrations.txt" ]; then

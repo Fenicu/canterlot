@@ -267,6 +267,30 @@ assert_contains "${FAKE_ROOT}/rehearse.log" "migrations_last 42" "the RELEASE va
 teardown_case
 case_end
 
+# Полный путь сверяет базу работающего хаба до токена и до остановок: соединения хаба и
+# system identifier кластера против закрепления или записи у прежнего дампа. Без источника
+# идентичности (первый выпуск) — только громкая строка, путь идёт дальше (test-cutover.sh).
+case_begin "full path: a cluster that is not the pinned one gets no rehearsal token"
+setup_cutover identityfull
+export HUB_PG_SYSTEM_ID=7000000000000000001 FAKE_PG_SYSID=7999999999999999999
+if run_rehearse "${SHA_NEW}" --result "${FAKE_ROOT}/x.result"; then case_fail "the rehearsal passed on another cluster"; else case_ok "the rehearsal is refused"; fi
+unset HUB_PG_SYSTEM_ID FAKE_PG_SYSID
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "db_identity" "db_identity code"
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" token)" "" "no rehearsal token"
+assert_contains "${FAKE_ROOT}/rehearse.log" "7999999999999999999" "the actual system identifier is named"
+teardown_case
+case_end
+
+case_begin "full path: no connection of the running hub gets no rehearsal token"
+setup_cutover connsfull
+export FAKE_HUB_CONNS=0
+if run_rehearse "${SHA_NEW}" --result "${FAKE_ROOT}/x.result"; then case_fail "the rehearsal passed without hub connections"; else case_ok "the rehearsal is refused"; fi
+unset FAKE_HUB_CONNS
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "db_identity" "db_identity code"
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" token)" "" "no rehearsal token"
+teardown_case
+case_end
+
 case_begin "--rehearse and --dry-run are exclusive; --confirm is for --execute only"
 setup_cutover modes
 bash "${DEPLOY_DIR}/cutover.sh" "${SHA_NEW}" --rehearse --dry-run >"${FAKE_ROOT}/m.log" 2>&1 && case_fail "both modes accepted" || case_ok "both modes refused"

@@ -491,5 +491,21 @@ assert_contains "${FAKE_ROOT}/cutover.log" "releases/${SHA_NEW}" "the actual lin
 teardown_case
 case_end
 
+# --- Идентичность кластера сменилась между проверкой и дампом ---
+# Сверка до стопа запоминает system identifier; перед pg_dump он перечитывается: другой кластер —
+# дампа нет, восстановление до flip поднимает хаб.
+case_begin "the cluster identity changes between the check and the dump: no dump, the hub starts again"
+setup_cutover idchange
+run_cutover_after_hub_stop "printf '7999999999999999999\n' >'${FAKE_ROOT}/state/pg-sysid'"
+assert_eq "${RC}" "1" "exit 1"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "failed_before_flip" "result file: failed_before_flip"
+assert_contains "${FAKE_ROOT}/cutover.log" "7999999999999999999" "the changed identity is named"
+pgdump_logged && case_fail "pg_dump ran on another cluster" || case_ok "no pg_dump"
+hub_is "${SHA_PREV}" && case_ok "hub still on prev" || case_fail "hub moved"
+FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub \
+    && case_ok "hub started again" || case_fail "hub left stopped"
+teardown_case
+case_end
+
 printf 'cutover-signals harness: %s passed, %s failed (cumulative)\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]
