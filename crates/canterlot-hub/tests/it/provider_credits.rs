@@ -102,8 +102,9 @@ async fn observe_weekly(pool: &PgPool, seed: &testkit::Seed, provider: &str) {
 }
 
 /// Отчёт машины идёт тем же путём, что окна: строка на машину и провайдера, и лимиты её видят.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_limits_report_reaches_the_stored_credits(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_limits_report_reaches_the_stored_credits() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = ingest_support::wire_seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "codex").await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
@@ -155,8 +156,9 @@ async fn a_limits_report_reaches_the_stored_credits(pool: PgPool) -> TestResult 
 }
 
 /// Показ берёт самую свежую строку: счёт общий на учётную запись, а строки разные на машинах.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_freshest_machine_is_shown_across_two_machines(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn the_freshest_machine_is_shown_across_two_machines() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "codex").await;
     observe_weekly(&pool, &seed, "codex").await;
@@ -194,8 +196,9 @@ async fn the_freshest_machine_is_shown_across_two_machines(pool: PgPool) -> Test
 }
 
 /// Что машина не знает, не стирается: прежние сбросы остаются.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unknown_resets_keep_the_stored_values(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn unknown_resets_keep_the_stored_values() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let soon = at(Duration::days(3));
     assert!(
@@ -241,8 +244,9 @@ async fn unknown_resets_keep_the_stored_values(pool: PgPool) -> TestResult {
 }
 
 /// Старое наблюдение не откатывает показ: строку двигает только более позднее.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_older_report_does_not_replace_the_credits(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn an_older_report_does_not_replace_the_credits() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     assert!(
         record(
@@ -272,8 +276,9 @@ async fn an_older_report_does_not_replace_the_credits(pool: PgPool) -> TestResul
 }
 
 /// Поля API: счёт, заголовок и дата каждого сброса.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_limits_api_names_the_resets(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn the_limits_api_names_the_resets() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let fixture = support::Fixture::new(pool.clone()).await;
     testkit::offer_provider(&pool, fixture.seed.machine_id, "codex").await;
     observe_weekly(

@@ -33,8 +33,9 @@ fn set_mtime(path: &std::path::Path, hours_ago: u64) {
         .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn gc_expires_stale_uploads_after_the_grace(pool: PgPool) {
+#[tokio::test]
+async fn gc_expires_stale_uploads_after_the_grace() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let data = content(4096, 1);
     let stale = f
@@ -120,10 +121,9 @@ async fn gc_expires_stale_uploads_after_the_grace(pool: PgPool) {
     assert!(failed.iter().all(|p| p["reason"] == "upload_expired"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn gc_releases_unreferenced_ready_attachments_and_keeps_referenced_or_scheduled_ones(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn gc_releases_unreferenced_ready_attachments_and_keeps_referenced_or_scheduled_ones() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let unused = f.ready("unused.txt", "text/plain", b"unused").await;
     let linked = f.ready("linked.txt", "text/plain", b"linked").await;
@@ -175,8 +175,9 @@ async fn gc_releases_unreferenced_ready_attachments_and_keeps_referenced_or_sche
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn gc_removes_orphan_blobs_and_staging_without_a_row(pool: PgPool) {
+#[tokio::test]
+async fn gc_removes_orphan_blobs_and_staging_without_a_row() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let data = content(2048, 2);
     // Файлы без строки: оставлены сбоем до создания записи или после её удаления.
@@ -252,8 +253,9 @@ async fn gc_removes_orphan_blobs_and_staging_without_a_row(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn gc_never_removes_blob_under_concurrent_link(pool: PgPool) {
+#[tokio::test]
+async fn gc_never_removes_blob_under_concurrent_link() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let mut conversation = f.conversation;
     let (mut linked, mut refused) = (0, 0);
@@ -341,8 +343,9 @@ async fn gc_never_removes_blob_under_concurrent_link(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn gc_skips_locked_rows_and_is_safe_to_run_twice(pool: PgPool) {
+#[tokio::test]
+async fn gc_skips_locked_rows_and_is_safe_to_run_twice() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let data = content(1024, 3);
     let ready = f
@@ -453,8 +456,9 @@ impl BlobStore for Observing {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn gc_commits_released_before_deleting_the_blob(pool: PgPool) {
+#[tokio::test]
+async fn gc_commits_released_before_deleting_the_blob() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let store = Observing {
         inner: f.store.clone(),
@@ -497,8 +501,9 @@ async fn gc_commits_released_before_deleting_the_blob(pool: PgPool) {
     assert!(!f.blob_path(second).exists());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn gc_service_holds_its_singleton_lock_and_stops_on_shutdown(pool: PgPool) {
+#[tokio::test]
+async fn gc_service_holds_its_singleton_lock_and_stops_on_shutdown() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let orphan = Uuid::now_v7();
     std::fs::write(f.staging_path(orphan), b"orphan").unwrap();

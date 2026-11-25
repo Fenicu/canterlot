@@ -147,8 +147,9 @@ fn lines(text: &str) -> Vec<&str> {
     text.lines().collect()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn summary_covers_state_answer_git_usage_duration(pool: PgPool) {
+#[tokio::test]
+async fn summary_covers_state_answer_git_usage_duration() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     let command = add_run(
@@ -197,8 +198,9 @@ async fn summary_covers_state_answer_git_usage_duration(pool: PgPool) {
     assert_eq!(text, expected);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn summary_aggregates_several_turns(pool: PgPool) {
+#[tokio::test]
+async fn summary_aggregates_several_turns() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     let armed = now - TimeDelta::minutes(30);
@@ -280,8 +282,9 @@ async fn summary_aggregates_several_turns(pool: PgPool) {
     assert!(!text.contains("Old answer") && !text.contains("Helper chatter"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn boundary_keeps_an_answer_that_started_before_arming(pool: PgPool) {
+#[tokio::test]
+async fn boundary_keeps_an_answer_that_started_before_arming() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     let armed = now;
@@ -328,8 +331,9 @@ async fn boundary_keeps_an_answer_that_started_before_arming(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn boundary_selects_turns_by_captured_ids_not_uuid_order(pool: PgPool) {
+#[tokio::test]
+async fn boundary_selects_turns_by_captured_ids_not_uuid_order() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     let armed = now - TimeDelta::hours(1);
@@ -385,8 +389,9 @@ async fn boundary_selects_turns_by_captured_ids_not_uuid_order(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn summary_working_time_skips_gaps_between_turns(pool: PgPool) {
+#[tokio::test]
+async fn summary_working_time_skips_gaps_between_turns() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     add_run(
@@ -452,8 +457,9 @@ async fn add_wait(
     id
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn summary_working_time_subtracts_permission_and_question_waits(pool: PgPool) {
+#[tokio::test]
+async fn summary_working_time_subtracts_permission_and_question_waits() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     let finished = now - TimeDelta::minutes(1);
@@ -509,8 +515,9 @@ async fn summary_working_time_subtracts_permission_and_question_waits(pool: PgPo
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn summary_truncates_on_char_boundary(pool: PgPool) {
+#[tokio::test]
+async fn summary_truncates_on_char_boundary() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     let command = add_run(
@@ -539,8 +546,9 @@ async fn summary_truncates_on_char_boundary(pool: PgPool) {
     assert!(text.len() <= 16 * 1024);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn summary_whole_text_is_capped(pool: PgPool) {
+#[tokio::test]
+async fn summary_whole_text_is_capped() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     let commits: Vec<(String, String)> = (0..50)
@@ -583,8 +591,9 @@ async fn summary_whole_text_is_capped(pool: PgPool) {
     assert!(text.contains("Final answer (truncated to"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn summary_without_git(pool: PgPool) {
+#[tokio::test]
+async fn summary_without_git() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     let armed = now - TimeDelta::minutes(10);
@@ -612,8 +621,9 @@ async fn summary_without_git(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_running_turn_reports_its_own_turn_and_duration(pool: PgPool) {
+#[tokio::test]
+async fn a_running_turn_reports_its_own_turn_and_duration() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     let command = Uuid::now_v7();
@@ -656,8 +666,9 @@ async fn a_running_turn_reports_its_own_turn_and_duration(pool: PgPool) {
     assert!(text.contains("Git: no finished turn yet."), "{text}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn running_turn_keeps_git_facts_from_the_last_finished_turn(pool: PgPool) {
+#[tokio::test]
+async fn running_turn_keeps_git_facts_from_the_last_finished_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     add_run(
@@ -751,8 +762,9 @@ async fn open_question(pool: &PgPool, f: &Fixture, payload: Value) -> Uuid {
     id
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn summary_variants_for_each_state(pool: PgPool) {
+#[tokio::test]
+async fn summary_variants_for_each_state() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     let armed = Some(now - TimeDelta::minutes(10));
@@ -868,8 +880,9 @@ async fn summary_variants_for_each_state(pool: PgPool) {
     assert!(gone.is_none(), "an unknown target has no summary");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_session_without_a_process_does_not_promise_it_will_answer(pool: PgPool) {
+#[tokio::test]
+async fn a_session_without_a_process_does_not_promise_it_will_answer() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     for (state, activity, evidence) in [
         (
@@ -898,8 +911,9 @@ async fn a_session_without_a_process_does_not_promise_it_will_answer(pool: PgPoo
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn lost_session_says_it_may_come_back(pool: PgPool) {
+#[tokio::test]
+async fn lost_session_says_it_may_come_back() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     set_activity(
         &pool,
@@ -933,8 +947,9 @@ async fn lost_session_says_it_may_come_back(pool: PgPool) {
     assert!(!text.contains("you stay subscribed"), "{text}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn summary_never_contains_secret_answer(pool: PgPool) {
+#[tokio::test]
+async fn summary_never_contains_secret_answer() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     let id = open_question(
@@ -1065,8 +1080,9 @@ async fn expected_summary(
     summary::render(&summary)
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn summary_events_deliver_facts_without_changing_text(pool: PgPool) {
+#[tokio::test]
+async fn summary_events_deliver_facts_without_changing_text() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let subscriber = testkit::seed_conversation(&pool, f.owner, f.machine).await;
     let now = Utc::now();
@@ -1216,8 +1232,9 @@ async fn summary_events_deliver_facts_without_changing_text(pool: PgPool) {
     assert_eq!(origin["event"]["outcome"], "owner_stop");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn summary_ignores_answer_from_before_the_window(pool: PgPool) {
+#[tokio::test]
+async fn summary_ignores_answer_from_before_the_window() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(&pool).await;
     let now = Utc::now();
     let old = add_run(

@@ -339,8 +339,9 @@ impl Fx {
 // Выключатель
 // ---------------------------------------------------------------------------
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_switch_is_off_by_default_and_the_helper_reads_it(pool: PgPool) {
+#[tokio::test]
+async fn the_switch_is_off_by_default_and_the_helper_reads_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let mut tx = canterlot_hub::db::begin(&f.pool).await.unwrap();
     assert!(
@@ -366,8 +367,9 @@ async fn the_switch_is_off_by_default_and_the_helper_reads_it(pool: PgPool) {
 
 /// Допуск — одна точка: пока транзакция запуска держит строку машины `for share`, смена
 /// выключателя (`for update`) ждёт её коммита, а после него видит выключатель сама.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn switching_off_waits_for_a_launch_that_already_read_the_row(pool: PgPool) {
+#[tokio::test]
+async fn switching_off_waits_for_a_launch_that_already_read_the_row() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     let mut launch = canterlot_hub::db::begin(&f.pool).await.unwrap();
@@ -450,8 +452,9 @@ impl Api {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_owner_flips_the_switch_over_http_and_the_machine_view_shows_it(pool: PgPool) {
+#[tokio::test]
+async fn the_owner_flips_the_switch_over_http_and_the_machine_view_shows_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool.clone()).await;
     let machine = Uuid::now_v7();
     sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'machine-b')")
@@ -493,8 +496,9 @@ async fn the_owner_flips_the_switch_over_http_and_the_machine_view_shows_it(pool
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_switch_endpoint_needs_the_owner_session(pool: PgPool) {
+#[tokio::test]
+async fn the_switch_endpoint_needs_the_owner_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool.clone()).await;
     let machine = Uuid::now_v7();
     sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'machine-b')")
@@ -525,8 +529,9 @@ async fn the_switch_endpoint_needs_the_owner_session(pool: PgPool) {
     assert!(!accepts);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn no_agent_call_changes_the_remote_work_switch(pool: PgPool) {
+#[tokio::test]
+async fn no_agent_call_changes_the_remote_work_switch() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let snapshot = |pool: PgPool| async move {
         sqlx::query_scalar::<_, String>(
@@ -559,8 +564,9 @@ async fn no_agent_call_changes_the_remote_work_switch(pool: PgPool) {
 // Запуск на другой машине
 // ---------------------------------------------------------------------------
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn remote_spawn_sends_the_start_to_b_only(pool: PgPool) {
+#[tokio::test]
+async fn remote_spawn_sends_the_start_to_b_only() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     let (child, answer) = f.started(remote_args()).await;
@@ -578,8 +584,9 @@ async fn remote_spawn_sends_the_start_to_b_only(pool: PgPool) {
     assert_eq!(payload["workdir"], "/tmp/b/p");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_machine_is_found_by_name_or_id_and_an_unknown_one_lists_the_names(pool: PgPool) {
+#[tokio::test]
+async fn the_machine_is_found_by_name_or_id_and_an_unknown_one_lists_the_names() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     let mut by_id = remote_args();
@@ -595,8 +602,9 @@ async fn the_machine_is_found_by_name_or_id_and_an_unknown_one_lists_the_names(p
     assert!(error.message.contains("synthetic"), "{}", error.message);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn without_machine_or_with_the_callers_own_nothing_changes(pool: PgPool) {
+#[tokio::test]
+async fn without_machine_or_with_the_callers_own_nothing_changes() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let local = json!({"harness":"claude_code","model":INSIDE,"brief":"x","workdir":"/tmp/w2"});
     let (plain, plain_answer) = f.started(local.clone()).await;
@@ -625,8 +633,9 @@ async fn without_machine_or_with_the_callers_own_nothing_changes(pool: PgPool) {
     assert!(plain_answer.get("machine_name").is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn remote_spawn_is_refused_without_a_workdir_or_outside_the_roots(pool: PgPool) {
+#[tokio::test]
+async fn remote_spawn_is_refused_without_a_workdir_or_outside_the_roots() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     let mut none = remote_args();
@@ -642,8 +651,9 @@ async fn remote_spawn_is_refused_without_a_workdir_or_outside_the_roots(pool: Pg
     assert!(f.children().await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn remote_spawn_checks_the_domain_on_the_target_machine(pool: PgPool) {
+#[tokio::test]
+async fn remote_spawn_checks_the_domain_on_the_target_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     sqlx::query(
@@ -668,8 +678,9 @@ async fn remote_spawn_checks_the_domain_on_the_target_machine(pool: PgPool) {
     assert_eq!(domain.as_deref(), Some("personal"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_domain_less_caller_cannot_spawn_remotely(pool: PgPool) {
+#[tokio::test]
+async fn a_domain_less_caller_cannot_spawn_remotely() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     sqlx::query("update conversations set memory_domain=null where id=$1")
@@ -681,8 +692,9 @@ async fn a_domain_less_caller_cannot_spawn_remotely(pool: PgPool) {
     assert!(f.children().await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_remote_child_never_inherits_the_owner_mode_and_cannot_ask_for_it(pool: PgPool) {
+#[tokio::test]
+async fn a_remote_child_never_inherits_the_owner_mode_and_cannot_ask_for_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     sqlx::query("update conversations set permission_mode='owner' where id=$1")
@@ -715,8 +727,9 @@ async fn a_remote_child_never_inherits_the_owner_mode_and_cannot_ask_for_it(pool
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_catalog_comes_from_the_target_machine(pool: PgPool) {
+#[tokio::test]
+async fn the_catalog_comes_from_the_target_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     let mut remote = remote_args();
@@ -728,8 +741,9 @@ async fn the_catalog_comes_from_the_target_machine(pool: PgPool) {
     assert_eq!(code(f.spawn(local).await), Code::ModelUnknown);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn switch_off_refuses_a_fresh_remote_spawn_and_creates_nothing(pool: PgPool) {
+#[tokio::test]
+async fn switch_off_refuses_a_fresh_remote_spawn_and_creates_nothing() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     assert_eq!(
         code(f.spawn(remote_args()).await),
@@ -742,8 +756,9 @@ async fn switch_off_refuses_a_fresh_remote_spawn_and_creates_nothing(pool: PgPoo
     f.started(local).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_approved_but_unstarted_remote_spawn_is_refused_after_switching_off(pool: PgPool) {
+#[tokio::test]
+async fn an_approved_but_unstarted_remote_spawn_is_refused_after_switching_off() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     let mut outside = remote_args();
@@ -778,8 +793,9 @@ async fn an_approved_but_unstarted_remote_spawn_is_refused_after_switching_off(p
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_approved_remote_spawn_starts_on_b_not_on_the_parents_machine(pool: PgPool) {
+#[tokio::test]
+async fn an_approved_remote_spawn_starts_on_b_not_on_the_parents_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     let mut outside = remote_args();
@@ -794,8 +810,9 @@ async fn an_approved_remote_spawn_starts_on_b_not_on_the_parents_machine(pool: P
     assert_eq!(f.start_machines(children[0].0).await, vec![f.b]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_replayed_remote_call_returns_the_same_answer_and_starts_nothing_twice(pool: PgPool) {
+#[tokio::test]
+async fn a_replayed_remote_call_returns_the_same_answer_and_starts_nothing_twice() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     let caller = f.caller();
@@ -810,8 +827,9 @@ async fn a_replayed_remote_call_returns_the_same_answer_and_starts_nothing_twice
     assert_eq!(f.children().await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_offline_target_queues_with_its_reason_and_starts_after_it_returns(pool: PgPool) {
+#[tokio::test]
+async fn an_offline_target_queues_with_its_reason_and_starts_after_it_returns() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(pool, false).await;
     f.switch(true).await;
     let answer = f.spawn(remote_args()).await.unwrap();
@@ -830,8 +848,9 @@ async fn an_offline_target_queues_with_its_reason_and_starts_after_it_returns(po
     assert_eq!(code(f.spawn(no_queue).await), Code::MachineUnavailable);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_queued_remote_spawn_survives_a_hub_restart_and_starts_on_b(pool: PgPool) {
+#[tokio::test]
+async fn a_queued_remote_spawn_survives_a_hub_restart_and_starts_on_b() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(pool, false).await;
     f.switch(true).await;
     f.spawn(remote_args()).await.unwrap();
@@ -850,8 +869,9 @@ async fn a_queued_remote_spawn_survives_a_hub_restart_and_starts_on_b(pool: PgPo
     assert_eq!(f.start_machines(children[0].0).await, vec![f.b]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_queued_remote_spawn_is_refused_when_the_switch_goes_off_before_the_start(pool: PgPool) {
+#[tokio::test]
+async fn a_queued_remote_spawn_is_refused_when_the_switch_goes_off_before_the_start() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(pool, false).await;
     f.switch(true).await;
     f.spawn(remote_args()).await.unwrap();
@@ -882,8 +902,9 @@ async fn a_queued_remote_spawn_is_refused_when_the_switch_goes_off_before_the_st
 
 /// Выключатель, выключенный и включённый обратно до старта, не оживляет ожидавший запуск:
 /// он запомнил прежнее поколение допуска.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_queued_remote_spawn_does_not_revive_after_off_and_on(pool: PgPool) {
+#[tokio::test]
+async fn a_queued_remote_spawn_does_not_revive_after_off_and_on() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(pool, false).await;
     f.switch(true).await;
     f.spawn(remote_args()).await.unwrap();
@@ -908,8 +929,9 @@ async fn a_queued_remote_spawn_does_not_revive_after_off_and_on(pool: PgPool) {
     assert!(f.children().await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_approved_remote_spawn_does_not_revive_after_off_and_on(pool: PgPool) {
+#[tokio::test]
+async fn an_approved_remote_spawn_does_not_revive_after_off_and_on() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     let mut outside = remote_args();
@@ -933,8 +955,9 @@ async fn an_approved_remote_spawn_does_not_revive_after_off_and_on(pool: PgPool)
     f.started(remote_args()).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_offline_queued_remote_spawn_expires_with_a_note_to_the_parent(pool: PgPool) {
+#[tokio::test]
+async fn an_offline_queued_remote_spawn_expires_with_a_note_to_the_parent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(pool, false).await;
     f.switch(true).await;
     f.spawn(remote_args()).await.unwrap();
@@ -959,8 +982,9 @@ async fn an_offline_queued_remote_spawn_expires_with_a_note_to_the_parent(pool: 
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_target_worker_without_remote_spawn_queues_instead_of_starting(pool: PgPool) {
+#[tokio::test]
+async fn a_target_worker_without_remote_spawn_queues_instead_of_starting() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(pool, false).await;
     f.switch(true).await;
     // Воркер B подключён, но без `remote_spawn_v1`.
@@ -978,8 +1002,9 @@ async fn a_target_worker_without_remote_spawn_queues_instead_of_starting(pool: P
     assert_eq!(code(f.spawn(no_queue).await), Code::CapabilityMissing);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_isolated_remote_child_gets_its_worktree_from_the_target_machine(pool: PgPool) {
+#[tokio::test]
+async fn an_isolated_remote_child_gets_its_worktree_from_the_target_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     // Рабочая копия родителя на A не причём: источник и корень копий — у B.
@@ -1028,8 +1053,9 @@ async fn an_isolated_remote_child_gets_its_worktree_from_the_target_machine(pool
     assert_eq!(code(f.spawn(again).await), Code::CapabilityMissing);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn sessions_list_rows_carry_the_machine_name(pool: PgPool) {
+#[tokio::test]
+async fn sessions_list_rows_carry_the_machine_name() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     let (child, _) = f.started(remote_args()).await;
@@ -1047,8 +1073,9 @@ async fn sessions_list_rows_carry_the_machine_name(pool: PgPool) {
     assert_eq!(name_of(f.parent), "synthetic");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn accept_stops_a_remote_child_on_its_own_machine(pool: PgPool) {
+#[tokio::test]
+async fn accept_stops_a_remote_child_on_its_own_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     let mut isolated = remote_args();
@@ -1091,8 +1118,9 @@ async fn policy_with_b_only_model(f: &Fx) {
 
 /// Предпросмотр на другую машину называет учётную запись, чьи цифры взял; свой запуск с одной
 /// записью называет провайдера по-старому.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_remote_explanation_names_the_account_whose_limits_it_used(pool: PgPool) {
+#[tokio::test]
+async fn the_remote_explanation_names_the_account_whose_limits_it_used() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     policy_with_b_only_model(&f).await;
@@ -1129,8 +1157,9 @@ async fn the_remote_explanation_names_the_account_whose_limits_it_used(pool: PgP
     assert!(text.contains("claude@b-claude weekly 99%"), "{text}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn route_preview_and_routed_spawn_see_the_target_machine(pool: PgPool) {
+#[tokio::test]
+async fn route_preview_and_routed_spawn_see_the_target_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     policy_with_b_only_model(&f).await;
@@ -1201,8 +1230,9 @@ async fn turn_b_into_a_runner(f: &Fx) {
     .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn session_spawn_and_route_preview_refuse_a_runner_machine(pool: PgPool) {
+#[tokio::test]
+async fn session_spawn_and_route_preview_refuse_a_runner_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
     policy_with_b_only_model(&f).await;

@@ -49,8 +49,9 @@ async fn kinds(pool: &PgPool) -> Vec<(String, Option<uuid::Uuid>)> {
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_pushes_new_sign_in_is_pushed_without_a_conversation(pool: PgPool) {
+#[tokio::test]
+async fn auth_pushes_new_sign_in_is_pushed_without_a_conversation() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let quiet = hub.sign_in_owner(&hub.anonymous(Some("203.0.113.9"))).await;
@@ -89,8 +90,9 @@ async fn auth_pushes_new_sign_in_is_pushed_without_a_conversation(pool: PgPool) 
     assert_eq!(none, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_pushes_failures_are_summarised_at_most_hourly(pool: PgPool) {
+#[tokio::test]
+async fn auth_pushes_failures_are_summarised_at_most_hourly() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     enable(&hub.pool).await;
@@ -157,8 +159,9 @@ fn auth_pushes_failure_text_declines_addresses() {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_pushes_sign_in_kinds_have_no_conversation_and_others_need_one(pool: PgPool) {
+#[tokio::test]
+async fn auth_pushes_sign_in_kinds_have_no_conversation_and_others_need_one() {
+    let pool = canterlot_hub::testkit::db().await;
     let insert = |kind: &'static str, key: &'static str| {
         let pool = pool.clone();
         async move {

@@ -141,8 +141,9 @@ async fn pauses(pool: &PgPool, seed: &Seed) -> Vec<PauseReason> {
     .0
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn stop_execution_pauses_queue_before_command(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn stop_execution_pauses_queue_before_command() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = start(&pool, &seed, ExecutionState::Running).await;
     let head = input(&pool, &seed).await;
@@ -190,8 +191,9 @@ async fn stop_execution_pauses_queue_before_command(pool: PgPool) -> TestResult 
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn stop_execution_is_created_once_per_key(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn stop_execution_is_created_once_per_key() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = start(&pool, &seed, ExecutionState::Created).await;
     let first = stop(&pool, &seed, false, "stop").await;
@@ -239,8 +241,9 @@ async fn stop_execution_is_created_once_per_key(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn force_stop_is_a_second_command(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn force_stop_is_a_second_command() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = start(&pool, &seed, ExecutionState::Running).await;
     let graceful = stop(&pool, &seed, false, "graceful").await;
@@ -277,8 +280,9 @@ async fn force_stop_is_a_second_command(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn stop_without_live_execution_is_nothing_to_stop(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn stop_without_live_execution_is_nothing_to_stop() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     assert_eq!(
         stop(&pool, &seed, false, "stop").await,
@@ -301,8 +305,9 @@ async fn stop_without_live_execution_is_nothing_to_stop(pool: PgPool) -> TestRes
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn reconcile_refreshes_observed_execution(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn reconcile_refreshes_observed_execution() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = start(&pool, &seed, ExecutionState::Running).await;
     sqlx::query("update executions set observed_at = now() - interval '1 day' where id = $1")
@@ -328,10 +333,9 @@ async fn reconcile_refreshes_observed_execution(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn reconcile_applies_worker_terminal_state_as_late_fact_after_sj_close(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn reconcile_applies_worker_terminal_state_as_late_fact_after_sj_close() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = start(&pool, &seed, ExecutionState::Stopping).await;
     let report = ReconcileReport {
@@ -360,10 +364,10 @@ async fn reconcile_applies_worker_terminal_state_as_late_fact_after_sj_close(
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn reconcile_marks_unknown_nonterminal_execution_owner_lost_with_divergence_event(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn reconcile_marks_unknown_nonterminal_execution_owner_lost_with_divergence_event()
+-> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for state in [
         ExecutionState::Created,
         ExecutionState::Starting,
@@ -402,8 +406,9 @@ async fn reconcile_marks_unknown_nonterminal_execution_owner_lost_with_divergenc
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn reconcile_does_not_create_unknown_executions(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn reconcile_does_not_create_unknown_executions() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let unknown = Uuid::now_v7();
     Ingest::new(pool.clone())
@@ -436,8 +441,9 @@ async fn reconcile_does_not_create_unknown_executions(pool: PgPool) -> TestResul
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn dispatch_waits_for_reconciliation(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn dispatch_waits_for_reconciliation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = start(&pool, &seed, ExecutionState::Running).await;
     let head = input(&pool, &seed).await;
@@ -545,10 +551,9 @@ async fn dispatch_waits_for_reconciliation(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn hello_records_alarms_v1_and_drops_unknown_optional_capabilities(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn hello_records_alarms_v1_and_drops_unknown_optional_capabilities() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     let endpoint = Endpoint::from_shared(format!("https://{}", hub.addr))?.tls_config(
@@ -613,8 +618,9 @@ async fn hello_records_alarms_v1_and_drops_unknown_optional_capabilities(
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn dispatch_deferred_generation_closed_requeues_with_hold(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn dispatch_deferred_generation_closed_requeues_with_hold() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for (reason, hold) in [
         ("generation_closed", HoldReason::NoLiveExecution),
         ("execution_stopped", HoldReason::NoLiveExecution),
@@ -646,8 +652,9 @@ async fn dispatch_deferred_generation_closed_requeues_with_hold(pool: PgPool) ->
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn reconcile_preserves_generation_and_machine_boundaries(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn reconcile_preserves_generation_and_machine_boundaries() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let own = start(&pool, &seed, ExecutionState::Created).await;
     let foreign_seed = testkit::seed(&pool).await;
@@ -683,10 +690,9 @@ async fn reconcile_preserves_generation_and_machine_boundaries(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn reconcile_diagnoses_illegal_terminal_transition_after_sj_close(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn reconcile_diagnoses_illegal_terminal_transition_after_sj_close() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = start(&pool, &seed, ExecutionState::Running).await;
     Ingest::new(pool.clone())
@@ -711,10 +717,9 @@ async fn reconcile_diagnoses_illegal_terminal_transition_after_sj_close(
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn stop_execution_rolls_back_pause_command_and_idempotency_on_event_failure(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn stop_execution_rolls_back_pause_command_and_idempotency_on_event_failure() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     start(&pool, &seed, ExecutionState::Running).await;
     sqlx::query("create function reject_stop_event() returns trigger language plpgsql as $$ begin if new.kind = 'queue_paused' then raise exception 'event rejected'; end if; return new; end $$").execute(&pool).await?;
@@ -749,8 +754,9 @@ async fn stop_execution_rolls_back_pause_command_and_idempotency_on_event_failur
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reconcile_unknown_machine_errors_without_side_effects(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn reconcile_unknown_machine_errors_without_side_effects() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let result = Ingest::new(pool.clone())
         .reconcile(Uuid::now_v7(), &ReconcileReport::default())

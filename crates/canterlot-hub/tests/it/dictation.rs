@@ -11,8 +11,9 @@ fn term(pattern: &str, replacement: &str) -> Value {
     json!({"pattern": pattern, "replacement": replacement})
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn terms_start_empty_and_survive_a_round_trip_in_order(pool: PgPool) {
+#[tokio::test]
+async fn terms_start_empty_and_survive_a_round_trip_in_order() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let body: Value = f.get("/api/v1/dictation/terms").await;
     assert_eq!(body, json!({"terms": []}));
@@ -50,8 +51,9 @@ async fn terms_start_empty_and_survive_a_round_trip_in_order(pool: PgPool) {
     assert_eq!(again.json::<Value>(), stored);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn terms_put_replaces_the_whole_list_and_is_idempotent(pool: PgPool) {
+#[tokio::test]
+async fn terms_put_replaces_the_whole_list_and_is_idempotent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let put = |key: &'static str, body: Value| {
         let client = f.client.clone();
@@ -95,8 +97,9 @@ async fn terms_put_replaces_the_whole_list_and_is_idempotent(pool: PgPool) {
     assert_eq!(body, json!({"terms": []}));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn terms_validation_names_the_code_and_keeps_the_stored_list(pool: PgPool) {
+#[tokio::test]
+async fn terms_validation_names_the_code_and_keeps_the_stored_list() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let good = json!({"terms": [term("мейн", "main")]});
     assert_eq!(
@@ -143,8 +146,9 @@ async fn terms_validation_names_the_code_and_keeps_the_stored_list(pool: PgPool)
     assert_eq!(body, good);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn terms_put_requires_an_idempotency_key_and_rejects_its_reuse(pool: PgPool) {
+#[tokio::test]
+async fn terms_put_requires_an_idempotency_key_and_rejects_its_reuse() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let body = json!({"terms": [term("мейн", "main")]});
     let without = f
@@ -184,8 +188,9 @@ async fn terms_put_requires_an_idempotency_key_and_rejects_its_reuse(pool: PgPoo
     assert_eq!(error["error"]["code"], "idempotency_conflict");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn concurrent_term_replacements_serialize_per_owner(pool: PgPool) {
+#[tokio::test]
+async fn concurrent_term_replacements_serialize_per_owner() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     // Оба DELETE обязаны пройти до вставок: иначе блокировки строк сами
     // выстроят транзакции и гонка не проявится.
@@ -359,8 +364,9 @@ async fn hub_with_dictation(
     (hub, client)
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn status_reports_disabled_without_touching_the_socket(pool: PgPool) {
+#[tokio::test]
+async fn status_reports_disabled_without_touching_the_socket() {
+    let pool = canterlot_hub::testkit::db().await;
     let (_hub, client) = hub_with_dictation(
         pool,
         fake::missing_socket(std::path::Path::new("/nonexistent")),
@@ -377,8 +383,9 @@ async fn status_reports_disabled_without_touching_the_socket(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn status_reports_no_service_when_the_socket_is_missing(pool: PgPool) {
+#[tokio::test]
+async fn status_reports_no_service_when_the_socket_is_missing() {
+    let pool = canterlot_hub::testkit::db().await;
     let dir = tempfile::tempdir().unwrap();
     let (_hub, client) = hub_with_dictation(pool, fake::missing_socket(dir.path()), true).await;
     let response = client
@@ -391,8 +398,9 @@ async fn status_reports_no_service_when_the_socket_is_missing(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn status_copies_health_and_caches_it_for_ten_seconds(pool: PgPool) {
+#[tokio::test]
+async fn status_copies_health_and_caches_it_for_ten_seconds() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech = fake::start(|mut conn| async move {
         let Some(request) = conn.next().await else {
             return;
@@ -425,8 +433,9 @@ async fn status_copies_health_and_caches_it_for_ten_seconds(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn status_reports_unhealthy_and_failed_loads(pool: PgPool) {
+#[tokio::test]
+async fn status_reports_unhealthy_and_failed_loads() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech = fake::start(|mut conn| async move {
         let _ = conn.next().await;
         conn.send(json!({"type": "health", "ok": false, "engine": "cold", "mode": null, "model": "m", "busy": false}))
@@ -671,8 +680,9 @@ async fn seed_term(
     .expect("seed term");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn websocket_needs_a_live_session_and_an_allowed_origin(pool: PgPool) {
+#[tokio::test]
+async fn websocket_needs_a_live_session_and_an_allowed_origin() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech =
         fake::start(|mut conn| async move { while conn.next_frame().await.is_some() {} }).await;
     let hub = spawn_hub(pool.clone(), speech.socket.clone(), fast_timers()).await;
@@ -704,8 +714,9 @@ async fn websocket_needs_a_live_session_and_an_allowed_origin(pool: PgPool) {
     assert_eq!(revoked.close_code, Some(4401));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn revocation_between_upgrade_and_start_never_reaches_speech(pool: PgPool) {
+#[tokio::test]
+async fn revocation_between_upgrade_and_start_never_reaches_speech() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech =
         fake::start(|mut conn| async move { while conn.next_frame().await.is_some() {} }).await;
     let hub = spawn_hub(pool, speech.socket.clone(), fast_timers()).await;
@@ -726,8 +737,9 @@ async fn revocation_between_upgrade_and_start_never_reaches_speech(pool: PgPool)
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn protocol_violations_answer_bad_request_or_bad_audio(pool: PgPool) {
+#[tokio::test]
+async fn protocol_violations_answer_bad_request_or_bad_audio() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech =
         fake::start(|mut conn| async move { while conn.next_frame().await.is_some() {} }).await;
     let hub = spawn_hub(pool, speech.socket.clone(), fast_timers()).await;
@@ -770,8 +782,9 @@ async fn protocol_violations_answer_bad_request_or_bad_audio(pool: PgPool) {
     assert_eq!(error_code(format).await.0, "bad_audio");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn bad_audio_for_empty_odd_large_and_ahead_of_time_frames(pool: PgPool) {
+#[tokio::test]
+async fn bad_audio_for_empty_odd_large_and_ahead_of_time_frames() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech =
         fake::start(|mut conn| async move { while conn.next_frame().await.is_some() {} }).await;
     let hub = spawn_hub(pool, speech.socket.clone(), fast_timers()).await;
@@ -798,8 +811,9 @@ async fn bad_audio_for_empty_odd_large_and_ahead_of_time_frames(pool: PgPool) {
     assert_eq!(error_code(ahead).await.0, "bad_audio");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn live_text_and_final_carry_the_dictionary(pool: PgPool) {
+#[tokio::test]
+async fn live_text_and_final_carry_the_dictionary() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech = fake::start(|mut conn| async move {
         let Some(start) = conn.next().await else {
             return;
@@ -890,8 +904,9 @@ async fn live_text_and_final_carry_the_dictionary(pool: PgPool) {
     assert_eq!(socket.close_code, Some(1000));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn too_long_final_is_passed_through(pool: PgPool) {
+#[tokio::test]
+async fn too_long_final_is_passed_through() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech = fake::start(|mut conn| async move {
         let _ = conn.next().await;
         conn.send(json!({"type":"state","state":"listening","mode":"cpu"}))
@@ -912,8 +927,9 @@ async fn too_long_final_is_passed_through(pool: PgPool) {
     assert_eq!(socket.close_code, Some(1000));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn final_expanded_past_the_old_write_buffer_reaches_the_client(pool: PgPool) {
+#[tokio::test]
+async fn final_expanded_past_the_old_write_buffer_reaches_the_client() {
+    let pool = canterlot_hub::testkit::db().await;
     let raw = vec!["a"; 3_000].join(" ");
     let speech = fake::start(move |mut conn| {
         let raw = raw.clone();
@@ -947,8 +963,9 @@ async fn final_expanded_past_the_old_write_buffer_reaches_the_client(pool: PgPoo
     assert_eq!(socket.close_code, Some(1000));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn final_expanded_past_the_outbound_limit_is_engine_failed(pool: PgPool) {
+#[tokio::test]
+async fn final_expanded_past_the_outbound_limit_is_engine_failed() {
+    let pool = canterlot_hub::testkit::db().await;
     let raw = vec!["a"; 11_000].join(" ");
     let speech = fake::start(move |mut conn| {
         let raw = raw.clone();
@@ -979,8 +996,9 @@ async fn final_expanded_past_the_outbound_limit_is_engine_failed(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn same_device_replaces_and_another_device_gets_busy(pool: PgPool) {
+#[tokio::test]
+async fn same_device_replaces_and_another_device_gets_busy() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech = fake::start(|mut conn| async move {
         let _ = conn.next().await;
         conn.send(json!({"type":"state","state":"listening","mode":"gpu"}))
@@ -1015,8 +1033,9 @@ async fn same_device_replaces_and_another_device_gets_busy(pool: PgPool) {
     assert_eq!(second.close_code, Some(1000));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn slot_release_is_generation_safe(pool: PgPool) {
+#[tokio::test]
+async fn slot_release_is_generation_safe() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech = fake::start(|mut conn| async move {
         let _ = conn.next().await;
         conn.send(json!({"type":"state","state":"listening","mode":"gpu"}))
@@ -1046,8 +1065,9 @@ async fn slot_release_is_generation_safe(pool: PgPool) {
     assert_eq!(new.next(TIMEOUT).await, None);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn missing_speech_socket_answers_speech_unavailable(pool: PgPool) {
+#[tokio::test]
+async fn missing_speech_socket_answers_speech_unavailable() {
+    let pool = canterlot_hub::testkit::db().await;
     let dir = tempfile::tempdir().unwrap();
     let hub = spawn_hub(pool, fake::missing_socket(dir.path()), fast_timers()).await;
     let mut socket = open(&hub).await;
@@ -1058,8 +1078,9 @@ async fn missing_speech_socket_answers_speech_unavailable(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn speech_errors_map_to_client_codes(pool: PgPool) {
+#[tokio::test]
+async fn speech_errors_map_to_client_codes() {
+    let pool = canterlot_hub::testkit::db().await;
     for (speech_code, expected) in [
         ("engine_unavailable", "speech_unavailable"),
         ("shutting_down", "speech_unavailable"),
@@ -1090,8 +1111,9 @@ async fn speech_errors_map_to_client_codes(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn speech_closing_mid_dictation_is_engine_failed(pool: PgPool) {
+#[tokio::test]
+async fn speech_closing_mid_dictation_is_engine_failed() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech = fake::start(|mut conn| async move {
         let _ = conn.next().await;
         conn.send(json!({"type":"state","state":"loading","mode":null}))
@@ -1106,8 +1128,9 @@ async fn speech_closing_mid_dictation_is_engine_failed(pool: PgPool) {
     assert_eq!(error_code(socket).await.0, "engine_failed");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cancel_closes_without_any_message(pool: PgPool) {
+#[tokio::test]
+async fn cancel_closes_without_any_message() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech = fake::start(|mut conn| async move {
         let _ = conn.next().await;
         conn.send(json!({"type":"state","state":"listening","mode":"gpu"}))
@@ -1124,8 +1147,9 @@ async fn cancel_closes_without_any_message(pool: PgPool) {
     assert_eq!(socket.close_code, Some(1000));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idle_before_finish_ends_the_dictation(pool: PgPool) {
+#[tokio::test]
+async fn idle_before_finish_ends_the_dictation() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech = fake::start(|mut conn| async move {
         let _ = conn.next().await;
         conn.send(json!({"type":"state","state":"listening","mode":"gpu"}))
@@ -1146,8 +1170,9 @@ async fn idle_before_finish_ends_the_dictation(pool: PgPool) {
     assert_eq!(error_code(socket).await.0, "idle");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn start_timeout_and_lifetime_are_enforced(pool: PgPool) {
+#[tokio::test]
+async fn start_timeout_and_lifetime_are_enforced() {
+    let pool = canterlot_hub::testkit::db().await;
     let silent =
         fake::start(|mut conn| async move { while conn.next_frame().await.is_some() {} }).await;
     let timers = Timers {
@@ -1181,8 +1206,9 @@ async fn start_timeout_and_lifetime_are_enforced(pool: PgPool) {
     assert_eq!(error_code(socket).await.0, "lifetime");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn no_final_after_finish_is_engine_failed(pool: PgPool) {
+#[tokio::test]
+async fn no_final_after_finish_is_engine_failed() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech = fake::start(|mut conn| async move {
         let _ = conn.next().await;
         conn.send(json!({"type":"state","state":"listening","mode":"gpu"}))
@@ -1211,8 +1237,9 @@ async fn no_final_after_finish_is_engine_failed(pool: PgPool) {
     assert_eq!(error_code(socket).await.0, "engine_failed");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stalled_speech_write_is_engine_failed(pool: PgPool) {
+#[tokio::test]
+async fn stalled_speech_write_is_engine_failed() {
+    let pool = canterlot_hub::testkit::db().await;
     // Служба принимает соединение и ничего не читает: буферы сокета заполняются.
     let speech = fake::start(|mut conn| async move {
         let _ = conn.next().await;
@@ -1250,8 +1277,9 @@ async fn stalled_speech_write_is_engine_failed(pool: PgPool) {
     assert_eq!(code.as_deref(), Some("engine_failed"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn hub_shutdown_during_dictionary_snapshot_drains_without_speech(pool: PgPool) {
+#[tokio::test]
+async fn hub_shutdown_during_dictionary_snapshot_drains_without_speech() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech =
         fake::start(|mut conn| async move { while conn.next_frame().await.is_some() {} }).await;
     let mut lock = pool.begin().await.unwrap();
@@ -1278,8 +1306,9 @@ async fn hub_shutdown_during_dictionary_snapshot_drains_without_speech(pool: PgP
     lock.rollback().await.unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn replacement_during_dictionary_snapshot_closes_the_old_socket(pool: PgPool) {
+#[tokio::test]
+async fn replacement_during_dictionary_snapshot_closes_the_old_socket() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech = fake::start(|mut conn| async move {
         let _ = conn.next().await;
         conn.send(json!({"type":"state","state":"listening","mode":"gpu"}))
@@ -1312,8 +1341,9 @@ async fn replacement_during_dictionary_snapshot_closes_the_old_socket(pool: PgPo
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn hub_shutdown_closes_with_1001(pool: PgPool) {
+#[tokio::test]
+async fn hub_shutdown_closes_with_1001() {
+    let pool = canterlot_hub::testkit::db().await;
     let speech = fake::start(|mut conn| async move {
         let _ = conn.next().await;
         conn.send(json!({"type":"state","state":"loading","mode":null}))

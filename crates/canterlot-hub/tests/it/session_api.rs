@@ -8,8 +8,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn decision_endpoint_unknown_request_answers_404(pool: PgPool) {
+#[tokio::test]
+async fn decision_endpoint_unknown_request_answers_404() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -37,8 +38,9 @@ async fn decision_endpoint_unknown_request_answers_404(pool: PgPool) {
     assert_eq!(response.json::<Value>()["error"]["code"], "not_found");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn queue_refusals_answer_409_with_a_published_reason(pool: PgPool) {
+#[tokio::test]
+async fn queue_refusals_answer_409_with_a_published_reason() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -154,8 +156,9 @@ async fn queue_refusals_answer_409_with_a_published_reason(pool: PgPool) {
 
 /// Закрытый разговор отвечает на правку и «Отправить сейчас» кодом
 /// `conversation_closed`, а NUL в тексте — `nul_character` с кодом 400.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn closed_conversation_and_nul_content_answer_with_published_reasons(pool: PgPool) {
+#[tokio::test]
+async fn closed_conversation_and_nul_content_answer_with_published_reasons() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -224,8 +227,9 @@ async fn closed_conversation_and_nul_content_answer_with_published_reasons(pool:
     refused(409, "conversation_closed", "conversation_closed", send_now);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn submit_cancel_interrupt_stop_continue_map_to_domain_outcomes(pool: PgPool) {
+#[tokio::test]
+async fn submit_cancel_interrupt_stop_continue_map_to_domain_outcomes() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -292,8 +296,9 @@ async fn submit_cancel_interrupt_stop_continue_map_to_domain_outcomes(pool: PgPo
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cancel_replays_the_domain_outcome(pool: PgPool) {
+#[tokio::test]
+async fn cancel_replays_the_domain_outcome() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::delivery::submit::{self, ContentBlock, SubmitInput};
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
@@ -336,8 +341,9 @@ async fn cancel_replays_the_domain_outcome(pool: PgPool) {
     assert_eq!(count, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn attachment_ids_are_checked_and_part_of_the_request_hash(pool: PgPool) {
+#[tokio::test]
+async fn attachment_ids_are_checked_and_part_of_the_request_hash() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -376,8 +382,9 @@ async fn attachment_ids_are_checked_and_part_of_the_request_hash(pool: PgPool) {
     assert_eq!(conflict.status, 409);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn resume_carries_the_last_native_conversation_id(pool: PgPool) {
+#[tokio::test]
+async fn resume_carries_the_last_native_conversation_id() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -495,8 +502,9 @@ async fn started_payload(pool: &PgPool, r: &canterlot_hub::testkit::TestResponse
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stale_start_cannot_drop_the_context_of_a_recorded_turn(pool: PgPool) {
+#[tokio::test]
+async fn a_stale_start_cannot_drop_the_context_of_a_recorded_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let (id, client, _dir) = ended_session(
         &pool,
         ExecutionState::Stopped,
@@ -517,8 +525,9 @@ async fn a_stale_start_cannot_drop_the_context_of_a_recorded_turn(pool: PgPool) 
     assert_eq!(payload["native_conversation_id"], "native-id");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_start_without_a_recorded_turn_begins_a_new_native_conversation(pool: PgPool) {
+#[tokio::test]
+async fn a_start_without_a_recorded_turn_begins_a_new_native_conversation() {
+    let pool = canterlot_hub::testkit::db().await;
     let (id, client, _dir) = ended_session(
         &pool,
         ExecutionState::Stopped,
@@ -539,8 +548,9 @@ async fn a_start_without_a_recorded_turn_begins_a_new_native_conversation(pool: 
     assert_eq!(payload["native_conversation_id"], Value::Null);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn detail_says_whether_a_turn_was_recorded(pool: PgPool) {
+#[tokio::test]
+async fn detail_says_whether_a_turn_was_recorded() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fresh, client, _dir) = ended_session(
         &pool,
         ExecutionState::Stopped,
@@ -573,8 +583,9 @@ async fn detail_says_whether_a_turn_was_recorded(pool: PgPool) {
     assert_eq!(body["turn_recorded"], true);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_single_action_clears_a_failed_start_and_starts_an_execution(pool: PgPool) {
+#[tokio::test]
+async fn the_single_action_clears_a_failed_start_and_starts_an_execution() {
+    let pool = canterlot_hub::testkit::db().await;
     let (id, client, _dir) =
         ended_session(&pool, ExecutionState::Failed, "start_rejected", None, false).await;
     let before: (Value, Value) = sqlx::query_as(
@@ -631,8 +642,9 @@ async fn the_single_action_clears_a_failed_start_and_starts_an_execution(pool: P
     assert_eq!(live, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_single_action_clears_an_exited_process_and_keeps_the_context(pool: PgPool) {
+#[tokio::test]
+async fn the_single_action_clears_an_exited_process_and_keeps_the_context() {
+    let pool = canterlot_hub::testkit::db().await;
     let (id, client, _dir) = ended_session(
         &pool,
         ExecutionState::Stopped,
@@ -660,8 +672,9 @@ async fn the_single_action_clears_an_exited_process_and_keeps_the_context(pool: 
     assert_eq!(pauses, json!([]));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn resume_without_a_recorded_turn_starts_a_new_native_conversation(pool: PgPool) {
+#[tokio::test]
+async fn resume_without_a_recorded_turn_starts_a_new_native_conversation() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -706,8 +719,9 @@ async fn resume_without_a_recorded_turn_starts_a_new_native_conversation(pool: P
     assert_eq!(payload["native_conversation_id"], Value::Null);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn resume_skips_a_newer_execution_that_never_ran_a_turn(pool: PgPool) {
+#[tokio::test]
+async fn resume_skips_a_newer_execution_that_never_ran_a_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -763,8 +777,9 @@ async fn resume_skips_a_newer_execution_that_never_ran_a_turn(pool: PgPool) {
 }
 
 #[cfg(feature = "fault-injection")]
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn resume_and_continue_is_one_transaction(pool: PgPool) {
+#[tokio::test]
+async fn resume_and_continue_is_one_transaction() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::fault_injection::Point;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
@@ -813,8 +828,9 @@ async fn resume_and_continue_is_one_transaction(pool: PgPool) {
     assert_eq!(pauses, serde_json::json!([{"reason":"user_stop"}]));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn retry_of_must_reference_an_unconfirmed_input_of_the_same_conversation(pool: PgPool) {
+#[tokio::test]
+async fn retry_of_must_reference_an_unconfirmed_input_of_the_same_conversation() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -890,8 +906,9 @@ async fn retry_of_must_reference_an_unconfirmed_input_of_the_same_conversation(p
     assert_eq!(title, "Первое сообщение");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn title_is_auto_from_first_input_unless_user_set(pool: PgPool) {
+#[tokio::test]
+async fn title_is_auto_from_first_input_unless_user_set() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -939,8 +956,9 @@ async fn title_is_auto_from_first_input_unless_user_set(pool: PgPool) {
     assert_eq!(count, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn scheduled_first_message_sets_the_auto_title(pool: PgPool) {
+#[tokio::test]
+async fn scheduled_first_message_sets_the_auto_title() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         delivery::ContentBlock,
         dispatcher::Dispatcher,
@@ -978,8 +996,9 @@ async fn scheduled_first_message_sets_the_auto_title(pool: PgPool) {
     assert_eq!(title, "Запланированная задача");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn foreign_ids_are_not_found_even_when_a_key_is_already_bound(pool: PgPool) {
+#[tokio::test]
+async fn foreign_ids_are_not_found_even_when_a_key_is_already_bound() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -1014,8 +1033,9 @@ async fn foreign_ids_are_not_found_even_when_a_key_is_already_bound(pool: PgPool
     assert_eq!(r.status, 404);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn old_text_input_keys_still_replay_after_upgrade(pool: PgPool) {
+#[tokio::test]
+async fn old_text_input_keys_still_replay_after_upgrade() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         conversations::{self, SubmitMessage},
         delivery::{ContentBlock, SubmitInput, submit_input},
@@ -1068,8 +1088,9 @@ async fn old_text_input_keys_still_replay_after_upgrade(pool: PgPool) {
     assert_eq!(first, replay);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn foreign_ids_are_not_found_on_every_control_endpoint(pool: PgPool) {
+#[tokio::test]
+async fn foreign_ids_are_not_found_on_every_control_endpoint() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::delivery::submit::{self, ContentBlock, SubmitInput};
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
@@ -1152,8 +1173,9 @@ async fn foreign_ids_are_not_found_on_every_control_endpoint(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auto_title_is_cut_at_a_word_boundary_and_collapses_whitespace(pool: PgPool) {
+#[tokio::test]
+async fn auto_title_is_cut_at_a_word_boundary_and_collapses_whitespace() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -1213,8 +1235,9 @@ async fn auto_title_is_cut_at_a_word_boundary_and_collapses_whitespace(pool: PgP
 
 /// «Отправить повторно как новое» — решение владельца по неподтверждённому
 /// вводу: пауза этого ввода снимается, повтор не ждёт ещё и «Продолжить».
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn retry_as_new_clears_the_unconfirmed_delivery_pause(pool: PgPool) {
+#[tokio::test]
+async fn retry_as_new_clears_the_unconfirmed_delivery_pause() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;

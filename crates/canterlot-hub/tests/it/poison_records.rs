@@ -95,8 +95,9 @@ async fn text(pool: &PgPool, query: &'static str, id: Uuid) -> Option<String> {
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nul_in_any_text_of_a_record_never_refuses_the_record(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn nul_in_any_text_of_a_record_never_refuses_the_record() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     let id = run.id();
     let block = Uuid::now_v7();
@@ -307,8 +308,9 @@ async fn nul_in_any_text_of_a_record_never_refuses_the_record(pool: PgPool) -> T
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stub_of_an_oversized_record_is_attributed_to_the_journal(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn stub_of_an_oversized_record_is_attributed_to_the_journal() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.send(Body::AdapterDiagnostic(AdapterDiagnostic {
         execution_id: Uuid::nil().to_string(),
@@ -396,8 +398,9 @@ async fn fatal_pause(pool: &PgPool, conversation: Uuid) -> bool {
 }
 
 // Суррогат без пары не проходит ни serde_json, ни jsonb: повтор дал бы тот же отказ.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn refused_record_fails_its_execution_and_the_journal_moves_on(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn refused_record_fails_its_execution_and_the_journal_moves_on() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let run = Run::new(&pool).await;
     let (before, after) = (Uuid::now_v7(), Uuid::now_v7());
     let batch = run.batch(vec![
@@ -429,10 +432,9 @@ async fn refused_record_fails_its_execution_and_the_journal_moves_on(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn value_refused_by_the_database_is_contained_like_an_invalid_record(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn value_refused_by_the_database_is_contained_like_an_invalid_record() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let run = Run::new(&pool).await;
     sqlx::raw_sql(
         "create function refuse_block() returns trigger language plpgsql as $$
@@ -452,8 +454,9 @@ async fn value_refused_by_the_database_is_contained_like_an_invalid_record(
 }
 
 // Отказ не из-за значения проходит сам или лечится хабом, а запись потерялась бы навсегда.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn other_database_failures_keep_the_record_for_a_retry(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn other_database_failures_keep_the_record_for_a_retry() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let run = Run::new(&pool).await;
     sqlx::raw_sql(
         "create function refuse_block() returns trigger language plpgsql as $$
@@ -481,8 +484,9 @@ async fn other_database_failures_keep_the_record_for_a_retry(pool: PgPool) -> Te
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn finished_execution_is_not_stopped_again(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn finished_execution_is_not_stopped_again() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let run = Run::new(&pool).await;
     let execution = run.execution.execution_id;
     executions::set_state(&pool, execution, State::Stopping, None, Uuid::now_v7()).await?;
@@ -507,8 +511,9 @@ async fn finished_execution_is_not_stopped_again(pool: PgPool) -> TestResult {
 }
 
 // Без исполнения журнала сбой не к чему приписать.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn journal_without_an_execution_still_refuses_the_batch(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn journal_without_an_execution_still_refuses_the_batch() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let run = Run::new(&pool).await;
     let batch = JournalRecords {
         journal_id: Uuid::now_v7().to_string(),
@@ -585,10 +590,9 @@ async fn journal_diagnostics(pool: &PgPool, execution: Uuid) -> Vec<String> {
 }
 
 // Отказ не подтверждается и не пропускается, а владелец узнаёт о нём один раз, не на каждый повтор.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn refused_cj_record_stays_unacked_and_is_shown_once_until_it_applies(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn refused_cj_record_stays_unacked_and_is_shown_once_until_it_applies() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let run = Run::new(&pool).await;
     let journal = Uuid::now_v7();
     let machine = run.seed.machine_id;
@@ -620,10 +624,9 @@ async fn refused_cj_record_stays_unacked_and_is_shown_once_until_it_applies(
 }
 
 // Такой отказ приходит и от записи известного вида: состояние хабу неизвестно.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cj_record_of_a_known_kind_that_cannot_apply_stops_the_journal_too(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn cj_record_of_a_known_kind_that_cannot_apply_stops_the_journal_too() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let run = Run::new(&pool).await;
     let journal = Uuid::now_v7();
     let unknown_state = Body::ExecutionState(ExecutionState {
@@ -644,10 +647,9 @@ async fn cj_record_of_a_known_kind_that_cannot_apply_stops_the_journal_too(
 }
 
 // Запись неизвестного вида нельзя отбросить: после обновления хаба она применится.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unknown_sj_record_is_not_contained_and_is_shown_in_its_conversation(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn unknown_sj_record_is_not_contained_and_is_shown_in_its_conversation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let run = Run::new(&pool).await;
     let execution = run.execution.execution_id;
     let machine = run.seed.machine_id;

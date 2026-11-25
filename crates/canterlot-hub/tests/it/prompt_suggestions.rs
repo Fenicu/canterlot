@@ -205,8 +205,9 @@ async fn start_payload(pool: &PgPool, execution: &executions::StartedExecution) 
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn suggestion_is_stored_published_and_comes_back_in_the_snapshot(pool: PgPool) {
+#[tokio::test]
+async fn suggestion_is_stored_published_and_comes_back_in_the_snapshot() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = claude_seed(&pool).await;
     let execution = running(&pool, &seed).await;
     suggest(&pool, &seed, &execution, "  add tests  ").await;
@@ -221,8 +222,9 @@ async fn suggestion_is_stored_published_and_comes_back_in_the_snapshot(pool: PgP
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn only_the_latest_suggestion_is_kept(pool: PgPool) {
+#[tokio::test]
+async fn only_the_latest_suggestion_is_kept() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = claude_seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let journal = suggest(&pool, &seed, &execution, "first").await;
@@ -248,8 +250,9 @@ async fn only_the_latest_suggestion_is_kept(pool: PgPool) {
     assert_eq!(count, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn new_input_clears_the_suggestion_and_publishes_null(pool: PgPool) {
+#[tokio::test]
+async fn new_input_clears_the_suggestion_and_publishes_null() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = claude_seed(&pool).await;
     let execution = running(&pool, &seed).await;
     suggest(&pool, &seed, &execution, "add tests").await;
@@ -260,8 +263,9 @@ async fn new_input_clears_the_suggestion_and_publishes_null(pool: PgPool) {
     assert_eq!(published[1].payload["suggestion"], Value::Null);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn suggestion_is_not_stored_while_input_waits_for_its_turn(pool: PgPool) {
+#[tokio::test]
+async fn suggestion_is_not_stored_while_input_waits_for_its_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = claude_seed(&pool).await;
     let execution = running(&pool, &seed).await;
     submit(&pool, &seed).await;
@@ -270,8 +274,9 @@ async fn suggestion_is_not_stored_while_input_waits_for_its_turn(pool: PgPool) {
     assert!(events(&pool, seed.conversation_id).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn new_turn_clears_the_suggestion(pool: PgPool) {
+#[tokio::test]
+async fn new_turn_clears_the_suggestion() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = claude_seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let input = submit(&pool, &seed).await;
@@ -328,8 +333,9 @@ async fn new_turn_clears_the_suggestion(pool: PgPool) {
     assert_eq!(published.last().unwrap().payload["suggestion"], Value::Null);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn setting_off_drops_new_suggestions_and_clears_shown_ones(pool: PgPool) {
+#[tokio::test]
+async fn setting_off_drops_new_suggestions_and_clears_shown_ones() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = claude_seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let journal = suggest(&pool, &seed, &execution, "add tests").await;
@@ -362,8 +368,9 @@ async fn setting_off_drops_new_suggestions_and_clears_shown_ones(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delegated_and_other_harness_sessions_get_no_suggestions(pool: PgPool) {
+#[tokio::test]
+async fn delegated_and_other_harness_sessions_get_no_suggestions() {
+    let pool = canterlot_hub::testkit::db().await;
     for (harness, delegated) in [("codex", false), ("claude_code", true)] {
         let seed = testkit::seed(&pool).await;
         set_harness(&pool, seed.conversation_id, harness).await;
@@ -387,8 +394,9 @@ async fn delegated_and_other_harness_sessions_get_no_suggestions(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn start_command_carries_the_owner_setting(pool: PgPool) {
+#[tokio::test]
+async fn start_command_carries_the_owner_setting() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = claude_seed(&pool).await;
     let first = executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
         .await
@@ -511,8 +519,9 @@ fn events_schema_describes_prompt_suggestion_changed() {
     assert!(!validator.is_valid(&extra));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn late_suggestion_after_the_next_input_was_accepted_is_dropped(pool: PgPool) {
+#[tokio::test]
+async fn late_suggestion_after_the_next_input_was_accepted_is_dropped() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = claude_seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let journal = Uuid::now_v7();
@@ -559,8 +568,9 @@ async fn late_suggestion_after_the_next_input_was_accepted_is_dropped(pool: PgPo
     assert_eq!(stored(&pool, &seed).await.as_deref(), Some("fresh"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn disabling_waits_for_an_ingest_that_already_stored_a_suggestion(pool: PgPool) {
+#[tokio::test]
+async fn disabling_waits_for_an_ingest_that_already_stored_a_suggestion() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = claude_seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let origin = turn(&pool, &seed).await;
@@ -608,8 +618,9 @@ async fn disabling_waits_for_an_ingest_that_already_stored_a_suggestion(pool: Pg
     assert_eq!(published.last().unwrap().payload["suggestion"], Value::Null);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn ingest_waits_for_a_disable_even_without_a_settings_row(pool: PgPool) {
+#[tokio::test]
+async fn ingest_waits_for_a_disable_even_without_a_settings_row() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = claude_seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let origin = turn(&pool, &seed).await;
@@ -658,8 +669,9 @@ async fn ingest_waits_for_a_disable_even_without_a_settings_row(pool: PgPool) {
     assert_eq!(left, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn snapshot_hides_a_suggestion_while_the_setting_is_off(pool: PgPool) {
+#[tokio::test]
+async fn snapshot_hides_a_suggestion_while_the_setting_is_off() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = claude_seed(&pool).await;
     let execution = running(&pool, &seed).await;
     suggest(&pool, &seed, &execution, "add tests").await;

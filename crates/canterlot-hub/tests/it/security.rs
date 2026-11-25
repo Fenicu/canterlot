@@ -104,8 +104,9 @@ async fn closed(socket: &mut TcpStream, within: Duration) -> Vec<u8> {
     bytes
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn security_untrusted_unfinished_headers_expire(pool: PgPool) {
+#[tokio::test]
+async fn security_untrusted_unfinished_headers_expire() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut config = test_http_config();
     config.header_read_timeout = DEADLINE;
     let h = server(pool, config).await;
@@ -121,8 +122,9 @@ async fn security_untrusted_unfinished_headers_expire(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn security_slow_body_expires_and_capacity_returns(pool: PgPool) {
+#[tokio::test]
+async fn security_slow_body_expires_and_capacity_returns() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut config = test_http_config();
     config.body_read_timeout = DEADLINE;
     config.max_connections = 1;
@@ -148,8 +150,9 @@ async fn security_slow_body_expires_and_capacity_returns(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn security_connection_cap_rejects_immediately_and_recovers(pool: PgPool) {
+#[tokio::test]
+async fn security_connection_cap_rejects_immediately_and_recovers() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut config = test_http_config();
     config.max_connections = 2;
     config.header_read_timeout = Duration::from_secs(1);
@@ -172,8 +175,9 @@ async fn security_connection_cap_rejects_immediately_and_recovers(pool: PgPool) 
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn security_keep_alive_idle_connection_expires(pool: PgPool) {
+#[tokio::test]
+async fn security_keep_alive_idle_connection_expires() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut config = test_http_config();
     config.header_read_timeout = DEADLINE;
     let h = server(pool, config).await;
@@ -187,8 +191,9 @@ async fn security_keep_alive_idle_connection_expires(pool: PgPool) {
 }
 
 #[cfg(feature = "fault-injection")]
-#[sqlx::test(migrations = "./migrations")]
-async fn security_upgraded_connection_outlives_body_deadline(pool: PgPool) {
+#[tokio::test]
+async fn security_upgraded_connection_outlives_body_deadline() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut config = test_http_config();
     config.header_read_timeout = DEADLINE;
     config.body_read_timeout = DEADLINE;
@@ -256,9 +261,10 @@ fn security_panic_payload_is_sanitized_in_subprocess() {
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
+#[tokio::test]
 #[ignore = "subprocess fixture"]
-async fn security_panic_subprocess(pool: PgPool) {
+async fn security_panic_subprocess() {
+    let pool = canterlot_hub::testkit::db().await;
     tracing_subscriber::fmt()
         .with_ansi(false)
         .with_writer(std::io::stderr)
@@ -390,12 +396,14 @@ async fn race(pool: PgPool, create: bool) {
     assert_eq!(after, deadlocks);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn security_same_row_transition_race_replays_success(pool: PgPool) {
+#[tokio::test]
+async fn security_same_row_transition_race_replays_success() {
+    let pool = canterlot_hub::testkit::db().await;
     race(pool, false).await;
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn security_unique_create_race_replays_success(pool: PgPool) {
+#[tokio::test]
+async fn security_unique_create_race_replays_success() {
+    let pool = canterlot_hub::testkit::db().await;
     race(pool, true).await;
 }

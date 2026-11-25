@@ -296,8 +296,9 @@ async fn confirm_interrupt(pool: &PgPool, command: Uuid, status: &str) {
     .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn claude_and_codex_queued_input_gets_a_guarded_interrupt_for_this_turn(pool: PgPool) {
+#[tokio::test]
+async fn claude_and_codex_queued_input_gets_a_guarded_interrupt_for_this_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     for harness in ["claude_code", "codex"] {
         let scene = hung_scene(&pool, harness, true).await;
         let input = queued_input(&pool, &scene).await;
@@ -326,8 +327,9 @@ async fn claude_and_codex_queued_input_gets_a_guarded_interrupt_for_this_turn(po
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn opencode_and_alert_mode_only_show_a_card_and_push(pool: PgPool) {
+#[tokio::test]
+async fn opencode_and_alert_mode_only_show_a_card_and_push() {
+    let pool = canterlot_hub::testkit::db().await;
     let opencode = hung_scene(&pool, "opencode", true).await;
     warm(&pool, &opencode).await;
     tick(&pool, &opencode, opencode.base).await;
@@ -373,8 +375,9 @@ async fn opencode_and_alert_mode_only_show_a_card_and_push(pool: PgPool) {
     assert!(notes(&pool, &off).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_machine_without_the_guarded_interrupt_gets_a_card_not_an_interrupt(pool: PgPool) {
+#[tokio::test]
+async fn a_machine_without_the_guarded_interrupt_gets_a_card_not_an_interrupt() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", true).await;
     sqlx::query("update machines set capabilities=array['pilot_v1'] where id=$1")
         .bind(scene.seed.machine_id)
@@ -387,8 +390,9 @@ async fn a_machine_without_the_guarded_interrupt_gets_a_card_not_an_interrupt(po
     assert_eq!(notes(&pool, &scene).await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn waits_and_holds_are_never_rescued(pool: PgPool) {
+#[tokio::test]
+async fn waits_and_holds_are_never_rescued() {
+    let pool = canterlot_hub::testkit::db().await;
     let waiting = hung_scene(&pool, "claude_code", true).await;
     sqlx::query("update executions set phase='awaiting_permission' where id=$1")
         .bind(waiting.execution)
@@ -432,8 +436,9 @@ async fn waits_and_holds_are_never_rescued(pool: PgPool) {
     assert!(parent_jobs(&pool, &idle).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_verdict_waits_for_two_valid_samples_after_a_reconnect(pool: PgPool) {
+#[tokio::test]
+async fn the_verdict_waits_for_two_valid_samples_after_a_reconnect() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", true).await;
     let at = |seconds: i64| scene.base + TimeDelta::seconds(seconds);
     // Выборка без прошлого замера CPU ничего не доказывает, сколько бы их ни было.
@@ -469,8 +474,9 @@ async fn the_verdict_waits_for_two_valid_samples_after_a_reconnect(pool: PgPool)
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn interrupt_and_nudge_keys_belong_to_the_turn(pool: PgPool) {
+#[tokio::test]
+async fn interrupt_and_nudge_keys_belong_to_the_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "codex", true).await;
     sqlx::query(
         "insert into nudge_rules(conversation_id,owner_id,set_by,state,consecutive,total)
@@ -557,8 +563,9 @@ async fn interrupt_and_nudge_keys_belong_to_the_turn(pool: PgPool) {
     assert_eq!(nudges, 2, "a nudge per turn, not a replay of the old key");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_exhausted_nudge_rule_is_not_bypassed_and_nothing_is_half_done(pool: PgPool) {
+#[tokio::test]
+async fn an_exhausted_nudge_rule_is_not_bypassed_and_nothing_is_half_done() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "codex", true).await;
     sqlx::query(
         "insert into nudge_rules(conversation_id,owner_id,set_by,state,consecutive,total,max_consecutive)
@@ -598,8 +605,9 @@ async fn an_exhausted_nudge_rule_is_not_bypassed_and_nothing_is_half_done(pool: 
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_nudge_commits_interrupt_input_and_counters_together(pool: PgPool) {
+#[tokio::test]
+async fn a_nudge_commits_interrupt_input_and_counters_together() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "codex", true).await;
     sqlx::query(
         "insert into nudge_rules(conversation_id,owner_id,set_by,state,consecutive,total)
@@ -659,8 +667,9 @@ async fn a_nudge_commits_interrupt_input_and_counters_together(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn only_newer_progress_closes_an_episode_and_a_cpu_spike_does_not(pool: PgPool) {
+#[tokio::test]
+async fn only_newer_progress_closes_an_episode_and_a_cpu_spike_does_not() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", false).await;
     warm(&pool, &scene).await;
     tick(&pool, &scene, scene.base).await;
@@ -726,8 +735,9 @@ async fn only_newer_progress_closes_an_episode_and_a_cpu_spike_does_not(pool: Pg
     assert_eq!(pushes(&pool, &scene).await.len(), 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_hang_has_one_push_with_hang_text_scoped_to_the_turn(pool: PgPool) {
+#[tokio::test]
+async fn a_hang_has_one_push_with_hang_text_scoped_to_the_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", false).await;
     warm(&pool, &scene).await;
     tick(&pool, &scene, scene.base).await;
@@ -749,8 +759,9 @@ async fn a_hang_has_one_push_with_hang_text_scoped_to_the_turn(pool: PgPool) {
     assert!(!text.contains("упала"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_rescue_is_confirmed_by_the_worker_receipt_and_a_refusal_is_visible(pool: PgPool) {
+#[tokio::test]
+async fn the_rescue_is_confirmed_by_the_worker_receipt_and_a_refusal_is_visible() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", true).await;
     warm(&pool, &scene).await;
     tick(&pool, &scene, scene.base).await;
@@ -790,8 +801,9 @@ async fn the_rescue_is_confirmed_by_the_worker_receipt_and_a_refusal_is_visible(
     assert!(pushes(&pool, &scene).await[0].0.ends_with(":first"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_parent_gets_a_recovery_note_only_when_nothing_continues_the_session(pool: PgPool) {
+#[tokio::test]
+async fn the_parent_gets_a_recovery_note_only_when_nothing_continues_the_session() {
+    let pool = canterlot_hub::testkit::db().await;
     // Без ввода и без правила: родитель получает заметку после квитанции.
     let bare = hung_scene(&pool, "claude_code", true).await;
     warm(&pool, &bare).await;
@@ -843,8 +855,9 @@ async fn the_parent_gets_a_recovery_note_only_when_nothing_continues_the_session
 
 /// Удаление родителя держит его строку и отвязывает детей; спасение ребёнка не должно
 /// ждать эту строку под своей блокировкой, иначе две транзакции ждут друг друга.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn rescue_does_not_deadlock_with_a_concurrent_parent_delete(pool: PgPool) {
+#[tokio::test]
+async fn rescue_does_not_deadlock_with_a_concurrent_parent_delete() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", true).await;
     let parent = scene.parent.unwrap();
     warm(&pool, &scene).await;
@@ -903,8 +916,9 @@ async fn rescue_does_not_deadlock_with_a_concurrent_parent_delete(pool: PgPool) 
 }
 
 /// Родитель занят удалением: заметка остаётся записью и уходит, когда строка свободна.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_locked_parent_defers_the_note_instead_of_waiting(pool: PgPool) {
+#[tokio::test]
+async fn a_locked_parent_defers_the_note_instead_of_waiting() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", true).await;
     let parent = scene.parent.unwrap();
     warm(&pool, &scene).await;
@@ -1028,8 +1042,9 @@ async fn episode_of(pool: &PgPool, scene: &Scene) -> Uuid {
 
 /// Кнопки карточки привязаны к эпизоду: пока он открыт, действуют; закрытая карточка
 /// (действие выполнено, ход сменился) отвечает отказом и ничего не прерывает.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
+#[tokio::test]
+async fn card_actions_are_bound_to_their_episode() {
+    let pool = canterlot_hub::testkit::db().await;
     use axum::http::{Method, StatusCode};
     let (hub, client, scene, _lease) = http_scene(&pool).await;
     // Отметки сразу после старта фонового проектора, но уже в прошлом его часов.
@@ -1084,8 +1099,9 @@ async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
 }
 
 /// Вчерашняя карточка не прервёт сегодняшний ход.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_old_card_cannot_stop_a_later_turn(pool: PgPool) {
+#[tokio::test]
+async fn an_old_card_cannot_stop_a_later_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     use axum::http::{Method, StatusCode};
     let (hub, client, scene, _lease) = http_scene(&pool).await;
     // Отметки сразу после старта фонового проектора, но уже в прошлом его часов.
@@ -1140,8 +1156,9 @@ async fn an_old_card_cannot_stop_a_later_turn(pool: PgPool) {
 }
 
 /// После старта хаба молчание нельзя оценивать по выборкам до него: нужны две новые.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn samples_from_before_the_hub_started_do_not_count(pool: PgPool) {
+#[tokio::test]
+async fn samples_from_before_the_hub_started_do_not_count() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", true).await;
     activity::mark_projector_started(
         &activity::database_of(&pool),
@@ -1167,8 +1184,9 @@ async fn samples_from_before_the_hub_started_do_not_count(pool: PgPool) {
 /// Режим `alert` ни при каких обстоятельствах сам не создаёт ввод ни в одной сессии:
 /// ни заметки родителю, ни толчка, ни вливания, ни прерывания. Второе зависание того
 /// же хода (после прогресса) тоже только карточка и пуш.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn alert_mode_never_creates_an_input_for_any_session(pool: PgPool) {
+#[tokio::test]
+async fn alert_mode_never_creates_an_input_for_any_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", true).await;
     let parent = scene.parent.unwrap();
     // Родитель простаивает: заметка разбудила бы его новым ходом.
@@ -1237,8 +1255,9 @@ async fn alert_mode_never_creates_an_input_for_any_session(pool: PgPool) {
 
 /// Один непрерывный зависший ход шлёт владельцу один пуш: обрыв связи в той же тишине
 /// и обычный `stalled` после переподключения второго пуша не дают.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn one_continuous_hang_sends_one_push_across_a_reconnect(pool: PgPool) {
+#[tokio::test]
+async fn one_continuous_hang_sends_one_push_across_a_reconnect() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", false).await;
     tick_mode(
         &pool,
@@ -1293,8 +1312,9 @@ async fn one_continuous_hang_sends_one_push_across_a_reconnect(pool: PgPool) {
 }
 
 /// Отказ воркера не открывает второй эпизод без нового прогресса.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_refusal_does_not_open_a_second_episode_without_progress(pool: PgPool) {
+#[tokio::test]
+async fn a_refusal_does_not_open_a_second_episode_without_progress() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", true).await;
     warm(&pool, &scene).await;
     tick(&pool, &scene, scene.base).await;
@@ -1321,8 +1341,9 @@ async fn a_refusal_does_not_open_a_second_episode_without_progress(pool: PgPool)
 
 /// Между записью прогресса в журнал и закрытием эпизода проектором карточка ещё «открыта»:
 /// кнопки отказывают по сохранённой отметке эпизода и не читают новый курсор журнала.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_card_of_an_advanced_episode_is_refused_before_the_projector_closes_it(pool: PgPool) {
+#[tokio::test]
+async fn a_card_of_an_advanced_episode_is_refused_before_the_projector_closes_it() {
+    let pool = canterlot_hub::testkit::db().await;
     use axum::http::{Method, StatusCode};
     let (hub, client, scene, _lease) = http_scene(&pool).await;
     let queued = queued_input(&pool, &scene).await;
@@ -1363,8 +1384,9 @@ async fn a_card_of_an_advanced_episode_is_refused_before_the_projector_closes_it
 
 /// «Влить» привязана к вводу карточки: если его отменили, новый ввод в голове очереди
 /// не подменяет его.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn steer_is_bound_to_the_cards_input_and_never_picks_a_new_head(pool: PgPool) {
+#[tokio::test]
+async fn steer_is_bound_to_the_cards_input_and_never_picks_a_new_head() {
+    let pool = canterlot_hub::testkit::db().await;
     use axum::http::{Method, StatusCode};
     let (hub, client, scene, _lease) = http_scene(&pool).await;
     let original = queued_input(&pool, &scene).await;
@@ -1403,8 +1425,9 @@ async fn steer_is_bound_to_the_cards_input_and_never_picks_a_new_head(pool: PgPo
 
 /// Воркер без охранного interrupt (или сопровождение, не понимающее охрану, — оно
 /// отвечает отказом на стороне воркера): карточка не прерывает вслепую.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_card_never_interrupts_through_a_worker_without_the_guard(pool: PgPool) {
+#[tokio::test]
+async fn a_card_never_interrupts_through_a_worker_without_the_guard() {
+    let pool = canterlot_hub::testkit::db().await;
     use axum::http::{Method, StatusCode};
     let (hub, client, scene, _lease) = http_scene_with(&pool, &["pilot_v1", "send_now_v1"]).await;
     two_ticks_after_projector_start(&pool, &scene).await;
@@ -1447,8 +1470,9 @@ async fn a_card_never_interrupts_through_a_worker_without_the_guard(pool: PgPool
 /// Пересчёт, чьи часы отстали от уже записанной выборки (он взял `now` до ожидания блокировки
 /// очереди, а за это время пришла новая выборка), не видит её и не должен стирать окно
 /// наблюдения: это отсутствие данных у самого пересчёта, а не доказательство тишины процесса.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_refresh_with_a_stale_clock_does_not_erase_the_observation_window(pool: PgPool) {
+#[tokio::test]
+async fn a_refresh_with_a_stale_clock_does_not_erase_the_observation_window() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", true).await;
     let samples = |pool: PgPool, scene: Uuid| async move {
         sqlx::query_scalar::<_, i32>(
@@ -1483,8 +1507,9 @@ async fn a_refresh_with_a_stale_clock_does_not_erase_the_observation_window(pool
 
 /// Карточка «Ход завис» в режиме alert нужна только владельцу: она видна в ленте, но
 /// следующий выданный ввод агента её текст не несёт.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_alert_card_never_reaches_the_agents_next_prompt(pool: PgPool) {
+#[tokio::test]
+async fn the_alert_card_never_reaches_the_agents_next_prompt() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", false).await;
     tick_mode(
         &pool,
@@ -1583,8 +1608,9 @@ async fn silent_for(pool: &PgPool, scene: &Scene, minutes: i64) {
 
 /// Общий `stalled` пришёл раньше (окно наблюдения ещё грелось), потом вынесен verdict
 /// «завис»: на одну непрерывную тишину один пуш, карточка при этом появляется.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_generic_stalled_push_first_suppresses_the_hang_push_of_the_same_silence(pool: PgPool) {
+#[tokio::test]
+async fn a_generic_stalled_push_first_suppresses_the_hang_push_of_the_same_silence() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", false).await;
     silent_for(&pool, &scene, 40).await;
     tick_mode(
@@ -1636,8 +1662,9 @@ async fn a_generic_stalled_push_first_suppresses_the_hang_push_of_the_same_silen
 
 /// Verdict «завис» пришёл раньше, потом связь пропала и общий `stalled` перешёл порог
 /// той же тишины: второго пуша нет.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_hang_push_first_suppresses_the_generic_stalled_push_of_the_same_silence(pool: PgPool) {
+#[tokio::test]
+async fn a_hang_push_first_suppresses_the_generic_stalled_push_of_the_same_silence() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", false).await;
     silent_for(&pool, &scene, 25).await;
     tick_mode(
@@ -1686,8 +1713,9 @@ async fn a_hang_push_first_suppresses_the_generic_stalled_push_of_the_same_silen
 
 /// Выборка, записанная до блокировки очереди, не бывает «впереди» живого пересчёта: он
 /// берёт часы уже под блокировкой. Две такие выборки подряд дают окно и verdict.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_live_refresh_reads_its_clock_under_the_queue_lock(pool: PgPool) {
+#[tokio::test]
+async fn a_live_refresh_reads_its_clock_under_the_queue_lock() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", false).await;
     for _ in 0..2 {
         // Выборка записана до пересчёта: часы, снятые под блокировкой, её не опережают.
@@ -1713,8 +1741,9 @@ async fn a_live_refresh_reads_its_clock_under_the_queue_lock(pool: PgPool) {
 /// Записанное окно пропускается пересчётом со старыми часами не дольше фиксированного
 /// срока: длинный ряд выборок «из будущего» не держит его вечно и не выносит verdict
 /// по древнему окну.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stored_window_is_not_kept_alive_forever_by_ahead_samples(pool: PgPool) {
+#[tokio::test]
+async fn a_stored_window_is_not_kept_alive_forever_by_ahead_samples() {
+    let pool = canterlot_hub::testkit::db().await;
     let scene = hung_scene(&pool, "claude_code", false).await;
     let conversation = scene.seed.conversation_id;
     let samples = |pool: PgPool| async move {

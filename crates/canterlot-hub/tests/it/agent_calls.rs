@@ -127,8 +127,9 @@ impl Fx {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn agent_call_requires_live_execution_on_the_calling_machine(pool: PgPool) {
+#[tokio::test]
+async fn agent_call_requires_live_execution_on_the_calling_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     // Неизвестное исполнение.
     let unknown = WorkerData::agent_call(
@@ -205,8 +206,9 @@ async fn agent_call_requires_live_execution_on_the_calling_machine(pool: PgPool)
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn list_returns_summaries_applied_and_pending_and_text_only_by_id(pool: PgPool) {
+#[tokio::test]
+async fn list_returns_summaries_applied_and_pending_and_text_only_by_id() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let secret = format!("секретный-текст-пресета-{}", Uuid::now_v7());
     let created = fx.create_preset("Агентский список", &secret).await;
@@ -235,8 +237,9 @@ async fn list_returns_summaries_applied_and_pending_and_text_only_by_id(pool: Pg
     assert_eq!(body["preset"]["text"], secret);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn save_creates_agent_origin_preset_and_updates_with_base_revision(pool: PgPool) {
+#[tokio::test]
+async fn save_creates_agent_origin_preset_and_updates_with_base_revision() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let call_id = Uuid::now_v7();
     let response = fx
@@ -276,8 +279,9 @@ async fn save_creates_agent_origin_preset_and_updates_with_base_revision(pool: P
     assert_eq!(stored.summary.last_edit.as_ref().unwrap().by, "agent");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn save_refuses_builtins_stale_revision_and_missing_base_revision(pool: PgPool) {
+#[tokio::test]
+async fn save_refuses_builtins_stale_revision_and_missing_base_revision() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     for builtin in ["clean", "owner"] {
         let response = fx
@@ -333,8 +337,9 @@ async fn save_refuses_builtins_stale_revision_and_missing_base_revision(pool: Pg
     assert_eq!(response.error_code, "preset_not_found");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn apply_sets_pending_on_own_conversation_only(pool: PgPool) {
+#[tokio::test]
+async fn apply_sets_pending_on_own_conversation_only() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let created = fx
         .create_preset("Агентское применение", "текст применения")
@@ -401,8 +406,9 @@ async fn apply_sets_pending_on_own_conversation_only(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn same_call_id_is_idempotent(pool: PgPool) {
+#[tokio::test]
+async fn same_call_id_is_idempotent() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let call_id = Uuid::now_v7();
     let args = json!({"title": "Идемпотентный", "text": "текст"});
@@ -422,8 +428,9 @@ async fn same_call_id_is_idempotent(pool: PgPool) {
     assert_eq!(conflict.error_code, "idempotency_conflict");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unknown_tool_and_bad_arguments_are_error_codes_not_status(pool: PgPool) {
+#[tokio::test]
+async fn unknown_tool_and_bad_arguments_are_error_codes_not_status() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let response = fx.agent("presets.delete", json!({}), &Uuid::now_v7()).await;
     assert_eq!(response.error_code, "unknown_tool");
@@ -509,8 +516,9 @@ fn captured_logs() -> String {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn agent_call_logs_contain_no_arguments(pool: PgPool) {
+#[tokio::test]
+async fn agent_call_logs_contain_no_arguments() {
+    let pool = canterlot_hub::testkit::db().await;
     capture_logs();
     let fx = Fx::new(pool).await;
     let marker = format!("СЕКРЕТ_АРГУМЕНТОВ_{}", Uuid::now_v7());
@@ -533,8 +541,9 @@ async fn agent_call_logs_contain_no_arguments(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn session_tools_check_arguments_after_the_liveness_check(pool: PgPool) {
+#[tokio::test]
+async fn session_tools_check_arguments_after_the_liveness_check() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     for tool in canterlot_hub::session_tools::TOOLS {
         // Не объект: проверка аргументов общая для всех инструментов.
@@ -557,8 +566,9 @@ async fn session_tools_check_arguments_after_the_liveness_check(pool: PgPool) {
     assert_eq!(stale.error_code, "execution_not_live");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn tool_failure_logs_no_text(pool: PgPool) {
+#[tokio::test]
+async fn tool_failure_logs_no_text() {
+    let pool = canterlot_hub::testkit::db().await;
     capture_logs();
     let fx = Fx::new(pool).await;
     let marker = format!("СЕКРЕТ_ТЕКСТА_{}", Uuid::now_v7());
@@ -595,8 +605,9 @@ async fn tool_failure_logs_no_text(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn argument_errors_name_the_field_and_never_echo_values(pool: PgPool) {
+#[tokio::test]
+async fn argument_errors_name_the_field_and_never_echo_values() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     // Неизвестный аргумент: имя и список допустимых.
     let unknown = fx
@@ -722,8 +733,9 @@ fn session_tool_error_codes_are_unique_snake_case_with_messages() {
 
 /// Архивация идёт через боевой composed-роутер: вызывающий выводится из живого
 /// исполнения, и чужой доски она не касается.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn plan_archive_only_touches_the_callers_board(pool: PgPool) {
+#[tokio::test]
+async fn plan_archive_only_touches_the_callers_board() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     assert_eq!(
         fx.agent(
@@ -842,8 +854,9 @@ impl Fx {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn agent_cannot_rewrite_an_owner_preset(pool: PgPool) {
+#[tokio::test]
+async fn agent_cannot_rewrite_an_owner_preset() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let created = fx.create_preset("Повседневный", "текст владельца").await;
     let id = created["id"].as_str().unwrap().to_owned();
@@ -854,8 +867,9 @@ async fn agent_cannot_rewrite_an_owner_preset(pool: PgPool) {
     assert_eq!(fx.text(&id).await, "текст владельца");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn agent_updates_only_presets_its_session_created(pool: PgPool) {
+#[tokio::test]
+async fn agent_updates_only_presets_its_session_created() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let other = testkit::seed_conversation(&fx.pool, fx.owner, fx.machine).await;
     let foreign = presets::create(
@@ -882,8 +896,9 @@ async fn agent_updates_only_presets_its_session_created(pool: PgPool) {
     assert_eq!(fx.text(&foreign.summary.id).await, "текст другого агента");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn read_only_agent_cannot_write_presets(pool: PgPool) {
+#[tokio::test]
+async fn read_only_agent_cannot_write_presets() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let own = fx.save(json!({"title": "Свой", "text": "текст"})).await;
     assert_eq!(own.error_code, "", "{}", own.error_message);
@@ -905,8 +920,9 @@ async fn read_only_agent_cannot_write_presets(pool: PgPool) {
     assert_eq!(fx.text(own["id"].as_str().unwrap()).await, "текст");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delegated_session_cannot_apply_the_owner_preset(pool: PgPool) {
+#[tokio::test]
+async fn delegated_session_cannot_apply_the_owner_preset() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.set_session("bypass", json!({}), 1).await;
     let response = fx
@@ -936,8 +952,9 @@ async fn delegated_session_cannot_apply_the_owner_preset(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn agent_preset_paths_never_see_nudge_text_presets(pool: PgPool) {
+#[tokio::test]
+async fn agent_preset_paths_never_see_nudge_text_presets() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let nudge = presets::create(
         &fx.pool,
@@ -1001,8 +1018,9 @@ fn thresholds() -> Thresholds {
 /// Одновременные вызовы агента ограничены на машину: пока слоты заняты ожиданием,
 /// следующий вызов получает явный отказ `agent_call_limit`, а освобождение слота
 /// снова пропускает вызов.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn agent_call_is_capped_per_machine(pool: PgPool) {
+#[tokio::test]
+async fn agent_call_is_capped_per_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let target = testkit::seed_conversation(&fx.pool, fx.owner, fx.machine).await;
     conversations::submit_message(

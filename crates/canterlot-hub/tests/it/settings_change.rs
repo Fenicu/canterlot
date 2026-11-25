@@ -282,8 +282,9 @@ fn routing() -> Value {
         {"harness":"claude_code","model":"sonnet[1m]"}],"expected_minutes":30}}})
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn routing_proposal_allow_applies_with_events_and_note(pool: PgPool) {
+#[tokio::test]
+async fn routing_proposal_allow_applies_with_events_and_note() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let before_revision: i64 =
         sqlx::query_scalar("select routing_policy_revision from owners where id=$1")
@@ -371,8 +372,9 @@ async fn routing_proposal_allow_applies_with_events_and_note(pool: PgPool) {
     assert!(notes[0].contains("allowed"), "{}", notes[0]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn whitelist_proposal_allow_applies_with_revision_and_event(pool: PgPool) {
+#[tokio::test]
+async fn whitelist_proposal_allow_applies_with_revision_and_event() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let revision: i64 =
         sqlx::query_scalar("select spawn_whitelist_revision from owners where id=$1")
@@ -420,8 +422,9 @@ async fn whitelist_proposal_allow_applies_with_revision_and_event(pool: PgPool) 
     assert_eq!(count, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn preset_proposal_allow_replaces_text_and_bumps_revision(pool: PgPool) {
+#[tokio::test]
+async fn preset_proposal_allow_replaces_text_and_bumps_revision() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let preset = f.new_preset().await;
     let (request, payload) = f
@@ -460,8 +463,9 @@ async fn preset_proposal_allow_replaces_text_and_bumps_revision(pool: PgPool) {
     assert_eq!(count, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stale_base_revision_closes_as_setting_changed_and_applies_nothing(pool: PgPool) {
+#[tokio::test]
+async fn stale_base_revision_closes_as_setting_changed_and_applies_nothing() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let revision: i64 =
         sqlx::query_scalar("select routing_policy_revision from owners where id=$1")
@@ -507,8 +511,9 @@ async fn stale_base_revision_closes_as_setting_changed_and_applies_nothing(pool:
     assert!(notes[0].contains("setting changed"), "{}", notes[0]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn decline_closes_as_declined_and_applies_nothing(pool: PgPool) {
+#[tokio::test]
+async fn decline_closes_as_declined_and_applies_nothing() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -532,8 +537,9 @@ async fn decline_closes_as_declined_and_applies_nothing(pool: PgPool) {
     assert!(notes[0].contains("declined"), "{}", notes[0]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn open_proposal_expires_after_twenty_four_hours(pool: PgPool) {
+#[tokio::test]
+async fn open_proposal_expires_after_twenty_four_hours() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -571,8 +577,9 @@ async fn open_proposal_expires_after_twenty_four_hours(pool: PgPool) {
     assert!(notes[0].contains("expired"), "{}", notes[0]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn validation_refusal_uses_the_settings_endpoint_rules(pool: PgPool) {
+#[tokio::test]
+async fn validation_refusal_uses_the_settings_endpoint_rules() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let invalid_routing = json!({"task_types":{"BAD":{"title":"x","candidates":[]}}});
     let error = f
@@ -628,8 +635,9 @@ async fn validation_refusal_uses_the_settings_endpoint_rules(pool: PgPool) {
     assert_eq!(error.code.as_str(), "invalid_arguments", "{error:?}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn agent_cannot_decide_a_settings_proposal(pool: PgPool) {
+#[tokio::test]
+async fn agent_cannot_decide_a_settings_proposal() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -664,8 +672,9 @@ async fn agent_cannot_decide_a_settings_proposal(pool: PgPool) {
     assert_eq!(stored, None);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn identical_value_is_refused_at_proposal_time(pool: PgPool) {
+#[tokio::test]
+async fn identical_value_is_refused_at_proposal_time() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     for (tool, args) in [
         (
@@ -706,8 +715,9 @@ async fn identical_value_is_refused_at_proposal_time(pool: PgPool) {
     assert_eq!(requests, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn outcome_note_is_delivered_once_when_the_job_is_replayed(pool: PgPool) {
+#[tokio::test]
+async fn outcome_note_is_delivered_once_when_the_job_is_replayed() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -727,8 +737,9 @@ async fn outcome_note_is_delivered_once_when_the_job_is_replayed(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn approval_job_takes_the_queue_before_the_request_row(pool: PgPool) {
+#[tokio::test]
+async fn approval_job_takes_the_queue_before_the_request_row() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -811,8 +822,9 @@ async fn approval_job_takes_the_queue_before_the_request_row(pool: PgPool) {
     assert_eq!(f.request_state(request).await, "decision_applied");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn concurrent_decisions_with_different_keys_do_not_deadlock(pool: PgPool) {
+#[tokio::test]
+async fn concurrent_decisions_with_different_keys_do_not_deadlock() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -853,8 +865,9 @@ async fn concurrent_decisions_with_different_keys_do_not_deadlock(pool: PgPool) 
     assert_eq!(f.request_state(request).await, "decision_saved");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn proposal_survives_execution_rollover(pool: PgPool) {
+#[tokio::test]
+async fn proposal_survives_execution_rollover() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -907,8 +920,9 @@ async fn proposal_survives_execution_rollover(pool: PgPool) {
     assert_eq!(f.request_state(request).await, "decision_applied");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn trashing_the_proposer_closes_the_proposal_and_blocks_decisions(pool: PgPool) {
+#[tokio::test]
+async fn trashing_the_proposer_closes_the_proposal_and_blocks_decisions() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -957,8 +971,9 @@ async fn trashing_the_proposer_closes_the_proposal_and_blocks_decisions(pool: Pg
     assert_eq!(stored, None, "a trashed proposal must never be applied");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn approval_job_skips_a_trashed_conversation(pool: PgPool) {
+#[tokio::test]
+async fn approval_job_skips_a_trashed_conversation() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -982,8 +997,9 @@ async fn approval_job_skips_a_trashed_conversation(pool: PgPool) {
     assert_eq!(f.request_state(request).await, "decision_saved");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_routing_edit_wins_the_race_with_an_approved_proposal(pool: PgPool) {
+#[tokio::test]
+async fn owner_routing_edit_wins_the_race_with_an_approved_proposal() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -1038,8 +1054,9 @@ async fn owner_routing_edit_wins_the_race_with_an_approved_proposal(pool: PgPool
     assert_eq!(f.request_state(request).await, "setting_changed");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_whitelist_edit_wins_the_race_with_an_approved_proposal(pool: PgPool) {
+#[tokio::test]
+async fn owner_whitelist_edit_wins_the_race_with_an_approved_proposal() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -1089,8 +1106,9 @@ async fn owner_whitelist_edit_wins_the_race_with_an_approved_proposal(pool: PgPo
     assert_eq!(f.request_state(request).await, "setting_changed");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_preset_edit_wins_the_race_with_an_approved_proposal(pool: PgPool) {
+#[tokio::test]
+async fn owner_preset_edit_wins_the_race_with_an_approved_proposal() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let preset = f.new_preset().await;
     let (request, _) = f
@@ -1141,8 +1159,9 @@ async fn owner_preset_edit_wins_the_race_with_an_approved_proposal(pool: PgPool)
     assert_eq!(f.request_state(request).await, "setting_changed");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn late_approval_of_an_overdue_proposal_is_refused_without_a_scheduler(pool: PgPool) {
+#[tokio::test]
+async fn late_approval_of_an_overdue_proposal_is_refused_without_a_scheduler() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -1185,8 +1204,9 @@ async fn late_approval_of_an_overdue_proposal_is_refused_without_a_scheduler(poo
     assert_eq!(stored, None);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn approval_after_expiry_job_returns_conflict_not_internal_error(pool: PgPool) {
+#[tokio::test]
+async fn approval_after_expiry_job_returns_conflict_not_internal_error() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -1224,8 +1244,9 @@ async fn approval_after_expiry_job_returns_conflict_not_internal_error(pool: PgP
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn empty_routing_policy_is_refused_like_on_the_settings_screen(pool: PgPool) {
+#[tokio::test]
+async fn empty_routing_policy_is_refused_like_on_the_settings_screen() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let error = f
         .call(
@@ -1253,8 +1274,9 @@ async fn empty_routing_policy_is_refused_like_on_the_settings_screen(pool: PgPoo
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn whitelist_proposal_requires_the_entries_field(pool: PgPool) {
+#[tokio::test]
+async fn whitelist_proposal_requires_the_entries_field() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.client
         .send(
@@ -1281,8 +1303,9 @@ async fn whitelist_proposal_requires_the_entries_field(pool: PgPool) {
     assert_eq!(requests, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn worker_credential_cannot_decide_a_settings_proposal(pool: PgPool) {
+#[tokio::test]
+async fn worker_credential_cannot_decide_a_settings_proposal() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(

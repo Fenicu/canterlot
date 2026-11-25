@@ -9,7 +9,6 @@ use canterlot_hub::{
 };
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use std::{
     io::Write,
     sync::{Arc, Mutex, OnceLock},
@@ -19,8 +18,9 @@ use support::*;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-#[sqlx::test(migrations = "./migrations")]
-async fn schedule_validates_time_window_content_and_pending_limit(pool: PgPool) {
+#[tokio::test]
+async fn schedule_validates_time_window_content_and_pending_limit() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let _scheduler = scheduler(
@@ -135,8 +135,9 @@ async fn schedule_validates_time_window_content_and_pending_limit(pool: PgPool) 
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn scheduled_message_is_visible_editable_and_cancellable_until_fired(pool: PgPool) {
+#[tokio::test]
+async fn scheduled_message_is_visible_editable_and_cancellable_until_fired() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let sch = scheduler(&pool, Default::default());
@@ -179,8 +180,9 @@ async fn scheduled_message_is_visible_editable_and_cancellable_until_fired(pool:
     assert_eq!(sch.tick(now + TimeDelta::hours(2)).await.unwrap().fired, 0);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn due_message_becomes_a_normal_queued_input_once(pool: PgPool) {
+#[tokio::test]
+async fn due_message_becomes_a_normal_queued_input_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let sch = scheduler(&pool, Default::default());
@@ -214,8 +216,9 @@ async fn due_message_becomes_a_normal_queued_input_once(pool: PgPool) {
 }
 
 #[cfg(feature = "fault-injection")]
-#[sqlx::test(migrations = "./migrations")]
-async fn scheduled_message_fires_exactly_once_with_two_schedulers(pool: PgPool) {
+#[tokio::test]
+async fn scheduled_message_fires_exactly_once_with_two_schedulers() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::fault_injection::Point;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
@@ -289,8 +292,9 @@ async fn scheduled_message_fires_exactly_once_with_two_schedulers(pool: PgPool) 
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn fire_failure_in_the_same_transaction_leaves_the_job_pending(pool: PgPool) {
+#[tokio::test]
+async fn fire_failure_in_the_same_transaction_leaves_the_job_pending() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let sch = scheduler(&pool, Default::default());
@@ -333,8 +337,9 @@ async fn fire_failure_in_the_same_transaction_leaves_the_job_pending(pool: PgPoo
 
 /// Взаимоблокировка в транзакции задания не тратит бюджет отказов: задание
 /// откатывается, переносится на короткий срок и со второй попытки выполняется.
-#[sqlx::test(migrations = "./migrations")]
-async fn deadlock_in_a_job_keeps_its_failure_budget(pool: PgPool) {
+#[tokio::test]
+async fn deadlock_in_a_job_keeps_its_failure_budget() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let sch = scheduler(&pool, Default::default());
@@ -392,8 +397,9 @@ async fn deadlock_in_a_job_keeps_its_failure_budget(pool: PgPool) {
 
 /// Временный сбой не тратит отказы, но повторяется с растущей паузой: 1, 2, 4,
 /// 8, 16, 32 и дальше не больше 60 секунд.
-#[sqlx::test(migrations = "./migrations")]
-async fn transient_retries_back_off_and_cap(pool: PgPool) {
+#[tokio::test]
+async fn transient_retries_back_off_and_cap() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let sch = scheduler(&pool, Default::default());
@@ -447,8 +453,9 @@ async fn transient_retries_back_off_and_cap(pool: PgPool) {
 
 /// Сутки непрерывных временных сбоев: следующий считается обычным отказом и
 /// расходует бюджет, поэтому задание в конце концов бросается.
-#[sqlx::test(migrations = "./migrations")]
-async fn transient_after_a_day_counts_as_a_failure(pool: PgPool) {
+#[tokio::test]
+async fn transient_after_a_day_counts_as_a_failure() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let sch = scheduler(
@@ -495,8 +502,9 @@ async fn transient_after_a_day_counts_as_a_failure(pool: PgPool) {
 }
 
 /// Успешный запуск заменяет результат задания и стирает счётчик временных сбоев.
-#[sqlx::test(migrations = "./migrations")]
-async fn transient_success_resets_the_counter(pool: PgPool) {
+#[tokio::test]
+async fn transient_success_resets_the_counter() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let sch = scheduler(&pool, Default::default());
@@ -548,8 +556,9 @@ async fn transient_success_resets_the_counter(pool: PgPool) {
     assert!(result["input_id"].is_string());
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn queue_full_reschedules_then_fails_after_max_attempts(pool: PgPool) {
+#[tokio::test]
+async fn queue_full_reschedules_then_fails_after_max_attempts() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let sch = scheduler(
@@ -589,8 +598,9 @@ async fn queue_full_reschedules_then_fails_after_max_attempts(pool: PgPool) {
 }
 
 #[cfg(feature = "fault-injection")]
-#[sqlx::test(migrations = "./migrations")]
-async fn edit_racing_with_fire_returns_not_pending(pool: PgPool) {
+#[tokio::test]
+async fn edit_racing_with_fire_returns_not_pending() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::fault_injection::Point;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
@@ -629,8 +639,9 @@ async fn edit_racing_with_fire_returns_not_pending(pool: PgPool) {
     ));
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn fired_message_respects_pause_and_holds(pool: PgPool) {
+#[tokio::test]
+async fn fired_message_respects_pause_and_holds() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let sch = scheduler(&pool, Default::default());
@@ -662,8 +673,9 @@ async fn fired_message_respects_pause_and_holds(pool: PgPool) {
     assert_eq!(count(&pool, "select count(*) from executions").await, 0);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn scheduler_sleeps_until_next_due_and_wakes_on_new_job(pool: PgPool) {
+#[tokio::test]
+async fn scheduler_sleeps_until_next_due_and_wakes_on_new_job() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let sch = scheduler(
@@ -738,8 +750,9 @@ async fn scheduler_sleeps_until_next_due_and_wakes_on_new_job(pool: PgPool) {
     runner.await.unwrap();
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn idempotent_schedule_returns_the_same_job(pool: PgPool) {
+#[tokio::test]
+async fn idempotent_schedule_returns_the_same_job() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let sch = scheduler(&pool, Default::default());
@@ -787,8 +800,9 @@ async fn idempotent_schedule_returns_the_same_job(pool: PgPool) {
     assert_eq!(count(&pool, "select count(*) from scheduled_jobs").await, 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn foreign_job_ids_are_not_found(pool: PgPool) {
+#[tokio::test]
+async fn foreign_job_ids_are_not_found() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let other = testkit::seed(&pool).await;
     let now = Utc::now();
@@ -842,8 +856,9 @@ async fn foreign_job_ids_are_not_found(pool: PgPool) {
     ));
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn maintenance_purges_old_events_and_snapshots(pool: PgPool) {
+#[tokio::test]
+async fn maintenance_purges_old_events_and_snapshots() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let sch = scheduler(&pool, Default::default()).with_history_days(10);
@@ -883,8 +898,9 @@ async fn maintenance_purges_old_events_and_snapshots(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn scheduler_restart_with_a_due_job_fires_it_exactly_once(pool: PgPool) {
+#[tokio::test]
+async fn scheduler_restart_with_a_due_job_fires_it_exactly_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let sch = scheduler(&pool, Default::default());
@@ -963,8 +979,9 @@ fn logs() -> &'static Arc<Mutex<Vec<u8>>> {
     })
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn db_error_log_has_no_row_values(pool: PgPool) {
+#[tokio::test]
+async fn db_error_log_has_no_row_values() {
+    let pool = canterlot_hub::testkit::db().await;
     logs();
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
@@ -1001,8 +1018,9 @@ async fn db_error_log_has_no_row_values(pool: PgPool) {
     assert!(!debug.contains(&marker));
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn scheduled_endpoints_roundtrip_with_events(pool: PgPool) {
+#[tokio::test]
+async fn scheduled_endpoints_roundtrip_with_events() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -1066,8 +1084,9 @@ async fn scheduled_endpoints_roundtrip_with_events(pool: PgPool) {
 
 use canterlot_hub::events;
 
-#[sqlx::test(migrations = "./migrations")]
-async fn simultaneous_replays_succeed_at_the_pending_limit_and_after_cancellation(pool: PgPool) {
+#[tokio::test]
+async fn simultaneous_replays_succeed_at_the_pending_limit_and_after_cancellation() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     let _scheduler = scheduler(
@@ -1143,8 +1162,9 @@ async fn simultaneous_replays_succeed_at_the_pending_limit_and_after_cancellatio
 
 // Срок хранения событий идёт по каждой области от старых к новым пачками ограниченного размера:
 // ни один оператор не держит и не читает весь журнал.
-#[sqlx::test(migrations = "./migrations")]
-async fn event_retention_deletes_in_bounded_batches_per_scope(pool: PgPool) {
+#[tokio::test]
+async fn event_retention_deletes_in_bounded_batches_per_scope() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let other = testkit::seed_conversation(&pool, s.owner_id, s.machine_id).await;
     for id in [s.conversation_id, other] {
@@ -1188,8 +1208,9 @@ async fn event_retention_deletes_in_bounded_batches_per_scope(pool: PgPool) {
 }
 
 // Уборка идёт своей службой: сканирование журнала не задерживает тик планировщика.
-#[sqlx::test(migrations = "./migrations")]
-async fn maintenance_runs_as_its_own_service(pool: PgPool) {
+#[tokio::test]
+async fn maintenance_runs_as_its_own_service() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     notice(&pool, s.conversation_id, "old").await;
     sqlx::query(

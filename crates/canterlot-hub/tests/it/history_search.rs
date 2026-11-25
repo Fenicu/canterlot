@@ -248,8 +248,9 @@ fn plain(hit: &Value) -> String {
         .collect()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn russian_and_english_word_forms_match(pool: PgPool) {
+#[tokio::test]
+async fn russian_and_english_word_forms_match() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let ru = f
         .block(
@@ -284,8 +285,9 @@ async fn russian_and_english_word_forms_match(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn filters_narrow_the_hits(pool: PgPool) {
+#[tokio::test]
+async fn filters_narrow_the_hits() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let other = f.conversation("Другая", None, 0).await;
     sqlx::query("update conversations set harness='codex' where id=$1")
@@ -331,8 +333,9 @@ async fn filters_narrow_the_hits(pool: PgPool) {
     assert_eq!(page["hits"][0]["origin_kind"], "owner");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn pages_follow_the_cursor_newest_first(pool: PgPool) {
+#[tokio::test]
+async fn pages_follow_the_cursor_newest_first() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let now = Utc::now();
     let mut expected = Vec::new();
@@ -382,8 +385,9 @@ async fn pages_follow_the_cursor_newest_first(pool: PgPool) {
     assert_eq!(seen, expected);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn total_is_capped_at_two_hundred(pool: PgPool) {
+#[tokio::test]
+async fn total_is_capped_at_two_hundred() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     sqlx::query(
         "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,created_seq,content,agent,model)
@@ -403,8 +407,9 @@ async fn total_is_capped_at_two_hundred(pool: PgPool) {
     assert_eq!(page["hits"].as_array().unwrap().len(), 50);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn snippet_is_segments_without_markers_or_raw_whitespace(pool: PgPool) {
+#[tokio::test]
+async fn snippet_is_segments_without_markers_or_raw_whitespace() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let filler = "обычные слова без совпадений ".repeat(40);
     f.block(
@@ -431,8 +436,9 @@ async fn snippet_is_segments_without_markers_or_raw_whitespace(pool: PgPool) {
     assert!(!text.contains('<'), "без HTML: {text}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn hits_carry_origin_seq_jump_target_and_archive_flag(pool: PgPool) {
+#[tokio::test]
+async fn hits_carry_origin_seq_jump_target_and_archive_flag() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let sender = f.conversation("Отправитель", None, 0).await;
     let from = json!(sender.to_string());
@@ -552,8 +558,9 @@ async fn hits_carry_origin_seq_jump_target_and_archive_flag(pool: PgPool) {
     assert_eq!(mcp["hits"][0]["block_id"], json!(leaf));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn trashed_and_deleted_sessions_are_not_found(pool: PgPool) {
+#[tokio::test]
+async fn trashed_and_deleted_sessions_are_not_found() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let trashed = f.conversation("В корзину", None, 0).await;
     let doomed = f.conversation("На удаление", None, 0).await;
@@ -634,8 +641,9 @@ async fn trashed_and_deleted_sessions_are_not_found(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_delegate_searches_only_its_family(pool: PgPool) {
+#[tokio::test]
+async fn a_delegate_searches_only_its_family() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let parent = f.conversation("Родитель", Some(f.root), 1).await;
     let child = f.conversation("Ребёнок", Some(parent), 2).await;
@@ -686,8 +694,9 @@ async fn a_delegate_searches_only_its_family(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn invalid_requests_are_rejected(pool: PgPool) {
+#[tokio::test]
+async fn invalid_requests_are_rejected() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let long = "я".repeat(201);
     for body in [
@@ -743,8 +752,9 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
 
 /// Запрос без лексем — «ничего не найдено», не ошибка. Ни запрос, ни фрагменты, ни NOTICE
 /// базы с текстом запроса в журнал не попадают даже при перехвате всех целей на TRACE.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stop_word_queries_find_nothing_and_logs_hold_no_text(pool: PgPool) {
+#[tokio::test]
+async fn stop_word_queries_find_nothing_and_logs_hold_no_text() {
+    let pool = canterlot_hub::testkit::db().await;
     let _ = tracing_subscriber::fmt()
         .with_ansi(false)
         .with_max_level(tracing::Level::TRACE)
@@ -796,8 +806,9 @@ async fn stop_word_queries_find_nothing_and_logs_hold_no_text(pool: PgPool) {
 
 /// Каждая форма запроса идёт по индексам GIN, и с общим планом тоже: документ и частичные
 /// предикаты в запросе совпадают с индексами буква в букву.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn search_queries_use_the_gin_indexes(pool: PgPool) {
+#[tokio::test]
+async fn search_queries_use_the_gin_indexes() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let other = f.conversation("Другая", None, 0).await;
     sqlx::query(
@@ -965,8 +976,9 @@ async fn search_queries_use_the_gin_indexes(pool: PgPool) {
 
 /// `ts_headline` разбирает весь кусок документа заново: страница из 20 документов по 32 тысячи
 /// символов, сплошь из совпадений, укладывается далеко в срок поиска.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn headlines_of_a_full_page_of_long_documents_stay_fast(pool: PgPool) {
+#[tokio::test]
+async fn headlines_of_a_full_page_of_long_documents_stay_fast() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let document: String = "сборка тестов упала "
         .repeat(1700)

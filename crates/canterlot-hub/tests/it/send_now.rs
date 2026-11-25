@@ -166,8 +166,9 @@ async fn steer_row(pool: &PgPool, input_command_id: Uuid) -> (Uuid, String, Valu
     .unwrap()
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn send_now_into_running_turn_keeps_queue_and_slot(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn send_now_into_running_turn_keeps_queue_and_slot() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "codex").await;
     running(&pool, &seed).await;
@@ -203,8 +204,9 @@ async fn send_now_into_running_turn_keeps_queue_and_slot(pool: PgPool) -> TestRe
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn send_now_is_idempotent(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn send_now_is_idempotent() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "codex").await;
     running(&pool, &seed).await;
@@ -233,8 +235,9 @@ async fn send_now_is_idempotent(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn send_now_valid_only_while_queued_and_running(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn send_now_valid_only_while_queued_and_running() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     // Отдельный разговор: без живого исполнения хода нет.
     let lonely_seed = testkit::seed(&pool).await;
     harness(&pool, &lonely_seed, "codex").await;
@@ -285,8 +288,9 @@ async fn send_now_valid_only_while_queued_and_running(pool: PgPool) -> TestResul
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn send_now_refused_for_request_and_compaction(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn send_now_refused_for_request_and_compaction() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "codex").await;
     let execution_id = running(&pool, &seed).await;
@@ -336,8 +340,9 @@ async fn send_now_refused_for_request_and_compaction(pool: PgPool) -> TestResult
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn steer_accepted_belongs_to_running_turn(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn steer_accepted_belongs_to_running_turn() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "codex").await;
     let execution_id = running(&pool, &seed).await;
@@ -384,8 +389,9 @@ async fn steer_accepted_belongs_to_running_turn(pool: PgPool) -> TestResult {
 
 /// Медленное доказательство вливания — обычная передача: ввод в `transmitting`,
 /// паузы нет, слот чужого хода цел. Срок команды передающееся вливание не гасит.
-#[sqlx::test(migrations = "./migrations")]
-async fn steer_transmission_started_is_transmitting_without_pause(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn steer_transmission_started_is_transmitting_without_pause() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "claude_code").await;
     running(&pool, &seed).await;
@@ -447,10 +453,9 @@ async fn steer_transmission_started_is_transmitting_without_pause(pool: PgPool) 
 
 /// Передающееся вливание без доказательства всё-таки становится паузой;
 /// позднее доказательство её снимает.
-#[sqlx::test(migrations = "./migrations")]
-async fn transmitting_steer_without_proof_pauses_and_late_proof_clears_it(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn transmitting_steer_without_proof_pauses_and_late_proof_clears_it() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "claude_code").await;
     running(&pool, &seed).await;
@@ -517,8 +522,9 @@ async fn transmitting_steer_without_proof_pauses_and_late_proof_clears_it(
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn turn_end_between_click_and_delivery_becomes_next_turn(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn turn_end_between_click_and_delivery_becomes_next_turn() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "claude_code").await;
     let execution_id = running(&pool, &seed).await;
@@ -584,8 +590,9 @@ async fn turn_end_between_click_and_delivery_becomes_next_turn(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn steer_rejected_and_unconfirmed(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn steer_rejected_and_unconfirmed() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "opencode").await;
     running(&pool, &seed).await;
@@ -684,8 +691,9 @@ async fn steer_rejected_and_unconfirmed(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn stale_steer_outcome_is_ignored(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn stale_steer_outcome_is_ignored() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "codex").await;
     let execution_id = running(&pool, &seed).await;
@@ -728,8 +736,9 @@ async fn stale_steer_outcome_is_ignored(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn several_send_now_in_a_row_keep_order(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn several_send_now_in_a_row_keep_order() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "codex").await;
     running(&pool, &seed).await;
@@ -764,8 +773,9 @@ async fn several_send_now_in_a_row_keep_order(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn dispatch_skips_steer_pending_input(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn dispatch_skips_steer_pending_input() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "codex").await;
     let execution_id = running(&pool, &seed).await;
@@ -806,8 +816,9 @@ async fn dispatch_skips_steer_pending_input(pool: PgPool) -> TestResult {
 /// Codex отвечает ошибкой на `turn/steer` (любой код, кроме -32600): воркер
 /// пишет отказ. Ввод остаётся в очереди и уходит обычным следующим ходом,
 /// владелец видит причину в событии.
-#[sqlx::test(migrations = "./migrations")]
-async fn codex_steer_rejection_keeps_input_for_next_turn(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn codex_steer_rejection_keeps_input_for_next_turn() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "codex").await;
     let execution_id = running(&pool, &seed).await;
@@ -897,8 +908,9 @@ async fn steer_delivery(pool: &PgPool, steer_command_id: Uuid) -> String {
 
 /// Вливание дошло до машины, а исполнение кончилось без итога: ввод не висит
 /// вечно и не уходит второй раз молча, владелец решает сам.
-#[sqlx::test(migrations = "./migrations")]
-async fn execution_end_settles_a_stored_steer_as_undetermined(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn execution_end_settles_a_stored_steer_as_undetermined() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "codex").await;
     let execution_id = running(&pool, &seed).await;
@@ -954,8 +966,9 @@ async fn execution_end_settles_a_stored_steer_as_undetermined(pool: PgPool) -> T
 
 /// Вливание так и не ушло с хаба, а исполнение кончилось: ввод просто
 /// остаётся в очереди и уходит следующим ходом.
-#[sqlx::test(migrations = "./migrations")]
-async fn execution_end_returns_an_unsent_steer_to_the_queue(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn execution_end_returns_an_unsent_steer_to_the_queue() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "codex").await;
     let execution_id = running(&pool, &seed).await;
@@ -991,8 +1004,9 @@ async fn execution_end_returns_an_unsent_steer_to_the_queue(pool: PgPool) -> Tes
 
 /// Итог вливания не пришёл за отведённый срок: хаб считает приём
 /// неподтверждённым, повторно ничего не отправляет.
-#[sqlx::test(migrations = "./migrations")]
-async fn steer_without_outcome_expires_as_undetermined(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn steer_without_outcome_expires_as_undetermined() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "codex").await;
     running(&pool, &seed).await;
@@ -1051,8 +1065,9 @@ async fn steer_without_outcome_expires_as_undetermined(pool: PgPool) -> TestResu
 
 /// Ход кончился, пока вливание A в пути: B, поставленный позже, не обгоняет A.
 /// Выдача ждёт итога вливания, затем A уходит первым.
-#[sqlx::test(migrations = "./migrations")]
-async fn later_input_waits_for_the_steered_head(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn later_input_waits_for_the_steered_head() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "codex").await;
     let execution_id = running(&pool, &seed).await;
@@ -1090,8 +1105,9 @@ async fn later_input_waits_for_the_steered_head(pool: PgPool) -> TestResult {
 
 /// Запрос вливания виден другим вкладкам событием; закрытый разговор не
 /// принимает ни вливание, ни правку.
-#[sqlx::test(migrations = "./migrations")]
-async fn send_now_emits_event_and_respects_closed_queue(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn send_now_emits_event_and_respects_closed_queue() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     harness(&pool, &seed, "codex").await;
     running(&pool, &seed).await;
@@ -1169,8 +1185,9 @@ async fn settings_row(pool: &PgPool, conversation_id: Uuid) -> (String, Value, i
 /// Ожидающие настройки принадлежат разговору, а не вводу: «Отправить сейчас»
 /// их не везёт и не делает действующими, они честно остаются ожидающими
 /// и уходят со следующим обычным ходом.
-#[sqlx::test(migrations = "./migrations")]
-async fn steered_input_leaves_pending_settings_for_the_next_turn(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn steered_input_leaves_pending_settings_for_the_next_turn() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     testkit::seed_catalog(&pool, seed.machine_id).await;
     sqlx::query("update machine_harnesses set harness = 'codex' where machine_id = $1")

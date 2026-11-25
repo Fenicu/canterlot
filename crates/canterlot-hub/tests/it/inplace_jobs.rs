@@ -322,8 +322,9 @@ fn job_id(value: &Value) -> Uuid {
 
 // ───────── Единственная доставка ─────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn inline_success_answers_the_call_and_sends_no_message(pool: PgPool) {
+#[tokio::test]
+async fn inline_success_answers_the_call_and_sends_no_message() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let context = fx.context.clone();
     let caller = fx.caller();
@@ -351,8 +352,9 @@ async fn inline_success_answers_the_call_and_sends_no_message(pool: PgPool) {
     assert_eq!(fx.messages(id).await, 0, "inline never sends a message");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn waiter_timeout_then_finish_sends_exactly_one_message(pool: PgPool) {
+#[tokio::test]
+async fn waiter_timeout_then_finish_sends_exactly_one_message() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let reply = fx
         .call(
@@ -373,8 +375,9 @@ async fn waiter_timeout_then_finish_sends_exactly_one_message(pool: PgPool) {
     assert_eq!(fx.messages(id).await, 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn caller_worker_deadline_shorter_than_the_waiter_gives_one_message(pool: PgPool) {
+#[tokio::test]
+async fn caller_worker_deadline_shorter_than_the_waiter_gives_one_message() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let context = fx.context.clone();
     let caller = fx.caller();
@@ -398,8 +401,9 @@ async fn caller_worker_deadline_shorter_than_the_waiter_gives_one_message(pool: 
     assert_eq!(fx.messages(id).await, 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn hub_restart_during_the_wait_turns_every_undelivered_job_into_a_message(pool: PgPool) {
+#[tokio::test]
+async fn hub_restart_during_the_wait_turns_every_undelivered_job_into_a_message() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let context = fx.context.clone();
     let caller = fx.caller();
@@ -452,8 +456,9 @@ async fn hub_restart_during_the_wait_turns_every_undelivered_job_into_a_message(
 
 /// Живой ждущий вызов своего экземпляра хаба не теряет доставку от подбора при повторном
 /// захвате службы-одиночки: итог по-прежнему отвечает вызов, сообщения нет.
-#[sqlx::test(migrations = "./migrations")]
-async fn a_live_waiter_keeps_its_delivery_through_the_start_sweep(pool: PgPool) {
+#[tokio::test]
+async fn a_live_waiter_keeps_its_delivery_through_the_start_sweep() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let context = fx.context.clone();
     let caller = fx.caller();
@@ -482,8 +487,9 @@ async fn a_live_waiter_keeps_its_delivery_through_the_start_sweep(pool: PgPool) 
 }
 
 /// Подбор берёт задачи чужого экземпляра и задачи с вышедшим сроком ожидания, и только их.
-#[sqlx::test(migrations = "./migrations")]
-async fn the_start_sweep_takes_other_instances_and_expired_waiters_only(pool: PgPool) {
+#[tokio::test]
+async fn the_start_sweep_takes_other_instances_and_expired_waiters_only() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let own = job_id(&fx.run("own").await);
     let foreign = job_id(&fx.run("foreign").await);
@@ -518,8 +524,9 @@ async fn the_start_sweep_takes_other_instances_and_expired_waiters_only(pool: Pg
 
 /// Обычный повтор читает существующую задачу и доставку не меняет: прежний ждущий вызов
 /// ещё жив и сам ответит итогом.
-#[sqlx::test(migrations = "./migrations")]
-async fn a_replay_never_changes_the_delivery_of_a_running_job(pool: PgPool) {
+#[tokio::test]
+async fn a_replay_never_changes_the_delivery_of_a_running_job() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let context = fx.context.clone();
     let caller = fx.caller();
@@ -555,8 +562,9 @@ async fn a_replay_never_changes_the_delivery_of_a_running_job(pool: PgPool) {
 
 /// Срок хранения журнала: вложение отпускается, строка хранит хвост, чтение отвечает хвостом
 /// с пометкой; свежая и идущая задачи не трогаются, нулевой срок не убирает ничего.
-#[sqlx::test(migrations = "./migrations")]
-async fn an_expired_log_is_released_and_reads_answer_with_the_tail_and_a_note(pool: PgPool) {
+#[tokio::test]
+async fn an_expired_log_is_released_and_reads_answer_with_the_tail_and_a_note() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let old = job_id(&fx.run("old").await);
     let fresh = job_id(&fx.run("fresh").await);
@@ -616,8 +624,9 @@ async fn an_expired_log_is_released_and_reads_answer_with_the_tail_and_a_note(po
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_http_log_of_an_expired_job_answers_with_the_tail_and_a_note(pool: PgPool) {
+#[tokio::test]
+async fn the_http_log_of_an_expired_job_answers_with_the_tail_and_a_note() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool.clone()).await;
     let id = api.insert("succeeded", "make").await;
     sqlx::query(
@@ -639,8 +648,9 @@ async fn the_http_log_of_an_expired_job_answers_with_the_tail_and_a_note(pool: P
 
 /// Вызов, оборванный там, где страж не успел встать, не оставляет задачу без доставки навсегда:
 /// таймер переводит давние задачи без выбранной доставки на сообщение.
-#[sqlx::test(migrations = "./migrations")]
-async fn the_sweep_gives_an_orphaned_job_a_message(pool: PgPool) {
+#[tokio::test]
+async fn the_sweep_gives_an_orphaned_job_a_message() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let fresh = job_id(&fx.run("a").await);
     let orphan = job_id(&fx.run("b").await);
@@ -682,8 +692,9 @@ async fn the_sweep_gives_an_orphaned_job_a_message(pool: PgPool) {
     assert_eq!(fx.job(fresh).await.delivery, None);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn a_terminal_state_racing_the_timeout_is_delivered_once(pool: PgPool) {
+#[tokio::test]
+async fn a_terminal_state_racing_the_timeout_is_delivered_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     // Порядок 1: итог раньше срока ожидания — отвечает вызов, сообщения нет.
     let first = job_id(&fx.run("a").await);
@@ -717,8 +728,9 @@ async fn a_terminal_state_racing_the_timeout_is_delivered_once(pool: PgPool) {
     assert_eq!(fx.messages(second).await, 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn replay_by_call_id_and_by_idempotency_key_returns_the_stored_job(pool: PgPool) {
+#[tokio::test]
+async fn replay_by_call_id_and_by_idempotency_key_returns_the_stored_job() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let caller = fx.caller();
     let args = json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 0});
@@ -758,8 +770,9 @@ async fn replay_by_call_id_and_by_idempotency_key_returns_the_stored_job(pool: P
 
 /// Повтор видит только задачи своего разговора и своего домена: чужой разговор с тем же
 /// идентификатором вызова и тем же ключом получает свою задачу, а не чужой итог.
-#[sqlx::test(migrations = "./migrations")]
-async fn a_replay_never_returns_another_conversations_job(pool: PgPool) {
+#[tokio::test]
+async fn a_replay_never_returns_another_conversations_job() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let caller = fx.caller();
     let args =
@@ -792,8 +805,9 @@ async fn a_replay_never_returns_another_conversations_job(pool: PgPool) {
     assert_eq!(owner, Some(other));
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn a_replay_after_a_domain_change_returns_nothing_stored(pool: PgPool) {
+#[tokio::test]
+async fn a_replay_after_a_domain_change_returns_nothing_stored() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let caller = fx.caller();
     let args =
@@ -824,8 +838,9 @@ async fn a_replay_after_a_domain_change_returns_nothing_stored(pool: PgPool) {
 }
 
 /// Ждущий вызов тоже не берёт итог, если домен разговора сменился после заявки.
-#[sqlx::test(migrations = "./migrations")]
-async fn the_waiter_does_not_claim_an_inline_result_after_a_domain_change(pool: PgPool) {
+#[tokio::test]
+async fn the_waiter_does_not_claim_an_inline_result_after_a_domain_change() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let context = fx.context.clone();
     let caller = fx.caller();
@@ -854,8 +869,9 @@ async fn the_waiter_does_not_claim_an_inline_result_after_a_domain_change(pool: 
 /// Заявка берёт замок задач машины раньше счётчика событий, как и итог: если бы она сначала
 /// публиковала событие, а замок брала потом, встречный итог (замок, потом событие) замкнул
 /// бы цикл, и база прервала бы одну из транзакций.
-#[sqlx::test(migrations = "./migrations")]
-async fn submission_and_completion_take_the_jobs_lock_before_the_event_counter(pool: PgPool) {
+#[tokio::test]
+async fn submission_and_completion_take_the_jobs_lock_before_the_event_counter() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let existing = job_id(&fx.run("first").await);
     let job = fx.job(existing).await;
@@ -901,8 +917,9 @@ async fn submission_and_completion_take_the_jobs_lock_before_the_event_counter(p
 /// Допуск заказчика держится до фиксации диспетчеризации: владелец сужает режим тем же путём,
 /// что настройки (очередь, затем строка разговора); диспетчер, дойдя до этой строки, ждёт
 /// фиксации и видит уже узкий режим, а не стартует оболочку по старому снимку.
-#[sqlx::test(migrations = "./migrations")]
-async fn dispatch_waits_for_a_concurrent_mode_change_and_sees_it(pool: PgPool) {
+#[tokio::test]
+async fn dispatch_waits_for_a_concurrent_mode_change_and_sees_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let mut running = Vec::new();
     for n in 0..4 {
@@ -974,8 +991,9 @@ async fn dispatch_waits_for_a_concurrent_mode_change_and_sees_it(pool: PgPool) {
 
 /// Выключатель выключили и включили до диспетчеризации: удалённая задача, ждавшая в очереди
 /// в момент выключения, не стартует, а закрывается `remote_work_disabled`.
-#[sqlx::test(migrations = "./migrations")]
-async fn a_queued_remote_job_does_not_revive_after_off_and_on(pool: PgPool) {
+#[tokio::test]
+async fn a_queued_remote_job_does_not_revive_after_off_and_on() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.switch(true).await;
     let first = job_id(&fx.run_on_b("one").await.unwrap());
@@ -998,8 +1016,9 @@ async fn a_queued_remote_job_does_not_revive_after_off_and_on(pool: PgPool) {
 
 // ───────── Допуск ─────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn only_bypass_may_run_commands(pool: PgPool) {
+#[tokio::test]
+async fn only_bypass_may_run_commands() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let args = json!({"workdir": "/tmp/w", "shell": "true", "wait_seconds": 0});
     for (mode, pending) in [
@@ -1055,8 +1074,9 @@ async fn only_bypass_may_run_commands(pool: PgPool) {
     fx.call("job.run", args).await.unwrap();
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn the_directory_must_belong_to_the_callers_domain(pool: PgPool) {
+#[tokio::test]
+async fn the_directory_must_belong_to_the_callers_domain() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     // Рабочий каталог по правилу по умолчанию: другой домен.
     let work = json!({"workdir": "/home/dev/work/p", "shell": "true", "wait_seconds": 0});
@@ -1089,8 +1109,9 @@ async fn the_directory_must_belong_to_the_callers_domain(pool: PgPool) {
 }
 
 /// `job_run` на раннер с явным `machine` остаётся разрешённым: раннеры созданы для задач.
-#[sqlx::test(migrations = "./migrations")]
-async fn job_run_on_a_runner_machine_stays_allowed(pool: PgPool) {
+#[tokio::test]
+async fn job_run_on_a_runner_machine_stays_allowed() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     sqlx::query(
         "update machines set role='runner', parent_machine_id=$2, root_dir='/srv/runner',
@@ -1106,8 +1127,9 @@ async fn job_run_on_a_runner_machine_stays_allowed(pool: PgPool) {
     assert_eq!(fx.commands(fx.b, "start_inplace_job").await, 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn another_machine_needs_the_owners_switch_and_the_capability(pool: PgPool) {
+#[tokio::test]
+async fn another_machine_needs_the_owners_switch_and_the_capability() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     assert_eq!(code(fx.run_on_b("true").await), Code::RemoteWorkDisabled);
     fx.switch(true).await;
@@ -1138,8 +1160,9 @@ async fn another_machine_needs_the_owners_switch_and_the_capability(pool: PgPool
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn a_queued_job_is_rechecked_at_dispatch_and_ends_canceled_with_the_reason(pool: PgPool) {
+#[tokio::test]
+async fn a_queued_job_is_rechecked_at_dispatch_and_ends_canceled_with_the_reason() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.switch(true).await;
     // У B место на двоих: две занимают его, третья ждёт в очереди.
@@ -1168,8 +1191,9 @@ async fn a_queued_job_is_rechecked_at_dispatch_and_ends_canceled_with_the_reason
     assert_eq!(fx.messages(queued).await, 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn a_narrowed_mode_closes_the_queued_job_at_dispatch(pool: PgPool) {
+#[tokio::test]
+async fn a_narrowed_mode_closes_the_queued_job_at_dispatch() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.switch(true).await;
     let first = job_id(&fx.run_on_b("one").await.unwrap());
@@ -1203,8 +1227,9 @@ async fn a_narrowed_mode_closes_the_queued_job_at_dispatch(pool: PgPool) {
 
 // ───────── Очередь и место ─────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn capacity_is_reserved_at_dispatch_and_the_queue_is_fifo(pool: PgPool) {
+#[tokio::test]
+async fn capacity_is_reserved_at_dispatch_and_the_queue_is_fifo() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.switch(true).await;
     let mut ids = Vec::new();
@@ -1247,8 +1272,9 @@ async fn capacity_is_reserved_at_dispatch_and_the_queue_is_fifo(pool: PgPool) {
 
 // ───────── Состояния и факты ─────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn facts_apply_forward_only(pool: PgPool) {
+#[tokio::test]
+async fn facts_apply_forward_only() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let id = job_id(&fx.run("make").await);
     fx.started(fx.a, id).await;
@@ -1278,8 +1304,9 @@ async fn facts_apply_forward_only(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn launch_interrupted_and_refused_workdir_end_failed_with_their_reason(pool: PgPool) {
+#[tokio::test]
+async fn launch_interrupted_and_refused_workdir_end_failed_with_their_reason() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let a = job_id(&fx.run("one").await);
     fx.finished(fx.a, a, JobOutcome::LaunchInterrupted, None)
@@ -1297,8 +1324,9 @@ async fn launch_interrupted_and_refused_workdir_end_failed_with_their_reason(poo
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn a_report_on_connect_applies_forward(pool: PgPool) {
+#[tokio::test]
+async fn a_report_on_connect_applies_forward() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let running = job_id(&fx.run("one").await);
     let finished = job_id(&fx.run("two").await);
@@ -1360,8 +1388,9 @@ fn finished_report(id: Uuid, log_bytes: u64) -> JobsReport {
 
 /// Отчёт при подключении обогнал факт `JobFinished`: хвост вывода не теряется, итог и
 /// сообщение берутся из факта.
-#[sqlx::test(migrations = "./migrations")]
-async fn a_report_arriving_before_the_finished_fact_keeps_the_output_tail(pool: PgPool) {
+#[tokio::test]
+async fn a_report_arriving_before_the_finished_fact_keeps_the_output_tail() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let id = job_id(&fx.run("make").await);
     fx.started(fx.a, id).await;
@@ -1395,8 +1424,9 @@ async fn a_report_arriving_before_the_finished_fact_keeps_the_output_tail(pool: 
 
 /// Снимок без вывода закрывает задачу сразу: терять нечего. А если факт с хвостом так и не
 /// пришёл, служба закрывает задачу по снимку, а не оставляет её навсегда идущей.
-#[sqlx::test(migrations = "./migrations")]
-async fn a_report_without_output_finishes_at_once_and_a_missing_fact_times_out(pool: PgPool) {
+#[tokio::test]
+async fn a_report_without_output_finishes_at_once_and_a_missing_fact_times_out() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let quiet = job_id(&fx.run("true").await);
     let loud = job_id(&fx.run("make").await);
@@ -1433,8 +1463,9 @@ async fn a_report_without_output_finishes_at_once_and_a_missing_fact_times_out(p
 
 // ───────── Потеря ─────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn a_silent_machine_loses_the_job_and_a_late_finish_changes_nothing_else(pool: PgPool) {
+#[tokio::test]
+async fn a_silent_machine_loses_the_job_and_a_late_finish_changes_nothing_else() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::with(pool, false).await;
     fx.switch(true).await;
     let id = job_id(&fx.run_on_b("make").await.unwrap());
@@ -1472,8 +1503,9 @@ async fn a_silent_machine_loses_the_job_and_a_late_finish_changes_nothing_else(p
     assert_eq!(fx.messages(id).await, 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn a_lost_job_the_worker_reports_running_keeps_its_slot(pool: PgPool) {
+#[tokio::test]
+async fn a_lost_job_the_worker_reports_running_keeps_its_slot() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::with(pool, false).await;
     fx.switch(true).await;
     let first = job_id(&fx.run_on_b("one").await.unwrap());
@@ -1509,8 +1541,9 @@ async fn a_lost_job_the_worker_reports_running_keeps_its_slot(pool: PgPool) {
 
 // ───────── Отмена и доступ ─────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cancel_ends_a_queued_job_at_once_and_asks_the_worker_for_a_running_one(pool: PgPool) {
+#[tokio::test]
+async fn cancel_ends_a_queued_job_at_once_and_asks_the_worker_for_a_running_one() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.switch(true).await;
     let running = job_id(&fx.run_on_b("one").await.unwrap());
@@ -1545,8 +1578,9 @@ async fn cancel_ends_a_queued_job_at_once_and_asks_the_worker_for_a_running_one(
     assert_eq!(fx.state(running).await, "canceled");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn another_conversation_cannot_read_list_or_cancel_the_job(pool: PgPool) {
+#[tokio::test]
+async fn another_conversation_cannot_read_list_or_cancel_the_job() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let id = job_id(&fx.run("secret").await);
     let (other, other_execution) = fx.other_conversation().await;
@@ -1635,8 +1669,9 @@ async fn input_texts(fx: &Fx) -> Vec<String> {
     .collect()
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn the_message_reaches_the_caller_once_with_an_eight_kib_tail(pool: PgPool) {
+#[tokio::test]
+async fn the_message_reaches_the_caller_once_with_an_eight_kib_tail() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let id = job_id(&fx.run("make").await);
     fx.started(fx.a, id).await;
@@ -1676,8 +1711,9 @@ async fn the_message_reaches_the_caller_once_with_an_eight_kib_tail(pool: PgPool
 
 /// Двоичный вывод (NUL, ESC) не делает итог постоянной потерей: сообщение пишет такие байты
 /// escape-последовательностями и проходит проверку ввода, а хвост в строке остаётся как был.
-#[sqlx::test(migrations = "./migrations")]
-async fn binary_output_is_escaped_in_the_message_and_kept_in_the_log(pool: PgPool) {
+#[tokio::test]
+async fn binary_output_is_escaped_in_the_message_and_kept_in_the_log() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let id = job_id(&fx.run("cat blob").await);
     fx.started(fx.a, id).await;
@@ -1714,8 +1750,9 @@ async fn binary_output_is_escaped_in_the_message_and_kept_in_the_log(pool: PgPoo
 
 /// Если текст с хвостом всё равно не принят, доставка сжимается до короткого сообщения без
 /// хвоста, а не бросает итог.
-#[sqlx::test(migrations = "./migrations")]
-async fn a_tail_that_fails_validation_degrades_to_a_short_message(pool: PgPool) {
+#[tokio::test]
+async fn a_tail_that_fails_validation_degrades_to_a_short_message() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let id = job_id(&fx.run("make").await);
     fx.started(fx.a, id).await;
@@ -1733,8 +1770,9 @@ async fn a_tail_that_fails_validation_degrades_to_a_short_message(pool: PgPool) 
     assert!(short.contains("job_log"), "{short}");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn an_archived_or_deleted_or_moved_caller_gets_no_message(pool: PgPool) {
+#[tokio::test]
+async fn an_archived_or_deleted_or_moved_caller_gets_no_message() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::crunch::JobOutcome as Outcome;
     let fx = Fx::new(pool).await;
     let archived = job_id(&fx.run("one").await);
@@ -1771,8 +1809,9 @@ async fn an_archived_or_deleted_or_moved_caller_gets_no_message(pool: PgPool) {
     ));
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn the_job_outlives_a_deleted_caller(pool: PgPool) {
+#[tokio::test]
+async fn the_job_outlives_a_deleted_caller() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let id = job_id(&fx.run("deploy").await);
     sqlx::query("update jobs set conversation_id=null where id=$1")
@@ -1788,8 +1827,9 @@ async fn the_job_outlives_a_deleted_caller(pool: PgPool) {
 
 // ───────── Журнал ─────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn the_log_is_the_hub_tail_while_running_and_the_attachment_after_the_end(pool: PgPool) {
+#[tokio::test]
+async fn the_log_is_the_hub_tail_while_running_and_the_attachment_after_the_end() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_proto::worker::v1::{JobLogChunk, MediaHeader};
     use flate2::{Compression, write::GzEncoder};
     use sha2::{Digest, Sha256};
@@ -1870,8 +1910,9 @@ async fn the_log_is_the_hub_tail_while_running_and_the_attachment_after_the_end(
     assert_eq!(rest.total_bytes, Some(full.len() as u64));
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn a_stale_log_upload_does_not_attach_to_the_next_attempt(pool: PgPool) {
+#[tokio::test]
+async fn a_stale_log_upload_does_not_attach_to_the_next_attempt() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_proto::worker::v1::MediaHeader;
     use flate2::{Compression, write::GzEncoder};
     use sha2::{Digest, Sha256};
@@ -1944,8 +1985,9 @@ fn hex(bytes: &[u8]) -> String {
 
 // ───────── Команды и отказы ─────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn the_start_command_carries_the_job_and_needs_the_capability(pool: PgPool) {
+#[tokio::test]
+async fn the_start_command_carries_the_job_and_needs_the_capability() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::outbox::{self, CommandRow};
     use canterlot_proto::worker::v1::command::Kind;
     let fx = Fx::new(pool).await;
@@ -1990,8 +2032,9 @@ async fn the_start_command_carries_the_job_and_needs_the_capability(pool: PgPool
     assert!(outbox::to_proto_for_session(&row, &fx.registry).is_ok());
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn a_rejected_start_ends_the_job_failed_with_the_reason(pool: PgPool) {
+#[tokio::test]
+async fn a_rejected_start_ends_the_job_failed_with_the_reason() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let id = job_id(&fx.run("make").await);
     let (command, attempt): (Uuid, i32) =
@@ -2021,8 +2064,9 @@ async fn a_rejected_start_ends_the_job_failed_with_the_reason(pool: PgPool) {
     assert_eq!(fx.messages(id).await, 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn arguments_are_checked_and_unknown_ones_refused(pool: PgPool) {
+#[tokio::test]
+async fn arguments_are_checked_and_unknown_ones_refused() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     for bad in [
         json!({"workdir": "/tmp/w", "shell": "x", "argv": ["a"]}),
@@ -2059,8 +2103,9 @@ async fn arguments_are_checked_and_unknown_ones_refused(pool: PgPool) {
     assert_eq!(none, 0);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn status_and_listing_report_machine_offline_and_state(pool: PgPool) {
+#[tokio::test]
+async fn status_and_listing_report_machine_offline_and_state() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::with(pool, false).await;
     fx.switch(true).await;
     let id = job_id(&fx.run_on_b("make").await.unwrap());
@@ -2170,8 +2215,9 @@ impl Api {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_owner_lists_filters_and_reads_jobs(pool: PgPool) {
+#[tokio::test]
+async fn the_owner_lists_filters_and_reads_jobs() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool.clone()).await;
     let other_machine = Uuid::now_v7();
     sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'machine-c')")
@@ -2274,8 +2320,9 @@ async fn the_owner_lists_filters_and_reads_jobs(pool: PgPool) {
     ));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_log_endpoint_reads_the_hub_tail_with_offset_and_limit(pool: PgPool) {
+#[tokio::test]
+async fn the_log_endpoint_reads_the_hub_tail_with_offset_and_limit() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool.clone()).await;
     let id = api.insert("running", "make").await;
     sqlx::query("update jobs set live_tail=$2, live_offset=17 where id=$1")
@@ -2314,8 +2361,9 @@ async fn the_log_endpoint_reads_the_hub_tail_with_offset_and_limit(pool: PgPool)
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn switching_remote_work_off_closes_the_queued_remote_jobs_at_once(pool: PgPool) {
+#[tokio::test]
+async fn switching_remote_work_off_closes_the_queued_remote_jobs_at_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool.clone()).await;
     sqlx::query("update machines set accepts_remote_work=true where id=$1")
         .bind(api.machine)
@@ -2411,8 +2459,9 @@ async fn switching_remote_work_off_closes_the_queued_remote_jobs_at_once(pool: P
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_owner_cancels_queued_running_and_lost_jobs_idempotently(pool: PgPool) {
+#[tokio::test]
+async fn the_owner_cancels_queued_running_and_lost_jobs_idempotently() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool.clone()).await;
     let queued = api.insert("queued", "a").await;
     let running = api.insert("running", "b").await;

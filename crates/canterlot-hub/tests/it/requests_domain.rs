@@ -140,10 +140,10 @@ async fn migration_0018_creates_requests_table_with_constraints(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn sole_winner_commits_first_decision_and_concurrent_callers_receive_conflict(
-    pool: PgPool,
-) -> Result<(), sqlx::Error> {
+#[tokio::test]
+async fn sole_winner_commits_first_decision_and_concurrent_callers_receive_conflict()
+-> Result<(), sqlx::Error> {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution_id = Uuid::now_v7();
     sqlx::query("insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'running')")
@@ -303,10 +303,9 @@ async fn sole_winner_commits_first_decision_and_concurrent_callers_receive_confl
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn identical_idempotency_key_replays_committed_decision(
-    pool: PgPool,
-) -> Result<(), sqlx::Error> {
+#[tokio::test]
+async fn identical_idempotency_key_replays_committed_decision() -> Result<(), sqlx::Error> {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution_id = Uuid::now_v7();
     sqlx::query("insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'running')")
@@ -398,10 +397,9 @@ async fn identical_idempotency_key_replays_committed_decision(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn decision_on_closed_request_returns_already_closed_conflict(
-    pool: PgPool,
-) -> Result<(), sqlx::Error> {
+#[tokio::test]
+async fn decision_on_closed_request_returns_already_closed_conflict() -> Result<(), sqlx::Error> {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution_id = Uuid::now_v7();
     sqlx::query("insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'running')")
@@ -473,10 +471,9 @@ async fn decision_on_closed_request_returns_already_closed_conflict(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn decision_with_stale_generation_returns_stale_generation(
-    pool: PgPool,
-) -> Result<(), sqlx::Error> {
+#[tokio::test]
+async fn decision_with_stale_generation_returns_stale_generation() -> Result<(), sqlx::Error> {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution_id = Uuid::now_v7();
     sqlx::query("insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'running')")
@@ -540,10 +537,10 @@ async fn decision_with_stale_generation_returns_stale_generation(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn lock_order_requests_prevents_deadlocks_under_concurrent_turn_events(
-    pool: PgPool,
-) -> Result<(), sqlx::Error> {
+#[tokio::test]
+async fn lock_order_requests_prevents_deadlocks_under_concurrent_turn_events()
+-> Result<(), sqlx::Error> {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution_id = Uuid::now_v7();
     sqlx::query("insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'running')")
@@ -674,8 +671,9 @@ fn spawn_approval_kind_round_trips() {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_approval_request_is_stored_and_read_back(pool: PgPool) -> Result<(), sqlx::Error> {
+#[tokio::test]
+async fn spawn_approval_request_is_stored_and_read_back() -> Result<(), sqlx::Error> {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution_id = Uuid::now_v7();
     sqlx::query("insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'running')")

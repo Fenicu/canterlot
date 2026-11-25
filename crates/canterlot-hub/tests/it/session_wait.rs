@@ -161,8 +161,9 @@ impl Fx {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wait_returns_at_once_when_settled(pool: PgPool) {
+#[tokio::test]
+async fn wait_returns_at_once_when_settled() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.settle_target().await;
     let started = Instant::now();
@@ -179,8 +180,9 @@ async fn wait_returns_at_once_when_settled(pool: PgPool) {
     assert!(summary.contains("is now idle."), "{summary}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wait_times_out_and_keeps_subscription(pool: PgPool) {
+#[tokio::test]
+async fn wait_times_out_and_keeps_subscription() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.busy_target().await;
     f.subscribe().await;
@@ -202,8 +204,9 @@ async fn wait_times_out_and_keeps_subscription(pool: PgPool) {
     assert!(subscription["last_fingerprint"].is_null());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wait_without_subscription_does_not_claim_one(pool: PgPool) {
+#[tokio::test]
+async fn wait_without_subscription_does_not_claim_one() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.busy_target().await;
     let result = f
@@ -219,8 +222,9 @@ async fn wait_without_subscription_does_not_claim_one(pool: PgPool) {
     assert_eq!(rows, 0, "wait never subscribes by itself");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wait_suppresses_event_when_it_wins(pool: PgPool) {
+#[tokio::test]
+async fn wait_suppresses_event_when_it_wins() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.settle_target().await;
     f.subscribe().await;
@@ -245,8 +249,9 @@ async fn wait_suppresses_event_when_it_wins(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wait_on_a_stopped_target_with_a_queued_input_keeps_the_subscription(pool: PgPool) {
+#[tokio::test]
+async fn wait_on_a_stopped_target_with_a_queued_input_keeps_the_subscription() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let execution = executions::start(&f.pool, f.owner, f.target, Uuid::now_v7())
         .await
@@ -280,8 +285,9 @@ async fn wait_on_a_stopped_target_with_a_queued_input_keeps_the_subscription(poo
     assert!(f.subscription().await["closed_at"].is_null());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn event_still_arrives_when_evaluator_wins(pool: PgPool) {
+#[tokio::test]
+async fn event_still_arrives_when_evaluator_wins() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.settle_target().await;
     f.subscribe().await;
@@ -327,18 +333,21 @@ async fn wait_after_target_domain_change(pool: PgPool, domain: Option<&str>) {
     assert_eq!(error.code, Code::SessionNotFound, "{domain:?}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wait_refuses_a_target_that_moved_to_work(pool: PgPool) {
+#[tokio::test]
+async fn wait_refuses_a_target_that_moved_to_work() {
+    let pool = canterlot_hub::testkit::db().await;
     wait_after_target_domain_change(pool, Some("work")).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wait_refuses_a_target_whose_domain_became_null(pool: PgPool) {
+#[tokio::test]
+async fn wait_refuses_a_target_whose_domain_became_null() {
+    let pool = canterlot_hub::testkit::db().await;
     wait_after_target_domain_change(pool, None).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wait_picks_up_a_state_reached_while_waiting(pool: PgPool) {
+#[tokio::test]
+async fn wait_picks_up_a_state_reached_while_waiting() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.busy_target().await;
     f.subscribe().await;
@@ -370,8 +379,9 @@ async fn wait_picks_up_a_state_reached_while_waiting(pool: PgPool) {
     assert_eq!(result["state"], "idle");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wait_holds_no_database_connection(pool: PgPool) {
+#[tokio::test]
+async fn wait_holds_no_database_connection() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.busy_target().await;
     let single = PgPoolOptions::new()
@@ -411,8 +421,9 @@ async fn wait_holds_no_database_connection(pool: PgPool) {
     assert_eq!(result["timed_out"], true);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wait_stops_on_hub_shutdown(pool: PgPool) {
+#[tokio::test]
+async fn wait_stops_on_hub_shutdown() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.busy_target().await;
     let shutdown = f.context.shutdown.clone();
@@ -430,8 +441,9 @@ async fn wait_stops_on_hub_shutdown(pool: PgPool) {
     assert_eq!(error.code, Code::Internal);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wait_validates_arguments_and_visibility(pool: PgPool) {
+#[tokio::test]
+async fn wait_validates_arguments_and_visibility() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.settle_target().await;
     for bad in [0, 301, -1] {
@@ -464,8 +476,9 @@ async fn wait_validates_arguments_and_visibility(pool: PgPool) {
     assert_eq!(error.code, Code::SessionNotFound);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wait_reports_a_target_deleted_meanwhile(pool: PgPool) {
+#[tokio::test]
+async fn wait_reports_a_target_deleted_meanwhile() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.busy_target().await;
     let directory = tempfile::tempdir().unwrap();
@@ -494,8 +507,9 @@ async fn wait_reports_a_target_deleted_meanwhile(pool: PgPool) {
     assert!(!result["summary"].as_str().unwrap().contains("private"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn event_for_an_open_state_is_not_suppressed_by_a_later_wait(pool: PgPool) {
+#[tokio::test]
+async fn event_for_an_open_state_is_not_suppressed_by_a_later_wait() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.busy_target().await;
     sqlx::query("update queue_state set pause_reasons='[{\"reason\":\"user_stop\"}]' where conversation_id=$1")

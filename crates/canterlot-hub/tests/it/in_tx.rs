@@ -75,8 +75,9 @@ async fn snapshot(pool: &PgPool, input_id: Uuid) -> Result<Value, sqlx::Error> {
     .await
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn receipt_in_tx_rolls_back_with_caller(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn receipt_in_tx_rolls_back_with_caller() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (_, _, input) = dispatched_input(&pool).await?;
     let before = snapshot(&pool, input.input_id).await?;
     assert_eq!(before["input"]["state"], "dispatched");
@@ -115,8 +116,9 @@ async fn receipt_in_tx_rolls_back_with_caller(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn set_state_in_tx_composes(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn set_state_in_tx_composes() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution =
         executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()).await?;
@@ -163,8 +165,9 @@ async fn set_state_in_tx_composes(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn run_finished_in_tx_composes(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn run_finished_in_tx_composes() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, execution, input) = dispatched_input(&pool).await?;
     let before = snapshot(&pool, input.input_id).await?;
     let correlation_id = Uuid::now_v7();

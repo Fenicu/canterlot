@@ -7,7 +7,6 @@ use canterlot_hub::{
     testkit::{Method, TestClient, TestResponse},
 };
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::support::auth::{AuthHub, PASSWORD, set_cookie};
@@ -54,8 +53,9 @@ fn with_device(client: TestClient, device: &str) -> TestClient {
     client.with_header("Cookie", &format!("{DEVICE_COOKIE}={device}"))
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_devices_qr_sign_in_gets_no_device_cookie(pool: PgPool) {
+#[tokio::test]
+async fn auth_devices_qr_sign_in_gets_no_device_cookie() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let client = hub.anonymous(Some("203.0.113.80"));
     let started = client
@@ -91,8 +91,9 @@ async fn auth_devices_qr_sign_in_gets_no_device_cookie(pool: PgPool) {
     assert_eq!(devices(&hub).await, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_devices_follow_the_session_of_their_last_sign_in(pool: PgPool) {
+#[tokio::test]
+async fn auth_devices_follow_the_session_of_their_last_sign_in() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let a = sign_in(&hub, &hub.anonymous(Some("203.0.113.81"))).await;
@@ -176,8 +177,9 @@ async fn auth_devices_follow_the_session_of_their_last_sign_in(pool: PgPool) {
     assert_eq!(devices(&hub).await, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_devices_are_forgotten_by_revoke_all_and_set_password(pool: PgPool) {
+#[tokio::test]
+async fn auth_devices_are_forgotten_by_revoke_all_and_set_password() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let a = sign_in(&hub, &hub.anonymous(Some("203.0.113.86"))).await;
@@ -200,8 +202,9 @@ async fn auth_devices_are_forgotten_by_revoke_all_and_set_password(pool: PgPool)
 }
 
 #[cfg(feature = "fault-injection")]
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_devices_a_failure_after_the_session_commit_revokes_it(pool: PgPool) {
+#[tokio::test]
+async fn auth_devices_a_failure_after_the_session_commit_revokes_it() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::fault_injection::Point;
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;

@@ -73,8 +73,9 @@ struct SnapshotRow {
     completed_at: Option<chrono::DateTime<Utc>>,
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn closes_only_held_deliveries_of_terminal_inputs(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn closes_only_held_deliveries_of_terminal_inputs() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let (accepted_id, accepted_cmd) = input(&pool, &seed, "accepted").await;
     let (cancelled_id, cancelled_cmd) = input(&pool, &seed, "cancelled").await;

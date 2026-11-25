@@ -61,8 +61,9 @@ async fn post_schedule(f: &Fixture, target: Value) -> (u16, Value) {
     (r.status.as_u16(), r.json())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn session_report_target_is_created_for_an_owned_session(pool: PgPool) {
+#[tokio::test]
+async fn session_report_target_is_created_for_an_owned_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let _session = session(&f);
     let (status, body) = post_schedule(&f, report_target(f.seed.conversation_id)).await;
@@ -74,8 +75,9 @@ async fn session_report_target_is_created_for_an_owned_session(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn session_report_target_validation(pool: PgPool) {
+#[tokio::test]
+async fn session_report_target_validation() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
 
@@ -117,8 +119,9 @@ async fn session_report_target_validation(pool: PgPool) {
     assert_eq!(status, 422);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn session_report_target_requires_side_chat_capability(pool: PgPool) {
+#[tokio::test]
+async fn session_report_target_requires_side_chat_capability() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let _session = testkit::fake_session(
         &f.state.registry,
@@ -130,8 +133,9 @@ async fn session_report_target_requires_side_chat_capability(pool: PgPool) {
     assert_eq!(status, 422, "{body}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn patch_to_session_report_target_is_validated_too(pool: PgPool) {
+#[tokio::test]
+async fn patch_to_session_report_target_is_validated_too() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let _session = session(&f);
     let (status, body) = post_schedule(&f, report_target(f.seed.conversation_id)).await;
@@ -150,8 +154,9 @@ async fn patch_to_session_report_target_is_validated_too(pool: PgPool) {
     assert_eq!(r.status.as_u16(), 422);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn report_copy_and_interactive_side_coexist_under_one_parent(pool: PgPool) {
+#[tokio::test]
+async fn report_copy_and_interactive_side_coexist_under_one_parent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -463,8 +468,9 @@ async fn worker_stops_copies(pool: &PgPool) {
     .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_makes_a_pending_card_then_the_report_then_deletes_the_copy(pool: PgPool) {
+#[tokio::test]
+async fn run_makes_a_pending_card_then_the_report_then_deletes_the_copy() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -521,8 +527,9 @@ async fn run_makes_a_pending_card_then_the_report_then_deletes_the_copy(pool: Pg
     assert!(cards(&pool, schedule).await[0].copy_id.is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_copy_is_a_read_only_forked_report_copy_with_the_prompt(pool: PgPool) {
+#[tokio::test]
+async fn the_copy_is_a_read_only_forked_report_copy_with_the_prompt() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -564,8 +571,9 @@ async fn the_copy_is_a_read_only_forked_report_copy_with_the_prompt(pool: PgPool
     assert_eq!(counts["all"], 1, "{counts}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_parent_is_not_touched_by_a_report_run(pool: PgPool) {
+#[tokio::test]
+async fn the_parent_is_not_touched_by_a_report_run() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -609,8 +617,9 @@ async fn the_parent_is_not_touched_by_a_report_run(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_interactive_side_chat_is_not_reused_replaced_or_disturbed(pool: PgPool) {
+#[tokio::test]
+async fn the_interactive_side_chat_is_not_reused_replaced_or_disturbed() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -666,8 +675,9 @@ async fn the_interactive_side_chat_is_not_reused_replaced_or_disturbed(pool: PgP
     assert_eq!(chat_after, chat_before);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_new_report_replaces_the_undismissed_card_of_the_same_schedule(pool: PgPool) {
+#[tokio::test]
+async fn a_new_report_replaces_the_undismissed_card_of_the_same_schedule() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -721,8 +731,9 @@ async fn ready_card(f: &Fixture, schedule: Uuid, answer: &str) -> (Uuid, Uuid) {
     (run, open_cards(&f.pool, schedule).await.remove(0).id)
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn snapshot_carries_the_open_card_and_events_follow_its_life(pool: PgPool) {
+#[tokio::test]
+async fn snapshot_carries_the_open_card_and_events_follow_its_life() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -759,8 +770,9 @@ async fn snapshot_carries_the_open_card_and_events_follow_its_life(pool: PgPool)
     assert_eq!(changed[1]["body"], "**Готово**");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn dismiss_is_idempotent_evented_and_keeps_the_text_in_history(pool: PgPool) {
+#[tokio::test]
+async fn dismiss_is_idempotent_evented_and_keeps_the_text_in_history() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -832,8 +844,9 @@ async fn dismiss_is_idempotent_evented_and_keeps_the_text_in_history(pool: PgPoo
     assert_eq!(item["detail"]["report"]["state"], "ready");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_dismissed_pending_card_does_not_come_back_or_push(pool: PgPool) {
+#[tokio::test]
+async fn a_dismissed_pending_card_does_not_come_back_or_push() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::notify::{self, PushSettings};
     notify::configure(
         &pool,
@@ -907,8 +920,9 @@ async fn routine_pushes(pool: &PgPool) -> Vec<(Uuid, Value)> {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn one_push_when_the_report_is_ready_and_none_while_pending(pool: PgPool) {
+#[tokio::test]
+async fn one_push_when_the_report_is_ready_and_none_while_pending() {
+    let pool = canterlot_hub::testkit::db().await;
     push_settings(&pool, true).await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
@@ -934,8 +948,9 @@ async fn one_push_when_the_report_is_ready_and_none_while_pending(pool: PgPool) 
     assert_eq!(pushes[0].1["report_id"], card.to_string());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_owners_push_settings_are_respected(pool: PgPool) {
+#[tokio::test]
+async fn the_owners_push_settings_are_respected() {
+    let pool = canterlot_hub::testkit::db().await;
     push_settings(&pool, false).await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
@@ -961,8 +976,9 @@ async fn failed_run_and_card(f: &Fixture, schedule: Uuid, run: Uuid, reason: &st
     assert!(open[0].body.is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_crashed_copy_fails_the_run_with_an_error_card_and_a_failure_push(pool: PgPool) {
+#[tokio::test]
+async fn a_crashed_copy_fails_the_run_with_an_error_card_and_a_failure_push() {
+    let pool = canterlot_hub::testkit::db().await;
     push_settings(&pool, true).await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
@@ -1003,8 +1019,9 @@ async fn a_crashed_copy_fails_the_run_with_an_error_card_and_a_failure_push(pool
     assert_eq!(card["schedule_id"], schedule.to_string());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_parent_without_a_native_record_fails_the_run_with_an_error_card(pool: PgPool) {
+#[tokio::test]
+async fn a_parent_without_a_native_record_fails_the_run_with_an_error_card() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     let schedule = make_schedule(&f, "Стендап").await;
@@ -1026,8 +1043,9 @@ async fn a_parent_without_a_native_record_fails_the_run_with_an_error_card(pool:
     assert_eq!(all[1].state, "pending");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_turn_longer_than_sixty_minutes_fails_the_run(pool: PgPool) {
+#[tokio::test]
+async fn a_turn_longer_than_sixty_minutes_fails_the_run() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1059,8 +1077,9 @@ async fn a_turn_longer_than_sixty_minutes_fails_the_run(pool: PgPool) {
     failed_run_and_card(&f, schedule, run, "turn_timeout").await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_opencode_parent_busy_for_two_hours_fails_the_run(pool: PgPool) {
+#[tokio::test]
+async fn an_opencode_parent_busy_for_two_hours_fails_the_run() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1113,8 +1132,9 @@ async fn an_opencode_parent_busy_for_two_hours_fails_the_run(pool: PgPool) {
     assert!(copies(&pool, parent).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_finished_turn_without_text_fails_the_run(pool: PgPool) {
+#[tokio::test]
+async fn a_finished_turn_without_text_fails_the_run() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1138,8 +1158,9 @@ async fn a_finished_turn_without_text_fails_the_run(pool: PgPool) {
 
 /// Гонка сборщика: слот ещё свободен, ввод уже принят, а ход только начинается. Раньше
 /// отсутствие текста объявлялось `empty_report`, и здоровую копию останавливали.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_turn_that_is_just_starting_is_not_an_empty_report(pool: PgPool) {
+#[tokio::test]
+async fn a_turn_that_is_just_starting_is_not_an_empty_report() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1177,8 +1198,9 @@ async fn a_turn_that_is_just_starting_is_not_an_empty_report(pool: PgPool) {
 
 /// Копия упала после приёма ввода: слот освободил переход исполнения, а раньше сказанная
 /// реплика не итог хода. Отчётом она не становится.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_aborted_turn_does_not_publish_an_earlier_text_block(pool: PgPool) {
+#[tokio::test]
+async fn an_aborted_turn_does_not_publish_an_earlier_text_block() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1208,8 +1230,9 @@ async fn an_aborted_turn_does_not_publish_an_earlier_text_block(pool: PgPool) {
 // Допуск: перекрытие и лимиты пропускают запуск, не оставляя ни карточки, ни копии.
 // ---------------------------------------------------------------------------
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_running_previous_report_skips_the_next_run(pool: PgPool) {
+#[tokio::test]
+async fn a_running_previous_report_skips_the_next_run() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1233,8 +1256,9 @@ async fn a_running_previous_report_skips_the_next_run(pool: PgPool) {
     wait_run(&pool, third, "started").await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_busy_parent_alone_does_not_count_as_a_running_report(pool: PgPool) {
+#[tokio::test]
+async fn a_busy_parent_alone_does_not_count_as_a_running_report() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1260,8 +1284,9 @@ async fn a_busy_parent_alone_does_not_count_as_a_running_report(pool: PgPool) {
     wait_run(&pool, second, "started").await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_red_limit_window_of_the_parents_model_skips_the_run(pool: PgPool) {
+#[tokio::test]
+async fn a_red_limit_window_of_the_parents_model_skips_the_run() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::limits::{
         DataConfidence, Observation, ObservationSource, Window, record_observation_in_tx,
     };
@@ -1302,8 +1327,9 @@ async fn a_red_limit_window_of_the_parents_model_skips_the_run(pool: PgPool) {
     assert!(cards(&pool, schedule).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_offline_machine_skips_the_run(pool: PgPool) {
+#[tokio::test]
+async fn an_offline_machine_skips_the_run() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     with_native(&f).await;
     let schedule = make_schedule_without_session(&f, "Стендап").await;
@@ -1369,8 +1395,9 @@ async fn run_exists(pool: &PgPool, run: Uuid) -> bool {
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn report_text_is_pruned_from_history_after_thirty_days(pool: PgPool) {
+#[tokio::test]
+async fn report_text_is_pruned_from_history_after_thirty_days() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1396,8 +1423,9 @@ async fn report_text_is_pruned_from_history_after_thirty_days(pool: PgPool) {
 // Агент родителя карточки не видит: она не ввод и не блок, в доставку не попадает.
 // ---------------------------------------------------------------------------
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_card_never_reaches_the_agents_prompt(pool: PgPool) {
+#[tokio::test]
+async fn the_card_never_reaches_the_agents_prompt() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1436,8 +1464,9 @@ async fn the_card_never_reaches_the_agents_prompt(pool: PgPool) {
 // Контракт событий: настоящие события карточки укладываются в events.schema.json.
 // ---------------------------------------------------------------------------
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn card_events_fit_the_published_schema(pool: PgPool) {
+#[tokio::test]
+async fn card_events_fit_the_published_schema() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1499,8 +1528,9 @@ async fn card_events_fit_the_published_schema(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn trashing_the_parent_removes_report_copies_and_keeps_the_interactive_rules(pool: PgPool) {
+#[tokio::test]
+async fn trashing_the_parent_removes_report_copies_and_keeps_the_interactive_rules() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1587,8 +1617,9 @@ async fn card_copy(pool: &PgPool, card: Uuid) -> Option<Uuid> {
 
 /// Порядок замков удаления: владелец, затем строки копий. Уборка, берущая копию раньше
 /// владельца, замыкалась в цикл с переносом родителя в корзину.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cleanup_takes_the_owner_lock_before_the_copy_row(pool: PgPool) {
+#[tokio::test]
+async fn cleanup_takes_the_owner_lock_before_the_copy_row() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let schedule = make_schedule_without_session(&f, "Стендап").await;
     let (_card, copy) = stray_copy(&f, schedule, None).await;
@@ -1635,8 +1666,9 @@ async fn cleanup_takes_the_owner_lock_before_the_copy_row(pool: PgPool) {
 }
 
 /// Сбой уборки одной копии не роняет ни проход, ни тик планировщика, ни уборку других копий.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_cleanup_failure_is_per_copy_and_never_aborts_the_tick(pool: PgPool) {
+#[tokio::test]
+async fn a_cleanup_failure_is_per_copy_and_never_aborts_the_tick() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let schedule = make_schedule_without_session(&f, "Стендап").await;
     let (broken_card, broken) = stray_copy(&f, schedule, None).await;
@@ -1665,8 +1697,9 @@ async fn a_cleanup_failure_is_per_copy_and_never_aborts_the_tick(pool: PgPool) {
 
 /// Потерянные исполнения копий получают запрос разрешения и уходят в конец очереди уборки:
 /// пятьдесят таких не вытесняют из пачки обычную копию.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn lost_copies_are_recovered_and_cannot_fill_the_cleanup_batch(pool: PgPool) {
+#[tokio::test]
+async fn lost_copies_are_recovered_and_cannot_fill_the_cleanup_batch() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let schedule = make_schedule_without_session(&f, "Стендап").await;
     let mut lost = Vec::new();
@@ -1699,8 +1732,9 @@ async fn lost_copies_are_recovered_and_cannot_fill_the_cleanup_batch(pool: PgPoo
 
 /// Окончательное удаление родителя с недособранным отчётом: карточка уходит каскадом, а
 /// запуск не остаётся «собирается» навсегда.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn purging_the_parent_finalizes_its_pending_runs(pool: PgPool) {
+#[tokio::test]
+async fn purging_the_parent_finalizes_its_pending_runs() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1742,8 +1776,9 @@ async fn purging_the_parent_finalizes_its_pending_runs(pool: PgPool) {
 
 /// Пересечение считается по живому состоянию отчёта: запуск, чья карточка исчезла
 /// (каскад), следующий не блокирует, даже если в его журнале записано «собирается».
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn overlap_follows_the_live_report_not_the_run_journal(pool: PgPool) {
+#[tokio::test]
+async fn overlap_follows_the_live_report_not_the_run_journal() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1782,8 +1817,9 @@ async fn delete_schedule(f: &Fixture, schedule: Uuid) -> u16 {
 
 /// Удаление расписания с собирающимся отчётом: каскад не уносит запись об уборке, копии
 /// заказана остановка, открытая лента получает снятие карточки в той же транзакции.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn deleting_a_schedule_stops_its_copy_and_dismisses_the_open_card(pool: PgPool) {
+#[tokio::test]
+async fn deleting_a_schedule_stops_its_copy_and_dismisses_the_open_card() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1825,8 +1861,9 @@ async fn deleting_a_schedule_stops_its_copy_and_dismisses_the_open_card(pool: Pg
 
 /// Карточка со старой ошибкой после смены цели расписания: «Повторить» не может отправить
 /// сообщение в настоящую сессию. Хаб сверяет цель с разговором карточки сам.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stale_retry_is_refused_when_the_schedule_no_longer_reports_this_session(pool: PgPool) {
+#[tokio::test]
+async fn a_stale_retry_is_refused_when_the_schedule_no_longer_reports_this_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     let parent = f.seed.conversation_id;
@@ -1882,8 +1919,9 @@ async fn a_stale_retry_is_refused_when_the_schedule_no_longer_reports_this_sessi
 
 /// Предел в 200 запусков не стирает отчёты: собирающийся запуск живёт до финала, а готовый
 /// отчёт — 30 дней от завершения, как бы часто ни шли запуски.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_history_cap_keeps_pending_reports_and_fresh_report_text(pool: PgPool) {
+#[tokio::test]
+async fn the_history_cap_keeps_pending_reports_and_fresh_report_text() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -1928,8 +1966,9 @@ async fn the_history_cap_keeps_pending_reports_and_fresh_report_text(pool: PgPoo
 
 /// Потерянный ответ Gotify не повод слать пуш «отчёт готов» второй раз: неоднозначная
 /// доставка не повторяется, как и у пуша о сбое расписания.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_lost_gotify_response_does_not_resend_the_report_push(pool: PgPool) {
+#[tokio::test]
+async fn a_lost_gotify_response_does_not_resend_the_report_push() {
+    let pool = canterlot_hub::testkit::db().await;
     use std::sync::atomic::Ordering;
     crate::auth_pushes::enable(&pool).await;
     let f = Fixture::new(pool.clone()).await;
@@ -1987,19 +2026,22 @@ async fn assert_not_published(outcome: Option<&str>, pool: PgPool) {
 
 /// Codex прерывает ход, OpenCode роняет его: `run_finished` приходит без принудительного
 /// закрытия, а блок с текстом уже `final`. Отчётом он быть не должен.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_interrupted_finish_never_publishes_the_earlier_text(pool: PgPool) {
+#[tokio::test]
+async fn an_interrupted_finish_never_publishes_the_earlier_text() {
+    let pool = canterlot_hub::testkit::db().await;
     assert_not_published(Some("interrupted"), pool).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_failed_finish_never_publishes_the_earlier_text(pool: PgPool) {
+#[tokio::test]
+async fn a_failed_finish_never_publishes_the_earlier_text() {
+    let pool = canterlot_hub::testkit::db().await;
     assert_not_published(Some("failed"), pool).await;
 }
 
 /// Старый воркер исхода не присылает: успех не доказан, отчёт не публикуется.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_finish_without_a_recorded_outcome_never_publishes(pool: PgPool) {
+#[tokio::test]
+async fn a_finish_without_a_recorded_outcome_never_publishes() {
+    let pool = canterlot_hub::testkit::db().await;
     assert_not_published(None, pool).await;
 }
 
@@ -2044,8 +2086,9 @@ async fn retarget_to_live_session(f: &Fixture, schedule: Uuid, conversation: Uui
 
 /// Принятый повтор после правки расписания отвечает тем же ответом: повтор по ключу ищется
 /// раньше проверки цели.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_accepted_retry_replays_after_a_later_edit_of_the_schedule(pool: PgPool) {
+#[tokio::test]
+async fn an_accepted_retry_replays_after_a_later_edit_of_the_schedule() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -2061,8 +2104,9 @@ async fn an_accepted_retry_replays_after_a_later_edit_of_the_schedule(pool: PgPo
 
 /// Разговор карточки входит в личность запроса: тот же ключ с другим разговором не получает
 /// чужой ответ.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_retry_conversation_is_part_of_the_idempotency_identity(pool: PgPool) {
+#[tokio::test]
+async fn the_retry_conversation_is_part_of_the_idempotency_identity() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -2076,10 +2120,9 @@ async fn the_retry_conversation_is_part_of_the_idempotency_identity(pool: PgPool
 /// Правка расписания между заявкой повтора и приёмкой: заявка записала версию, которую
 /// проверила, поэтому приёмка по новой версии не проходит и промпт отчёта в живую сессию не
 /// уходит.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_edit_between_the_retry_reservation_and_admission_never_reaches_the_live_session(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn an_edit_between_the_retry_reservation_and_admission_never_reaches_the_live_session() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::admission::{Reservation, reserve_manual_for};
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
@@ -2140,8 +2183,9 @@ async fn wait_for_advisory_waiter(pool: &PgPool) -> bool {
 
 /// Приёмка берёт строку расписания, затем замок владельца. Удаление расписания идёт тем же
 /// порядком: обратный порядок давал взаимную блокировку при удалении во время срабатывания.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn deleting_a_schedule_takes_the_schedule_row_before_the_owner_lock(pool: PgPool) {
+#[tokio::test]
+async fn deleting_a_schedule_takes_the_schedule_row_before_the_owner_lock() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let schedule = make_schedule_without_session(&f, "Стендап").await;
     let mut holder = canterlot_hub::db::begin(&pool).await.unwrap();
@@ -2191,8 +2235,9 @@ async fn deleting_a_schedule_takes_the_schedule_row_before_the_owner_lock(pool: 
 
 /// Очередь копии берётся раньше строки разговора, как в удалении и в `release_waiting`:
 /// обратный порядок замыкал уборку на отпускание ввода при простое родителя.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cleanup_takes_the_copy_queue_before_the_copy_row(pool: PgPool) {
+#[tokio::test]
+async fn cleanup_takes_the_copy_queue_before_the_copy_row() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let schedule = make_schedule_without_session(&f, "Стендап").await;
     let (_card, copy) = stray_copy(&f, schedule, None).await;
@@ -2238,8 +2283,9 @@ async fn cleanup_takes_the_copy_queue_before_the_copy_row(pool: PgPool) {
 
 /// Сбой уборки одного осиротевшего бокового чата не роняет `side::sweep`, поэтому тик доходит
 /// до отчётов и остальных копий.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_failing_orphan_side_chat_does_not_stop_the_tick(pool: PgPool) {
+#[tokio::test]
+async fn a_failing_orphan_side_chat_does_not_stop_the_tick() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let schedule = make_schedule_without_session(&f, "Стендап").await;
     let (good_card, _good) = stray_copy(&f, schedule, None).await;
@@ -2321,8 +2367,9 @@ async fn marker_probing_gotify(
 
 /// Хаб погиб после того, как Gotify принял пуш, но до записи итога: перезапуск не шлёт его
 /// второй раз. Попытка отмечается в строке до запроса, а брошенная отметка снимает строку.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_report_push_stranded_mid_send_is_not_resent_after_a_restart(pool: PgPool) {
+#[tokio::test]
+async fn a_report_push_stranded_mid_send_is_not_resent_after_a_restart() {
+    let pool = canterlot_hub::testkit::db().await;
     use std::sync::atomic::Ordering;
     crate::auth_pushes::enable(&pool).await;
     let f = Fixture::new(pool.clone()).await;
@@ -2358,8 +2405,9 @@ async fn a_report_push_stranded_mid_send_is_not_resent_after_a_restart(pool: PgP
 
 /// Строка с отметкой отправки, которой нет и трёх минут, ни при каком перезапуске не уходит
 /// в POST повторно: первая попытка могла дойти, а пауза повтора (60 с) короче грейса.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_fresh_sending_marker_keeps_the_push_out_of_the_send_path(pool: PgPool) {
+#[tokio::test]
+async fn a_fresh_sending_marker_keeps_the_push_out_of_the_send_path() {
+    let pool = canterlot_hub::testkit::db().await;
     use std::sync::atomic::Ordering;
     crate::auth_pushes::enable(&pool).await;
     let f = Fixture::new(pool.clone()).await;
@@ -2393,8 +2441,9 @@ async fn a_fresh_sending_marker_keeps_the_push_out_of_the_send_path(pool: PgPool
 /// Codex может принять продолжение под тем же идентификатором команды: после конца отчётного
 /// хода оно дописывает свой текст. Отчёт берётся из блоков самого хода, а не «последнего
 /// текста после ввода».
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_continuation_after_the_completed_turn_does_not_replace_the_report(pool: PgPool) {
+#[tokio::test]
+async fn a_continuation_after_the_completed_turn_does_not_replace_the_report() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -2433,8 +2482,9 @@ async fn expire_key_records(pool: &PgPool, key: &str) {
 /// Запись общего ключа ушла по сроку, а строка запуска осталась: тот же повтор карточки
 /// получает её обратно даже после правки расписания, а запрос без разговора карточки под тем
 /// же ключом — конфликт.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_retained_run_replay_keeps_the_report_conversation_in_its_identity(pool: PgPool) {
+#[tokio::test]
+async fn the_retained_run_replay_keeps_the_report_conversation_in_its_identity() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = session(&f);
     with_native(&f).await;
@@ -2466,8 +2516,9 @@ async fn the_retained_run_replay_keeps_the_report_conversation_in_its_identity(p
 
 /// Старый воркер (v1.40.1) объявляет `side_chat_v1`, но не присылает исход хода: отчёт он
 /// выполнил бы, а собрать его хаб не смог бы. Рутину ему не отдают.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_worker_without_run_outcome_never_gets_a_report(pool: PgPool) {
+#[tokio::test]
+async fn a_worker_without_run_outcome_never_gets_a_report() {
+    let pool = canterlot_hub::testkit::db().await;
     const OLD: [&str; 5] = [
         "pilot_v1",
         "instructions_v1",
@@ -2521,8 +2572,9 @@ async fn open_journal_of(f: &Fixture, copy: Uuid) -> Uuid {
 
 /// Исполнение уже `stopped`, а `JournalClosed` ещё не пришёл: жёсткое удаление копии ждёт
 /// следующего тика, а не встаёт на курсор, который держит приём хвоста.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cleanup_waits_for_the_journal_of_a_stopped_copy_to_close(pool: PgPool) {
+#[tokio::test]
+async fn cleanup_waits_for_the_journal_of_a_stopped_copy_to_close() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let schedule = make_schedule_without_session(&f, "Стендап").await;
     let (card, copy) = stray_copy(&f, schedule, Some("stopped")).await;
@@ -2548,8 +2600,9 @@ async fn cleanup_waits_for_the_journal_of_a_stopped_copy_to_close(pool: PgPool) 
 
 /// Приём берёт курсор журнала раньше очереди; уборка идёт тем же порядком, иначе приём хвоста
 /// и жёсткое удаление замыкались друг на друге.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cleanup_takes_the_journal_cursor_before_the_copy_queue(pool: PgPool) {
+#[tokio::test]
+async fn cleanup_takes_the_journal_cursor_before_the_copy_queue() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let schedule = make_schedule_without_session(&f, "Стендап").await;
     let (_card, copy) = stray_copy(&f, schedule, Some("stopped")).await;

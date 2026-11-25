@@ -7,12 +7,12 @@ use canterlot_hub::{
     testkit::{self, TestClient},
 };
 use serde_json::json;
-use sqlx::PgPool;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn presence_requires_a_session_and_records_visibility(pool: PgPool) {
+#[tokio::test]
+async fn presence_requires_a_session_and_records_visibility() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;

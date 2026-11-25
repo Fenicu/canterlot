@@ -4,7 +4,6 @@ use canterlot_hub::events::{
     NewEvent, ReadAfter, Scope, StoredEvent, append, boundary, purge_before, read_after,
 };
 use serde_json::json;
-use sqlx::PgPool;
 use tokio::{sync::Barrier, task::JoinSet, time::timeout};
 use uuid::Uuid;
 
@@ -34,8 +33,9 @@ fn sequences(result: ReadAfter) -> Vec<i64> {
     events(result).iter().map(|event| event.scope_seq).collect()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn seq_is_contiguous_per_scope(pool: PgPool) -> Result<(), sqlx::Error> {
+#[tokio::test]
+async fn seq_is_contiguous_per_scope() -> Result<(), sqlx::Error> {
+    let pool = canterlot_hub::testkit::db().await;
     let owner_id = Uuid::now_v7();
     let conversation_id = Uuid::now_v7();
     let execution_id = Uuid::now_v7();
@@ -117,8 +117,9 @@ async fn seq_is_contiguous_per_scope(pool: PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn rolled_back_append_leaves_no_gap(pool: PgPool) -> Result<(), sqlx::Error> {
+#[tokio::test]
+async fn rolled_back_append_leaves_no_gap() -> Result<(), sqlx::Error> {
+    let pool = canterlot_hub::testkit::db().await;
     let id = Uuid::now_v7();
     let scope = Scope::Conversation { id };
     let mut tx = pool.begin().await?;
@@ -157,8 +158,9 @@ async fn rolled_back_append_leaves_no_gap(pool: PgPool) -> Result<(), sqlx::Erro
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn snapshot_boundary_has_no_lost_event(pool: PgPool) -> Result<(), sqlx::Error> {
+#[tokio::test]
+async fn snapshot_boundary_has_no_lost_event() -> Result<(), sqlx::Error> {
+    let pool = canterlot_hub::testkit::db().await;
     timeout(Duration::from_secs(30), async {
         let id = Uuid::now_v7();
         let scope = Scope::Conversation { id };
@@ -238,8 +240,9 @@ async fn snapshot_boundary_has_no_lost_event(pool: PgPool) -> Result<(), sqlx::E
     .expect("concurrent event test timed out")
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stale_cursor_requires_resync(pool: PgPool) -> Result<(), sqlx::Error> {
+#[tokio::test]
+async fn stale_cursor_requires_resync() -> Result<(), sqlx::Error> {
+    let pool = canterlot_hub::testkit::db().await;
     let id = Uuid::now_v7();
     let scope = Scope::Conversation { id };
     let other_id = Uuid::now_v7();
@@ -289,8 +292,9 @@ async fn stale_cursor_requires_resync(pool: PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn read_after_rejects_invalid_arguments(pool: PgPool) -> Result<(), sqlx::Error> {
+#[tokio::test]
+async fn read_after_rejects_invalid_arguments() -> Result<(), sqlx::Error> {
+    let pool = canterlot_hub::testkit::db().await;
     let scope = Scope::Conversation { id: Uuid::now_v7() };
     for (after_seq, limit) in [(-1, 100), (0, 0), (0, -1)] {
         assert!(matches!(

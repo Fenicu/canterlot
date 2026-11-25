@@ -132,8 +132,9 @@ fn validator() -> jsonschema::Validator {
     jsonschema::validator_for(&schema).unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn poller_stores_the_level_and_announces_only_changes(pool: PgPool) {
+#[tokio::test]
+async fn poller_stores_the_level_and_announces_only_changes() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let fake = Fake::default();
     fake.set(Some(CLAUDE));
@@ -236,8 +237,9 @@ async fn poller_stores_the_level_and_announces_only_changes(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_page_never_read_stays_unknown_without_an_event(pool: PgPool) {
+#[tokio::test]
+async fn a_page_never_read_stays_unknown_without_an_event() {
+    let pool = canterlot_hub::testkit::db().await;
     testkit::seed(&pool).await;
     let fake = Fake::default();
     let url = serve(fake.clone()).await;
@@ -263,8 +265,9 @@ async fn a_page_never_read_stays_unknown_without_an_event(pool: PgPool) {
     assert!(changes(&pool).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn status_survives_a_restart_and_reaches_the_limits_api(pool: PgPool) {
+#[tokio::test]
+async fn status_survives_a_restart_and_reaches_the_limits_api() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     testkit::offer_provider(&f.pool, f.seed.machine_id, "codex").await;
     let now = Utc::now();
@@ -350,8 +353,9 @@ fn context(pool: &PgPool) -> ToolContext {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn canterlot_limits_names_an_outage_and_stays_quiet_when_ok(pool: PgPool) {
+#[tokio::test]
+async fn canterlot_limits_names_an_outage_and_stays_quiet_when_ok() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "claude").await;
     let now = Utc::now();
@@ -401,8 +405,9 @@ async fn canterlot_limits_names_an_outage_and_stays_quiet_when_ok(pool: PgPool) 
     assert_eq!(answer["providers"][0]["status"]["level"], "ok");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn disabled_polling_clears_a_stored_outage_for_every_reader(pool: PgPool) {
+#[tokio::test]
+async fn disabled_polling_clears_a_stored_outage_for_every_reader() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "claude").await;
     let now = Utc::now();

@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use canterlot_hub::{attachments::gc, testkit};
 use chrono::Utc;
-use sqlx::PgPool;
 use uuid::Uuid;
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn draft_held_attachments_do_not_starve_the_gc(pool: PgPool) {
+#[tokio::test]
+async fn draft_held_attachments_do_not_starve_the_gc() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     for n in 0..100i64 {
         let conversation = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;

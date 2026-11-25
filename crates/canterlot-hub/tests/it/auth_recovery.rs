@@ -23,8 +23,9 @@ async fn redeem(hub: &AuthHub, ip: &str, token: &str) -> canterlot_hub::testkit:
         .await
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_recovery_token_is_single_use_expires_and_is_replaced(pool: PgPool) {
+#[tokio::test]
+async fn auth_recovery_token_is_single_use_expires_and_is_replaced() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let (other, _) = hub
         .session(canterlot_hub::owner_auth::Method::Password, None)
@@ -72,8 +73,9 @@ async fn auth_recovery_token_is_single_use_expires_and_is_replaced(pool: PgPool)
     assert_eq!(redeem(&hub, "203.0.113.101", &token).await.status, 401);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_recovery_guessing_is_limited_per_bucket(pool: PgPool) {
+#[tokio::test]
+async fn auth_recovery_guessing_is_limited_per_bucket() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     for n in 0..5 {
         let guess = format!("{:0>43}", n);
@@ -150,8 +152,9 @@ impl Cli {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_recovery_cli_prints_a_working_link_and_manages_sessions(pool: PgPool) {
+#[tokio::test]
+async fn auth_recovery_cli_prints_a_working_link_and_manages_sessions() {
+    let pool = canterlot_hub::testkit::db().await;
     let cli = Cli::new(&pool, None).await;
     let (ok, out, err) = cli.run(&["recovery-link", "--minutes", "5"], None);
     assert!(ok, "{err}");
@@ -230,8 +233,9 @@ async fn auth_recovery_cli_prints_a_working_link_and_manages_sessions(pool: PgPo
     assert_eq!(out, "password_set revoked=0\n");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_recovery_cli_push_sends_only_to_gotify(pool: PgPool) {
+#[tokio::test]
+async fn auth_recovery_cli_push_sends_only_to_gotify() {
+    let pool = canterlot_hub::testkit::db().await;
     let (seen, url) = fake_gotify().await;
     let cli = Cli::new(&pool, Some(&url)).await;
     let (ok, out, err) = tokio::task::spawn_blocking(move || {

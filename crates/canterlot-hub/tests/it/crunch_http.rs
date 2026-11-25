@@ -14,7 +14,6 @@ use canterlot_hub::{
 use canterlot_proto::worker::v1::{LimitReached, LimitWindow};
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use serde_json::Value;
-use sqlx::PgPool;
 use std::time::Duration;
 use support::Fixture;
 use uuid::Uuid;
@@ -73,8 +72,9 @@ async fn live(f: &Fixture, id: Uuid) -> Uuid {
     execution
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spend_reserve_endpoint_is_idempotent_and_owner_scoped(pool: PgPool) {
+#[tokio::test]
+async fn spend_reserve_endpoint_is_idempotent_and_owner_scoped() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let other = testkit::seed_conversation(&pool, f.seed.owner_id, f.seed.machine_id).await;
     let now = start();
@@ -170,8 +170,9 @@ async fn spend_reserve_endpoint_is_idempotent_and_owner_scoped(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_endpoint_exposes_reserve_state_and_holds(pool: PgPool) {
+#[tokio::test]
+async fn limits_endpoint_exposes_reserve_state_and_holds() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let id = f.seed.conversation_id;
     sqlx::query("update conversations set crunch_enabled=true where id=$1")

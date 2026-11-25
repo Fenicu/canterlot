@@ -49,8 +49,9 @@ fn priced(model: &str, input: u64, cost: Option<u64>) -> ModelUsage {
 }
 
 // Цену хода называет CLI, иначе её берёт таблица хаба, иначе она неизвестна, а не ноль.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_finish_stores_cost_with_its_source(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn run_finish_stores_cost_with_its_source() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -82,8 +83,9 @@ async fn run_finish_stores_cost_with_its_source(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn adopted_run_adds_cost_and_unknown_stays_unknown(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn adopted_run_adds_cost_and_unknown_stays_unknown() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -129,8 +131,9 @@ async fn adopted_run_adds_cost_and_unknown_stays_unknown(pool: PgPool) -> TestRe
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unpriced_adopted_segment_keeps_the_known_cost_as_incomplete(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn unpriced_adopted_segment_keeps_the_known_cost_as_incomplete() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -162,8 +165,9 @@ async fn unpriced_adopted_segment_keeps_the_known_cost_as_incomplete(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn partial_cli_cost_is_stored_as_known_and_incomplete(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn partial_cli_cost_is_stored_as_known_and_incomplete() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -197,8 +201,9 @@ async fn partial_cli_cost_is_stored_as_known_and_incomplete(pool: PgPool) -> Tes
 
 // Запуск без ввода приписан законченной команде: его расход и контекст добавляются к ней,
 // а обычный повтор конца хода ничего не меняет.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn adopted_run_adds_its_usage_to_the_finished_command(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn adopted_run_adds_its_usage_to_the_finished_command() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -236,8 +241,9 @@ async fn adopted_run_adds_its_usage_to_the_finished_command(pool: PgPool) -> Tes
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn review_fix_agent_metadata_is_truncated_at_char_boundaries(pool: PgPool) {
+#[tokio::test]
+async fn review_fix_agent_metadata_is_truncated_at_char_boundaries() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let text = "я🦄".repeat(1024);
     let expected = |limit: usize| format!("{}…", text.chars().take(limit - 1).collect::<String>());
@@ -341,8 +347,9 @@ async fn review_fix_agent_metadata_is_truncated_at_char_boundaries(pool: PgPool)
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn block_started_stores_agent_model_tool_and_summary(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn block_started_stores_agent_model_tool_and_summary() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let id = Uuid::now_v7();
     r.send(vec![started(id, "tool_call")]).await;
@@ -362,8 +369,9 @@ async fn block_started_stores_agent_model_tool_and_summary(pool: PgPool) -> Test
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn subagent_blocks_reference_parent_and_agent(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn subagent_blocks_reference_parent_and_agent() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let parent = Uuid::now_v7();
     let child = Uuid::now_v7();
@@ -381,8 +389,9 @@ async fn subagent_blocks_reference_parent_and_agent(pool: PgPool) -> TestResult 
     assert_eq!(row, (parent, "Explore".into()));
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn created_seq_matches_the_creation_event_for_blocks_and_inputs(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn created_seq_matches_the_creation_event_for_blocks_and_inputs() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let input = r.input(&pool).await;
     r.send(vec![started(Uuid::now_v7(), "text")]).await;
@@ -391,10 +400,9 @@ async fn created_seq_matches_the_creation_event_for_blocks_and_inputs(pool: PgPo
     assert!(ok);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn feed_seq_is_set_once_by_the_event_that_moves_the_input_into_the_feed(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn feed_seq_is_set_once_by_the_event_that_moves_the_input_into_the_feed() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let before: Option<i64> = sqlx::query_scalar("select feed_seq from inputs where id=$1")
@@ -510,10 +518,9 @@ async fn migration_0008_backfills_created_seq_from_events_or_creation_order(
     assert_eq!(inputs, vec![(-1, -1), (8, 9)]);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn block_created_at_and_tool_timestamps_come_from_event_commit_times(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn block_created_at_and_tool_timestamps_come_from_event_commit_times() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let id = Uuid::now_v7();
     r.send(vec![
@@ -531,8 +538,9 @@ async fn block_created_at_and_tool_timestamps_come_from_event_commit_times(
     assert!(ok);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn tool_output_line_count_is_maintained_on_append_and_final(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn tool_output_line_count_is_maintained_on_append_and_final() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let id = Uuid::now_v7();
     r.send(vec![
@@ -565,8 +573,9 @@ async fn tool_output_line_count_is_maintained_on_append_and_final(pool: PgPool) 
     assert_eq!(lines, 3);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn phase_detail_is_stored_with_tool_name(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn phase_detail_is_stored_with_tool_name() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     r.send(vec![Body::PhaseChanged(PhaseChanged {
         execution_id: r.execution.execution_id.to_string(),
@@ -586,8 +595,9 @@ async fn phase_detail_is_stored_with_tool_name(pool: PgPool) -> TestResult {
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_is_created_on_accept_and_finished_with_usage_per_model(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn run_is_created_on_accept_and_finished_with_usage_per_model() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -654,8 +664,9 @@ async fn stored_end(pool: &PgPool, end: i32) -> Option<String> {
 }
 
 /// Граница текстов хода: последняя последовательность блоков на момент `run_finished`.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_finish_remembers_the_last_block_seq_of_its_turn(pool: PgPool) {
+#[tokio::test]
+async fn run_finish_remembers_the_last_block_seq_of_its_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -686,22 +697,26 @@ async fn run_finish_remembers_the_last_block_seq_of_its_turn(pool: PgPool) {
     assert_eq!(seq, Some(77));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_end_failed_is_stored_as_failed(pool: PgPool) {
+#[tokio::test]
+async fn run_end_failed_is_stored_as_failed() {
+    let pool = canterlot_hub::testkit::db().await;
     assert_eq!(stored_end(&pool, 2).await.as_deref(), Some("failed"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_end_interrupted_is_stored_as_interrupted(pool: PgPool) {
+#[tokio::test]
+async fn run_end_interrupted_is_stored_as_interrupted() {
+    let pool = canterlot_hub::testkit::db().await;
     assert_eq!(stored_end(&pool, 3).await.as_deref(), Some("interrupted"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_end_from_an_old_worker_is_stored_as_unknown(pool: PgPool) {
+#[tokio::test]
+async fn run_end_from_an_old_worker_is_stored_as_unknown() {
+    let pool = canterlot_hub::testkit::db().await;
     assert_eq!(stored_end(&pool, 0).await, None);
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn replayed_run_finished_does_not_duplicate_usage(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn replayed_run_finished_does_not_duplicate_usage() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -743,8 +758,9 @@ async fn stored_run(pool: &PgPool, r: &Run, ms: i64, duration: u64, late: bool) 
     tx.commit().await?;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_attribution_marks_overlapping_runs_of_one_provider(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn run_attribution_marks_overlapping_runs_of_one_provider() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let a = Run::new(&pool).await;
     let b = Run::new(&pool).await;
     let c = Run::new(&pool).await;
@@ -774,8 +790,9 @@ async fn run_attribution_marks_overlapping_runs_of_one_provider(pool: PgPool) ->
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn late_ingested_run_is_not_exact_and_excluded_from_the_estimate(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn late_ingested_run_is_not_exact_and_excluded_from_the_estimate() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let r = Run::new(&pool).await;
     stored_run(&pool, &r, Utc::now().timestamp_millis(), 1000, true).await?;
     sqlx::query("update runs set weekly_before_permille=900,weekly_after_permille=950")
@@ -798,8 +815,9 @@ async fn late_ingested_run_is_not_exact_and_excluded_from_the_estimate(pool: PgP
     assert_eq!(rows[0].overlapped_runs, 1);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn context_exhausted_outcome_is_a_legal_failed_transition(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn context_exhausted_outcome_is_a_legal_failed_transition() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     r.send(vec![Body::PhaseChanged(PhaseChanged {
         execution_id: r.execution.execution_id.to_string(),
@@ -831,8 +849,9 @@ async fn context_exhausted_outcome_is_a_legal_failed_transition(pool: PgPool) ->
     assert_eq!(row, ("context_exhausted".into(), None, None));
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn last_event_at_is_touched_once_per_batch(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn last_event_at_is_touched_once_per_batch() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     sqlx::raw_sql("create table touches(n integer); create function touch_count() returns trigger language plpgsql as $$ begin if new.last_event_at is distinct from old.last_event_at then insert into touches values(1); end if; return new; end $$; create trigger touch_count before update on executions for each row execute function touch_count();").execute(&pool).await?;
     let mut r = Run::new(&pool).await;
     r.send(vec![
@@ -877,10 +896,9 @@ async fn record(pool: &PgPool, s: &testkit::Seed, o: &Observation) -> limits::Re
     tx.commit().await.unwrap();
     r
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limit_observed_updates_provider_state_and_emits_limits_changed_once(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn limit_observed_updates_provider_state_and_emits_limits_changed_once() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let at = Utc::now();
@@ -905,8 +923,9 @@ async fn limit_observed_updates_provider_state_and_emits_limits_changed_once(
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn estimated_confidence_reaches_current_state_and_event(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn estimated_confidence_reaches_current_state_and_event() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let at = Utc::now();
@@ -940,8 +959,9 @@ async fn estimated_confidence_reaches_current_state_and_event(pool: PgPool) -> T
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn replayed_stale_observation_never_lowers_the_stored_reading(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn replayed_stale_observation_never_lowers_the_stored_reading() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let at = Utc::now();
@@ -977,10 +997,9 @@ async fn replayed_stale_observation_never_lowers_the_stored_reading(pool: PgPool
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn observation_time_is_machine_time_converted_with_the_session_offset(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn observation_time_is_machine_time_converted_with_the_session_offset() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     for skew in [-600000, 600000] {
         let s = wire_seed(&pool).await;
@@ -1034,8 +1053,9 @@ async fn observation_time_is_machine_time_converted_with_the_session_offset(
     hub.join.await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_changed_of_a_batch_is_appended_once_at_the_end(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn limits_changed_of_a_batch_is_appended_once_at_the_end() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     testkit::offer_provider(&pool, r.seed.machine_id, "claude").await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
@@ -1086,8 +1106,9 @@ async fn limits_changed_of_a_batch_is_appended_once_at_the_end(pool: PgPool) -> 
     hub.join.await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn snapshots_are_deduplicated_unless_older_than_min_interval(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn snapshots_are_deduplicated_unless_older_than_min_interval() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     // Отсчёт в прошлом: будущие отметки хаб прижимает к now.
     let at = Utc::now() - Duration::seconds(601);
@@ -1108,8 +1129,9 @@ async fn snapshots_are_deduplicated_unless_older_than_min_interval(pool: PgPool)
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_report_from_poll_is_stored_with_poll_source(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn limits_report_from_poll_is_stored_with_poll_source() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     let s = wire_seed(&pool).await;
     let c = connect(
@@ -1136,10 +1158,10 @@ async fn limits_report_from_poll_is_stored_with_poll_source(pool: PgPool) -> Tes
     hub.join.await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limit_reached_without_crunch_pauses_the_queue_with_provider_window_and_reset(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn limit_reached_without_crunch_pauses_the_queue_with_provider_window_and_reset() -> TestResult
+{
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let reset = Utc::now().timestamp_millis() + 100000;
     let fact = Body::LimitReached(LimitReached {
@@ -1172,8 +1194,9 @@ async fn limit_reached_without_crunch_pauses_the_queue_with_provider_window_and_
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limit_records_on_a_cj_are_invalid(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn limit_records_on_a_cj_are_invalid() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let r = Run::new(&pool).await;
     for body in [
         Body::LimitObserved(observation(960, Utc::now().timestamp_millis())),
@@ -1205,10 +1228,9 @@ async fn limit_records_on_a_cj_are_invalid(pool: PgPool) -> TestResult {
     }
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limit_records_of_another_machine_never_touch_foreign_conversations(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn limit_records_of_another_machine_never_touch_foreign_conversations() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut a = Run::new(&pool).await;
     let b = Run::new(&pool).await;
     let batch = a.batch(vec![Body::LimitReached(LimitReached {
@@ -1238,10 +1260,10 @@ async fn limit_records_of_another_machine_never_touch_foreign_conversations(
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn usage_by_day_groups_by_session_and_model_and_excludes_overlap_from_the_estimate(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn usage_by_day_groups_by_session_and_model_and_excludes_overlap_from_the_estimate()
+-> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let a = Run::new(&pool).await;
     let ms = DateTime::parse_from_rfc3339("2026-10-26T22:30:00Z")?.timestamp_millis();
     stored_run(&pool, &a, ms, 1000, false).await?;
@@ -1332,8 +1354,9 @@ async fn usage_by_day_groups_by_session_and_model_and_excludes_overlap_from_the_
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn series_are_ordered_and_bounded_for_both_windows(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn series_are_ordered_and_bounded_for_both_windows() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
     for window in [Window::Weekly, Window::FiveHour] {
@@ -1355,8 +1378,9 @@ async fn series_are_ordered_and_bounded_for_both_windows(pool: PgPool) -> TestRe
     }
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn usage_rows_carry_the_agent_of_the_model_usage(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn usage_rows_carry_the_agent_of_the_model_usage() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let r = Run::new(&pool).await;
     stored_run(&pool, &r, Utc::now().timestamp_millis(), 1000, false).await?;
     let rows = limits::usage_by_day(
@@ -1372,8 +1396,9 @@ async fn usage_rows_carry_the_agent_of_the_model_usage(pool: PgPool) -> TestResu
     assert_eq!(rows[0].input_tokens, 10);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_snapshot_reaches_pilot_sessions_of_that_provider(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn limits_snapshot_reaches_pilot_sessions_of_that_provider() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     let a = wire_seed(&pool).await;
     let b = wire_seed(&pool).await;
@@ -1414,8 +1439,9 @@ async fn limits_snapshot_reaches_pilot_sessions_of_that_provider(pool: PgPool) -
     hub.join.await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_snapshot_is_sent_on_session_start(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn limits_snapshot_is_sent_on_session_start() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = wire_seed(&pool).await;
     record(&pool, &s, &obs(&s, 960, Utc::now())).await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
@@ -1436,10 +1462,10 @@ async fn limits_snapshot_is_sent_on_session_start(pool: PgPool) -> TestResult {
     hub.join.await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_limits_report_without_labels_from_a_machine_with_another_account_is_dropped(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_limits_report_without_labels_from_a_machine_with_another_account_is_dropped()
+-> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = wire_seed(&pool).await;
     // Машина объявила для провайдера другую учётную запись: старый воркер на ней
     // присылает показания без метки, и чьи они, хаб не знает.
@@ -1493,10 +1519,10 @@ async fn a_limits_report_without_labels_from_a_machine_with_another_account_is_d
     hub.join.await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reported_absence_of_the_five_hour_window_reaches_the_state_and_the_worker_snapshot(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn reported_absence_of_the_five_hour_window_reaches_the_state_and_the_worker_snapshot()
+-> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = wire_seed(&pool).await;
     let earlier = Utc::now() - Duration::minutes(30);
     record(&pool, &s, &obs(&s, 530, earlier)).await;
@@ -1545,10 +1571,10 @@ async fn reported_absence_of_the_five_hour_window_reaches_the_state_and_the_work
     hub.join.await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn start_execution_carries_pilot_v1_only_when_the_sending_session_negotiated_it(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn start_execution_carries_pilot_v1_only_when_the_sending_session_negotiated_it() -> TestResult
+{
+    let pool = canterlot_hub::testkit::db().await;
     let s = wire_seed(&pool).await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     // Снимок «Как у владельца»: проверяется только pilot_v1, instructions_v1 не нужен.
@@ -1583,8 +1609,9 @@ async fn start_execution_carries_pilot_v1_only_when_the_sending_session_negotiat
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn concurrent_runs_keep_overlap_and_do_not_deadlock(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn concurrent_runs_keep_overlap_and_do_not_deadlock() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut a = Run::new(&pool).await;
     let mut b = Run::new(&pool).await;
     let ia = a.input(&pool).await;
@@ -1619,8 +1646,9 @@ async fn concurrent_runs_keep_overlap_and_do_not_deadlock(pool: PgPool) -> TestR
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unmapped_clock_keeps_history_without_changing_current_limits(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn unmapped_clock_keeps_history_without_changing_current_limits() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     r.send(vec![Body::LimitObserved(observation(
         960,
@@ -1687,10 +1715,9 @@ async fn overlapped(pool: &PgPool, i: &SubmittedInput) -> bool {
         .await
         .unwrap()
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_late_finish_clears_the_overlap_of_runs_that_do_not_intersect(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_late_finish_clears_the_overlap_of_runs_that_do_not_intersect() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let a = Run::new(&pool).await;
     let b = Run::new(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -1703,8 +1730,9 @@ async fn a_late_finish_clears_the_overlap_of_runs_that_do_not_intersect(
     assert!(!overlapped(&pool, &ib).await);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_run_started_inside_a_finished_one_flags_both(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_run_started_inside_a_finished_one_flags_both() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let a = Run::new(&pool).await;
     let b = Run::new(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -1716,8 +1744,9 @@ async fn a_run_started_inside_a_finished_one_flags_both(pool: PgPool) -> TestRes
     assert!(overlapped(&pool, &ib).await);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn runs_of_unrelated_intervals_are_left_untouched(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn runs_of_unrelated_intervals_are_left_untouched() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let a = Run::new(&pool).await;
     let b = Run::new(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -1731,10 +1760,9 @@ async fn runs_of_unrelated_intervals_are_left_untouched(pool: PgPool) -> TestRes
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_finished_without_a_stored_accept_still_records_usage_as_inexact(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn run_finished_without_a_stored_accept_still_records_usage_as_inexact() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -1749,8 +1777,9 @@ async fn run_finished_without_a_stored_accept_still_records_usage_as_inexact(
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unknown_machine_time_of_an_accept_uses_the_ingest_time(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn unknown_machine_time_of_an_accept_uses_the_ingest_time() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     r.send(vec![accepted(i.command_id, 0)]).await;
@@ -1761,8 +1790,9 @@ async fn unknown_machine_time_of_an_accept_uses_the_ingest_time(pool: PgPool) ->
     assert_eq!(row, (true, true));
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn usage_counts_the_weekly_delta_of_a_run_once_across_its_models(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn usage_counts_the_weekly_delta_of_a_run_once_across_its_models() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let r = Run::new(&pool).await;
     stored_run(&pool, &r, Utc::now().timestamp_millis(), 1000, false).await?;
     sqlx::query("update runs set weekly_before_permille=900,weekly_after_permille=905")
@@ -1789,8 +1819,9 @@ async fn usage_counts_the_weekly_delta_of_a_run_once_across_its_models(pool: PgP
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_negative_weekly_delta_after_a_window_reset_is_not_summed(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_negative_weekly_delta_after_a_window_reset_is_not_summed() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let r = Run::new(&pool).await;
     stored_run(&pool, &r, Utc::now().timestamp_millis(), 1000, false).await?;
     sqlx::query("update runs set weekly_before_permille=950,weekly_after_permille=20")
@@ -1808,10 +1839,9 @@ async fn a_negative_weekly_delta_after_a_window_reset_is_not_summed(pool: PgPool
     assert_eq!(rows[0].weekly_delta_permille, 0);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_equal_newer_reading_refreshes_the_time_without_limits_changed(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn an_equal_newer_reading_refreshes_the_time_without_limits_changed() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let at = DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap();
@@ -1836,8 +1866,9 @@ async fn an_equal_newer_reading_refreshes_the_time_without_limits_changed(
     assert!(moved.provider_changed);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_equal_reading_after_a_pause_still_emits_limits_changed(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn an_equal_reading_after_a_pause_still_emits_limits_changed() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     // Второе показание позже первого на окно переотправки, но не в будущем:
@@ -1859,8 +1890,9 @@ async fn an_equal_reading_after_a_pause_still_emits_limits_changed(pool: PgPool)
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_limit_hit_again_after_the_pause_was_cleared_pauses_again(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_limit_hit_again_after_the_pause_was_cleared_pauses_again() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let hit = |reset: i64| {
         Body::LimitReached(LimitReached {
@@ -1892,8 +1924,9 @@ async fn a_limit_hit_again_after_the_pause_was_cleared_pauses_again(pool: PgPool
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_unknown_provider_is_invalid_and_leaves_no_provider_row(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn an_unknown_provider_is_invalid_and_leaves_no_provider_row() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let mut o = observation(960, Utc::now().timestamp_millis());
     o.provider = "bogus".into();
@@ -1918,8 +1951,9 @@ async fn an_unknown_provider_is_invalid_and_leaves_no_provider_row(pool: PgPool)
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_incomplete_block_gets_its_finish_time(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn an_incomplete_block_gets_its_finish_time() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let id = Uuid::now_v7();
     r.send(vec![
@@ -1935,8 +1969,9 @@ async fn an_incomplete_block_gets_its_finish_time(pool: PgPool) -> TestResult {
     assert!(ok);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn absent_tool_name_and_summary_are_null_in_storage_and_events(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn absent_tool_name_and_summary_are_null_in_storage_and_events() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let id = Uuid::now_v7();
     r.send(vec![
@@ -1974,8 +2009,9 @@ async fn absent_tool_name_and_summary_are_null_in_storage_and_events(pool: PgPoo
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn zero_machine_time_has_no_hub_time(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn zero_machine_time_has_no_hub_time() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     let s = wire_seed(&pool).await;
     let _c = connect(&hub, &s, Uuid::now_v7(), true, 5000).await;
@@ -2017,8 +2053,9 @@ async fn working(pool: &PgPool, i: &SubmittedInput) -> i64 {
 // CLI умер посреди хода, конца хода не будет: ход закрывается переходом исполнения
 // в конечное состояние, иначе его время росло бы вечно, а все поздние ходы провайдера
 // считались бы пересекающимися с ним.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn terminal_execution_closes_its_open_run(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn terminal_execution_closes_its_open_run() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let a = Run::new(&pool).await;
     let b = Run::new(&pool).await;
     let ms = Utc::now().timestamp_millis() - 60_000;
@@ -2046,8 +2083,9 @@ async fn terminal_execution_closes_its_open_run(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn failed_execution_closes_its_open_run(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn failed_execution_closes_its_open_run() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let a = Run::new(&pool).await;
     begin_run(&pool, &a, Utc::now().timestamp_millis() - 1000).await;
     stop(&pool, &a, ExecutionState::Failed, "context_exhausted").await;
@@ -2059,8 +2097,9 @@ async fn failed_execution_closes_its_open_run(pool: PgPool) -> TestResult {
 }
 
 // Потеря владения обратима: процесс может жить дальше и сам закончить ход.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_lost_keeps_the_run_open(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn owner_lost_keeps_the_run_open() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let a = Run::new(&pool).await;
     begin_run(&pool, &a, Utc::now().timestamp_millis()).await;
     executions::set_state(
@@ -2079,8 +2118,9 @@ async fn owner_lost_keeps_the_run_open(pool: PgPool) -> TestResult {
 }
 
 // Если конец хода всё же пришёл после закрытия хабом, он заменяет оценку хаба.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_late_run_finished_replaces_the_hub_close(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_late_run_finished_replaces_the_hub_close() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let a = Run::new(&pool).await;
     let ms = Utc::now().timestamp_millis() - 60_000;
     let ia = begin_run(&pool, &a, ms).await;
@@ -2160,8 +2200,9 @@ async fn stored_working(pool: &PgPool, i: &SubmittedInput) -> Option<i64> {
 }
 
 // Рабочее время закрытого хода считается один раз при закрытии, а не на каждый снимок списка.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn closed_runs_store_their_working_time(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn closed_runs_store_their_working_time() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let a = Run::new(&pool).await;
     let ms = Utc::now().timestamp_millis() - 600_000;
     let ia = begin_run(&pool, &a, ms).await;
@@ -2213,8 +2254,9 @@ async fn migration_stores_working_time_of_closed_runs(pool: PgPool) -> TestResul
 
 // Строка цены под ответом приходит вместе с историей, а конец хода, в том числе поздний
 // (запуск без ввода), обновляет её событием: клиент не ходит за ценой на каждый ход.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn history_carries_run_costs_and_finish_announces_them(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn history_carries_run_costs_and_finish_announces_them() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();

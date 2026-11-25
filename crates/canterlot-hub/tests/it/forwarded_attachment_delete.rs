@@ -10,11 +10,11 @@ use canterlot_hub::{
     testkit,
 };
 use serde_json::json;
-use sqlx::PgPool;
 use uuid::Uuid;
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn sender_with_forwarded_attachment_can_be_deleted(pool: PgPool) {
+#[tokio::test]
+async fn sender_with_forwarded_attachment_can_be_deleted() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let a = seed.conversation_id;
     let b = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
@@ -131,10 +131,11 @@ async fn sender_with_forwarded_attachment_can_be_deleted(pool: PgPool) {
     assert!(!blob.exists(), "the blob is freed with the last reference");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+#[tokio::test]
 /// Пустой файл (размер 0, SHA-256 пустого ввода) пересылается как любое готовое вложение:
 /// ввод цели получает ссылку на него, а команда машине несёт размер 0.
-async fn empty_attachment_is_forwarded_by_sessions_send(pool: PgPool) {
+async fn empty_attachment_is_forwarded_by_sessions_send() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let a = seed.conversation_id;
     let b = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;

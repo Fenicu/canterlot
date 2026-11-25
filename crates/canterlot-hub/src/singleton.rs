@@ -184,8 +184,9 @@ pub(crate) async fn supervise<F, Fut>(
 mod tests {
     use super::*;
 
-    #[sqlx::test(migrations = "./migrations")]
-    async fn slow_lock_check_is_bounded_and_connection_can_be_replaced(pool: PgPool) {
+    #[tokio::test]
+    async fn slow_lock_check_is_bounded_and_connection_can_be_replaced() {
+        let pool = crate::testkit::db().await;
         let options = pool.connect_options();
         let mut lock = Singleton::acquire(&options, "slow-check")
             .await

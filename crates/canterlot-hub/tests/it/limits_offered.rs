@@ -70,10 +70,9 @@ fn harness(id: &str, provider: &str) -> HarnessInfo {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn providers_outside_the_catalog_are_hidden_but_their_rows_and_history_stay(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn providers_outside_the_catalog_are_hidden_but_their_rows_and_history_stay() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe(&pool, &s, "claude", Window::Weekly, 410).await;
@@ -118,10 +117,9 @@ async fn providers_outside_the_catalog_are_hidden_but_their_rows_and_history_sta
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_harness_leaving_and_returning_tells_clients_and_brings_the_windows_back(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_harness_leaving_and_returning_tells_clients_and_brings_the_windows_back() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let mut with = report();
     with.harnesses.push(harness("codex", "codex"));

@@ -261,8 +261,9 @@ fn code(result: Result<Value, ToolError>) -> Code {
     result.expect_err("the call must fail").code
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn send_marks_origin_and_prefix(pool: PgPool) {
+#[tokio::test]
+async fn send_marks_origin_and_prefix() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let sent = f.send(f.a, f.b, "собери отчёт").await.unwrap();
     assert_eq!(sent["deduplicated"], false);
@@ -320,8 +321,9 @@ async fn send_marks_origin_and_prefix(pool: PgPool) {
     assert_eq!(queued["origin"], Value::Null, "the owner has no origin");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn send_refuses_itself_strangers_and_bad_arguments(pool: PgPool) {
+#[tokio::test]
+async fn send_refuses_itself_strangers_and_bad_arguments() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     assert_eq!(
         code(f.send(f.a, f.a, "сам себе").await),
@@ -368,8 +370,9 @@ async fn send_refuses_itself_strangers_and_bad_arguments(pool: PgPool) {
     assert_eq!(f.inputs(f.b).await, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn send_queues_for_a_stopped_target_and_says_so(pool: PgPool) {
+#[tokio::test]
+async fn send_queues_for_a_stopped_target_and_says_so() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let sent = f.send(f.a, f.b, "проснись").await.unwrap();
     assert_eq!(sent["target_stopped"], true);
@@ -397,8 +400,9 @@ async fn send_queues_for_a_stopped_target_and_says_so(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn send_dedups_within_window(pool: PgPool) {
+#[tokio::test]
+async fn send_dedups_within_window() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let first = f.send(f.a, f.b, "одно и то же").await.unwrap();
     let again = f.send(f.a, f.b, "одно и то же").await.unwrap();
@@ -428,8 +432,9 @@ async fn send_dedups_within_window(pool: PgPool) {
     assert_ne!(late["input_id"], first["input_id"]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn dedup_ends_when_the_first_input_is_finished(pool: PgPool) {
+#[tokio::test]
+async fn dedup_ends_when_the_first_input_is_finished() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let first = f.send(f.a, f.b, "повтор").await.unwrap();
     let input: Uuid = serde_json::from_value(first["input_id"].clone()).unwrap();
@@ -485,8 +490,9 @@ async fn dedup_ends_when_the_first_input_is_finished(pool: PgPool) {
     assert_eq!(again["deduplicated"], false, "the turn is over");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn dedup_does_not_spend_the_rate_limit_and_rearms_with_the_input_still_queued(pool: PgPool) {
+#[tokio::test]
+async fn dedup_does_not_spend_the_rate_limit_and_rearms_with_the_input_still_queued() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -515,8 +521,9 @@ async fn dedup_does_not_spend_the_rate_limit_and_rearms_with_the_input_still_que
     assert!(f.event_jobs(f.a).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_finished_first_input_gets_a_new_input_before_the_rearm(pool: PgPool) {
+#[tokio::test]
+async fn a_finished_first_input_gets_a_new_input_before_the_rearm() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let now = Utc::now();
     let first = f.send(f.a, f.b, "текст").await.unwrap();
@@ -536,8 +543,9 @@ async fn a_finished_first_input_gets_a_new_input_before_the_rearm(pool: PgPool) 
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn transport_retry_of_a_finished_call_does_not_rearm(pool: PgPool) {
+#[tokio::test]
+async fn transport_retry_of_a_finished_call_does_not_rearm() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let caller = f.caller(f.a);
     let args = json!({"session_id": f.b, "text": "один раз"});
@@ -574,8 +582,9 @@ async fn transport_retry_of_a_finished_call_does_not_rearm(pool: PgPool) {
     assert_eq!(code(changed), Code::InvalidArguments);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn send_subscribes_by_default_and_opts_out(pool: PgPool) {
+#[tokio::test]
+async fn send_subscribes_by_default_and_opts_out() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let third = f.conversation().await;
     let quiet = f
@@ -608,8 +617,9 @@ async fn send_subscribes_by_default_and_opts_out(pool: PgPool) {
     assert_eq!(still["subscribed"], true);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn pair_rate_limit(pool: PgPool) {
+#[tokio::test]
+async fn pair_rate_limit() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -637,8 +647,9 @@ async fn pair_rate_limit(pool: PgPool) {
     f.send(f.a, f.b, "окно прошло").await.unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn sender_rate_limit(pool: PgPool) {
+#[tokio::test]
+async fn sender_rate_limit() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -659,8 +670,9 @@ async fn sender_rate_limit(pool: PgPool) {
         .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn events_do_not_count_toward_the_rate_limit(pool: PgPool) {
+#[tokio::test]
+async fn events_do_not_count_toward_the_rate_limit() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -700,8 +712,9 @@ async fn events_do_not_count_toward_the_rate_limit(pool: PgPool) {
     assert_eq!(code(f.send(f.a, f.b, "второе").await), Code::RateLimited);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn chain_depth_stops_ping_pong(pool: PgPool) {
+#[tokio::test]
+async fn chain_depth_stops_ping_pong() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (mut from, mut to) = (f.a, f.b);
     for depth in 1..=8 {
@@ -719,8 +732,9 @@ async fn chain_depth_stops_ping_pong(pool: PgPool) {
     assert_eq!(f.depths(f.b).await, vec![1, 3, 5, 7]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn chain_depth_uses_the_input_of_the_running_turn(pool: PgPool) {
+#[tokio::test]
+async fn chain_depth_uses_the_input_of_the_running_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let sent = f.send(f.a, f.b, "первое").await.unwrap();
     let input: Uuid = serde_json::from_value(sent["input_id"].clone()).unwrap();
@@ -742,8 +756,9 @@ async fn chain_depth_uses_the_input_of_the_running_turn(pool: PgPool) {
     assert_eq!(f.input(&back["input_id"]).await.1["chain_depth"], 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_input_resets_chain(pool: PgPool) {
+#[tokio::test]
+async fn owner_input_resets_chain() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (mut from, mut to) = (f.a, f.b);
     for _ in 0..8 {
@@ -761,8 +776,9 @@ async fn owner_input_resets_chain(pool: PgPool) {
     assert_eq!(f.input(&sent["input_id"]).await.1["chain_depth"], 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn subscription_event_does_not_grow_chain(pool: PgPool) {
+#[tokio::test]
+async fn subscription_event_does_not_grow_chain() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -795,8 +811,9 @@ async fn subscription_event_does_not_grow_chain(pool: PgPool) {
     assert_eq!(f.inputs(f.b).await, 25);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn read_only_sender_cannot_write_by_proxy(pool: PgPool) {
+#[tokio::test]
+async fn read_only_sender_cannot_write_by_proxy() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let set = |id: Uuid, mode: &'static str, pending: Value| {
         let pool = f.pool.clone();
@@ -842,8 +859,9 @@ async fn read_only_sender_cannot_write_by_proxy(pool: PgPool) {
     f.send(f.a, f.b, "можно").await.unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn subscribe_tool_reports_the_state_and_unsubscribe_cancels_the_pending_event(pool: PgPool) {
+#[tokio::test]
+async fn subscribe_tool_reports_the_state_and_unsubscribe_cancels_the_pending_event() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let now = Utc::now();
     f.refresh(f.b, now - TimeDelta::hours(1)).await;
@@ -912,8 +930,9 @@ async fn subscribe_tool_reports_the_state_and_unsubscribe_cancels_the_pending_ev
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn subscribe_refuses_strangers_and_itself(pool: PgPool) {
+#[tokio::test]
+async fn subscribe_refuses_strangers_and_itself() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     for tool in ["sessions.subscribe", "sessions.unsubscribe"] {
         assert_eq!(
@@ -935,8 +954,9 @@ async fn subscribe_refuses_strangers_and_itself(pool: PgPool) {
     assert!(f.subscription(f.a, f.a).await.is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_full_target_queue_is_a_tool_error(pool: PgPool) {
+#[tokio::test]
+async fn a_full_target_queue_is_a_tool_error() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -952,8 +972,9 @@ async fn a_full_target_queue_is_a_tool_error(pool: PgPool) {
     assert_eq!(code(f.send(f.a, f.b, "лишнее").await), Code::QueueFull);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn parallel_sends_cannot_outrun_the_limit_or_the_dedup(pool: PgPool) {
+#[tokio::test]
+async fn parallel_sends_cannot_outrun_the_limit_or_the_dedup() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -1005,8 +1026,9 @@ async fn parallel_sends_cannot_outrun_the_limit_or_the_dedup(pool: PgPool) {
     assert_eq!(f.inputs(third).await, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn attachments_of_the_callers_conversation_are_forwarded(pool: PgPool) {
+#[tokio::test]
+async fn attachments_of_the_callers_conversation_are_forwarded() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let file = f.attachment(f.a, "report.pdf", "application/pdf").await;
     let answer = f
@@ -1034,8 +1056,9 @@ async fn attachments_of_the_callers_conversation_are_forwarded(pool: PgPool) {
     assert_eq!(linked, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn foreign_attachment_is_refused(pool: PgPool) {
+#[tokio::test]
+async fn foreign_attachment_is_refused() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let other = f.conversation().await;
     let file = f.attachment(other, "secret.pdf", "application/pdf").await;
@@ -1051,8 +1074,9 @@ async fn foreign_attachment_is_refused(pool: PgPool) {
     assert_eq!(f.inputs(f.b).await, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn image_attachment_is_refused_when_the_target_cannot_take_images(pool: PgPool) {
+#[tokio::test]
+async fn image_attachment_is_refused_when_the_target_cannot_take_images() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let file = f.attachment(f.a, "shot.png", "image/png").await;
     let error = f
@@ -1067,8 +1091,9 @@ async fn image_attachment_is_refused_when_the_target_cannot_take_images(pool: Pg
     assert!(error.message.contains("does not accept"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_old_worker_without_pilot_refuses_attachments_cleanly(pool: PgPool) {
+#[tokio::test]
+async fn an_old_worker_without_pilot_refuses_attachments_cleanly() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let file = f.attachment(f.a, "old.pdf", "application/pdf").await;
     sqlx::query("update machines set capabilities=array[]::text[] where id=$1")

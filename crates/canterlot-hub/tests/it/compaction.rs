@@ -144,16 +144,18 @@ fn id_of(outcome: CompactOutcome) -> Uuid {
 const KEY: &str = "0191d2f0-0000-7000-8000-000000000001";
 const OTHER_KEY: &str = "0191d2f0-0000-7000-8000-000000000002";
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stuck_fact_pauses_the_queue_once_and_names_the_reason(pool: PgPool) {
+#[tokio::test]
+async fn stuck_fact_pauses_the_queue_once_and_names_the_reason() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::start(&pool).await;
     run.stuck(&pool).await;
     run.stuck(&pool).await;
     assert_eq!(run.pauses(&pool).await, vec![stuck(None)]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn request_makes_one_command_and_a_repeat_changes_nothing(pool: PgPool) {
+#[tokio::test]
+async fn request_makes_one_command_and_a_repeat_changes_nothing() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::start(&pool).await;
     run.stuck(&pool).await;
     let first = run.compact(&pool, KEY).await.unwrap();
@@ -186,8 +188,9 @@ async fn request_makes_one_command_and_a_repeat_changes_nothing(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn finished_compaction_lifts_the_pause(pool: PgPool) {
+#[tokio::test]
+async fn finished_compaction_lifts_the_pause() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::start(&pool).await;
     run.stuck(&pool).await;
     let command = id_of(run.compact(&pool, KEY).await.unwrap());
@@ -209,8 +212,9 @@ async fn finished_compaction_lifts_the_pause(pool: PgPool) {
     assert_eq!(row.1["status"], "completed");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn failed_compaction_keeps_the_pause_and_may_be_asked_again(pool: PgPool) {
+#[tokio::test]
+async fn failed_compaction_keeps_the_pause_and_may_be_asked_again() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::start(&pool).await;
     run.stuck(&pool).await;
     let command = id_of(run.compact(&pool, KEY).await.unwrap());
@@ -223,8 +227,9 @@ async fn failed_compaction_keeps_the_pause_and_may_be_asked_again(pool: PgPool) 
     assert_ne!(again, command);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn compaction_works_without_a_stuck_session(pool: PgPool) {
+#[tokio::test]
+async fn compaction_works_without_a_stuck_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let run = Run::start(&pool).await;
     let command = id_of(run.compact(&pool, KEY).await.unwrap());
     // Вне паузы очередь не трогаем: причин как не было, так и нет.
@@ -237,8 +242,9 @@ async fn compaction_works_without_a_stuck_session(pool: PgPool) {
     assert_eq!(kind, "compact_session");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn compaction_needs_a_live_execution(pool: PgPool) {
+#[tokio::test]
+async fn compaction_needs_a_live_execution() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::start(&pool).await;
     run.stuck(&pool).await;
     executions::set_state(
@@ -267,8 +273,9 @@ async fn compaction_needs_a_live_execution(pool: PgPool) {
     ));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn dead_execution_releases_a_requested_compaction(pool: PgPool) {
+#[tokio::test]
+async fn dead_execution_releases_a_requested_compaction() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::start(&pool).await;
     run.stuck(&pool).await;
     run.compact(&pool, KEY).await.unwrap();
@@ -298,8 +305,9 @@ async fn dead_execution_releases_a_requested_compaction(pool: PgPool) {
 }
 
 // Без согласованной возможности старый воркер получил бы команду, которой не знает.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn command_goes_only_to_a_session_that_agreed_to_it(pool: PgPool) {
+#[tokio::test]
+async fn command_goes_only_to_a_session_that_agreed_to_it() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         config::HubTimers,
         grpc::KNOWN_OPTIONAL_CAPABILITIES,
@@ -360,8 +368,9 @@ async fn event_kinds(pool: &PgPool, conversation: Uuid) -> Vec<String> {
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn compaction_episode_is_a_durable_timeline_row(pool: PgPool) {
+#[tokio::test]
+async fn compaction_episode_is_a_durable_timeline_row() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::start(&pool).await;
     let id = Uuid::now_v7();
     let start = compaction_event(
@@ -460,8 +469,9 @@ async fn compaction_episode_is_a_durable_timeline_row(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn compaction_finish_without_start_opens_and_closes_at_once(pool: PgPool) {
+#[tokio::test]
+async fn compaction_finish_without_start_opens_and_closes_at_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::start(&pool).await;
     let id = Uuid::now_v7();
     run.send(
@@ -486,8 +496,9 @@ async fn compaction_finish_without_start_opens_and_closes_at_once(pool: PgPool) 
     assert_eq!(row, ("manual".to_owned(), Some(false)));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn context_progress_keeps_only_the_latest(pool: PgPool) {
+#[tokio::test]
+async fn context_progress_keeps_only_the_latest() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_proto::worker::v1::ContextProgress;
     let mut run = Run::start(&pool).await;
     let execution = run.execution.execution_id;
@@ -585,8 +596,9 @@ async fn store_context(
     .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn terminal_execution_closes_open_compactions(pool: PgPool) {
+#[tokio::test]
+async fn terminal_execution_closes_open_compactions() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::start(&pool).await;
     let id = Uuid::now_v7();
     run.send(
@@ -643,8 +655,9 @@ async fn terminal_execution_closes_open_compactions(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn open_compaction_of_a_finished_execution_is_not_running(pool: PgPool) {
+#[tokio::test]
+async fn open_compaction_of_a_finished_execution_is_not_running() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::start(&pool).await;
     let id = Uuid::now_v7();
     run.send(
@@ -689,8 +702,9 @@ async fn open_compaction_of_a_finished_execution_is_not_running(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cleared_context_of_the_latest_execution_hides_the_indicator(pool: PgPool) {
+#[tokio::test]
+async fn cleared_context_of_the_latest_execution_hides_the_indicator() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let first = executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
         .await
@@ -768,8 +782,9 @@ async fn cleared_context_of_the_latest_execution_hides_the_indicator(pool: PgPoo
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn turn_end_context_is_authoritative_for_the_indicator(pool: PgPool) {
+#[tokio::test]
+async fn turn_end_context_is_authoritative_for_the_indicator() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_proto::worker::v1::RunFinished;
     let mut run = Run::start(&pool).await;
     run.send(
@@ -795,8 +810,9 @@ async fn turn_end_context_is_authoritative_for_the_indicator(pool: PgPool) {
     assert!(kinds.contains(&"context_changed".to_owned()), "{kinds:?}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn turn_end_closes_a_compaction_left_open_by_the_cli(pool: PgPool) {
+#[tokio::test]
+async fn turn_end_closes_a_compaction_left_open_by_the_cli() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_proto::worker::v1::RunFinished;
     let mut run = Run::start(&pool).await;
     let id = Uuid::now_v7();
@@ -857,8 +873,9 @@ async fn turn_end_closes_a_compaction_left_open_by_the_cli(pool: PgPool) {
     assert_eq!(shown, Some(Some(false)));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn running_compaction_is_in_the_snapshot_a_reopened_chat_loads(pool: PgPool) {
+#[tokio::test]
+async fn running_compaction_is_in_the_snapshot_a_reopened_chat_loads() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::start(&pool).await;
     let id = Uuid::now_v7();
     run.send(

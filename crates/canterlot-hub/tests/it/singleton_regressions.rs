@@ -31,8 +31,9 @@ async fn lock_pid(pool: &PgPool) -> Option<i32> {
     .unwrap()
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn machine_status_reacquire_preserves_connected_machine_availability(pool: PgPool) {
+#[tokio::test]
+async fn machine_status_reacquire_preserves_connected_machine_availability() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     sqlx::query("update machines set availability='available' where id=$1")
         .bind(seed.machine_id)
@@ -126,8 +127,9 @@ async fn machine_status_reacquire_preserves_connected_machine_availability(pool:
     assert_eq!(availability, "available");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn failing_start_projection_backs_off_lock_acquisitions_and_readyz(pool: PgPool) {
+#[tokio::test]
+async fn failing_start_projection_backs_off_lock_acquisitions_and_readyz() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;

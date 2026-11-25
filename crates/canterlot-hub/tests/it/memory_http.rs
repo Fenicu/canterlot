@@ -74,8 +74,9 @@ fn subjects(page: &Value) -> Vec<String> {
         .collect()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_list_requires_domain_and_never_mixes(pool: PgPool) {
+#[tokio::test]
+async fn owner_list_requires_domain_and_never_mixes() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let work = fx
         .create("work", "Сборка воркера", "cargo build -p worker")
@@ -221,8 +222,9 @@ async fn owner_list_requires_domain_and_never_mixes(pool: PgPool) {
     let _ = fx.owner;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_put_wrong_version_409(pool: PgPool) {
+#[tokio::test]
+async fn owner_put_wrong_version_409() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let created = fx.create("work", "Порт стенда", "5432").await;
     let id = created["id"].as_str().unwrap();
@@ -265,8 +267,9 @@ async fn owner_put_wrong_version_409(pool: PgPool) {
     assert_eq!(saved["subject"], "Порт стенда");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_secret_warning_needs_force(pool: PgPool) {
+#[tokio::test]
+async fn owner_secret_warning_needs_force() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let secret = "ключ sk-abcdefghijklmnop1234 для вызова";
     let payload = |force: Option<bool>| {
@@ -337,8 +340,9 @@ async fn owner_secret_warning_needs_force(pool: PgPool) {
     assert_eq!(allowed.status.as_u16(), 200);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn hard_delete_404_after(pool: PgPool) {
+#[tokio::test]
+async fn hard_delete_404_after() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let created = fx.create("personal", "Старая заметка", "текст").await;
     let id = created["id"].as_str().unwrap();
@@ -390,8 +394,9 @@ async fn hard_delete_404_after(pool: PgPool) {
     assert!(subjects(&archived).is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn conversation_info_carries_memory_domain_and_conflict(pool: PgPool) {
+#[tokio::test]
+async fn conversation_info_carries_memory_domain_and_conflict() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool.clone()).await;
     let machine = Uuid::now_v7();
     sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'test')")
@@ -445,8 +450,9 @@ async fn conversation_info_carries_memory_domain_and_conflict(pool: PgPool) {
     assert_eq!(conflict["memory_conflict"], true);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_put_can_move_an_entry_between_projects(pool: PgPool) {
+#[tokio::test]
+async fn owner_put_can_move_an_entry_between_projects() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let created = fx
         .call(

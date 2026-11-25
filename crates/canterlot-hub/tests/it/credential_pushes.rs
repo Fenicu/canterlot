@@ -108,8 +108,9 @@ async fn push_rows(pool: &PgPool, kind: &str) -> Vec<(String, serde_json::Value)
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn expiry_push_fires_once_per_date_and_rearms_after_a_new_login(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn expiry_push_fires_once_per_date_and_rearms_after_a_new_login() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     enable_pushes(&pool).await;
     let soon = at(Duration::days(3));
@@ -167,8 +168,9 @@ async fn expiry_push_fires_once_per_date_and_rearms_after_a_new_login(pool: PgPo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_date_far_ahead_is_not_pushed(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_date_far_ahead_is_not_pushed() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     enable_pushes(&pool).await;
     record(
@@ -188,10 +190,9 @@ async fn a_date_far_ahead_is_not_pushed(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_required_pushes_once_per_episode_and_rearms_after_a_successful_turn(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn auth_required_pushes_once_per_episode_and_rearms_after_a_successful_turn() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     enable_pushes(&pool).await;
     let now = Utc::now();
@@ -270,8 +271,9 @@ async fn auth_required_pushes_once_per_episode_and_rearms_after_a_successful_tur
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_open_chat_does_not_swallow_the_auth_push(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn an_open_chat_does_not_swallow_the_auth_push() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     enable_pushes(&pool).await;
     let now = Utc::now();

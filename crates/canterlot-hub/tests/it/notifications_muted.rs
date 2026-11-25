@@ -45,8 +45,9 @@ async fn push_count(pool: &PgPool, id: Uuid) -> i64 {
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_muted_session_gets_no_push_for_any_conversation_event(pool: PgPool) {
+#[tokio::test]
+async fn a_muted_session_gets_no_push_for_any_conversation_event() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = testkit::seed(&pool).await;
     mute(&pool, s.conversation_id, true).await;
@@ -101,10 +102,9 @@ async fn a_muted_session_gets_no_push_for_any_conversation_event(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_muted_parent_silences_its_delegate_and_unmuting_lets_the_next_request_through(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn a_muted_parent_silences_its_delegate_and_unmuting_lets_the_next_request_through() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = testkit::seed(&pool).await;
     let delegate = testkit::seed_conversation(&pool, s.owner_id, s.machine_id).await;
@@ -161,8 +161,9 @@ async fn a_muted_parent_silences_its_delegate_and_unmuting_lets_the_next_request
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn muting_cancels_pending_pushes_of_the_session_and_its_delegates(pool: PgPool) {
+#[tokio::test]
+async fn muting_cancels_pending_pushes_of_the_session_and_its_delegates() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = http_support::Fixture::new(pool.clone()).await;
     let child = testkit::seed_conversation(&pool, f.seed.owner_id, f.seed.machine_id).await;
     sqlx::query("update conversations set parent_conversation_id=$2,spawn_depth=1 where id=$1")

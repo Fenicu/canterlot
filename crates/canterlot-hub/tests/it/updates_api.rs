@@ -38,8 +38,9 @@ async fn feed(f: &Fixture) -> Value {
     response.json::<Value>()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn feed_is_newest_first_with_cursor_and_optional_filters(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn feed_is_newest_first_with_cursor_and_optional_filters() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let other = Uuid::now_v7();
     sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'other')")
@@ -165,8 +166,9 @@ async fn feed_is_newest_first_with_cursor_and_optional_filters(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn feed_rejects_invalid_queries_and_anonymous_readers(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn feed_rejects_invalid_queries_and_anonymous_readers() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     for query in [
         "limit=0",

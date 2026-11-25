@@ -111,8 +111,9 @@ fn view(text: &str, status: ViewStatus) -> TodoItemView {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn list_is_stored_published_and_comes_back_in_the_snapshot(pool: PgPool) {
+#[tokio::test]
+async fn list_is_stored_published_and_comes_back_in_the_snapshot() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let batch = records(
@@ -168,8 +169,9 @@ async fn list_is_stored_published_and_comes_back_in_the_snapshot(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn replay_of_a_shipped_batch_changes_nothing(pool: PgPool) {
+#[tokio::test]
+async fn replay_of_a_shipped_batch_changes_nothing() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let journal = Uuid::now_v7();
@@ -187,8 +189,9 @@ async fn replay_of_a_shipped_batch_changes_nothing(pool: PgPool) {
     assert_eq!(lists(&pool, &seed).await[0].revision, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stale_revision_of_the_same_generation_is_ignored(pool: PgPool) {
+#[tokio::test]
+async fn stale_revision_of_the_same_generation_is_ignored() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let journal = Uuid::now_v7();
@@ -228,8 +231,9 @@ async fn stale_revision_of_the_same_generation_is_ignored(pool: PgPool) {
     assert_eq!(stored[0].revision, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn newer_generation_wins_even_with_a_lower_revision_and_older_stays_stale(pool: PgPool) {
+#[tokio::test]
+async fn newer_generation_wins_even_with_a_lower_revision_and_older_stays_stale() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let first = running(&pool, &seed).await;
     apply(
@@ -301,8 +305,9 @@ async fn newer_generation_wins_even_with_a_lower_revision_and_older_stays_stale(
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn lanes_are_kept_apart_and_each_counts_its_own_revision(pool: PgPool) {
+#[tokio::test]
+async fn lanes_are_kept_apart_and_each_counts_its_own_revision() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let lane = Uuid::now_v7();
@@ -355,8 +360,9 @@ async fn lanes_are_kept_apart_and_each_counts_its_own_revision(pool: PgPool) {
     assert_eq!(events[1].payload["lane_block_id"], json!(lane));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nul_and_unknown_status_do_not_poison_the_journal(pool: PgPool) {
+#[tokio::test]
+async fn nul_and_unknown_status_do_not_poison_the_journal() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let batch = records(
@@ -391,8 +397,9 @@ async fn nul_and_unknown_status_do_not_poison_the_journal(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cancelled_item_keeps_its_status(pool: PgPool) {
+#[tokio::test]
+async fn cancelled_item_keeps_its_status() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let batch = records(
@@ -423,8 +430,9 @@ async fn cancelled_item_keeps_its_status(pool: PgPool) {
     assert_eq!(events[0].payload["items"][1]["status"], "cancelled");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn list_of_a_foreign_execution_is_refused(pool: PgPool) {
+#[tokio::test]
+async fn list_of_a_foreign_execution_is_refused() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let journal = Uuid::now_v7();
@@ -445,8 +453,9 @@ async fn list_of_a_foreign_execution_is_refused(pool: PgPool) {
     assert!(lists(&pool, &seed).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn table_goes_with_its_conversation(pool: PgPool) {
+#[tokio::test]
+async fn table_goes_with_its_conversation() {
+    let pool = canterlot_hub::testkit::db().await;
     let cascades: Vec<(String,)> = sqlx::query_as(
         "select confrelid::regclass::text from pg_constraint
          where conrelid = 'agent_todos'::regclass and contype = 'f' and confdeltype = 'c'
@@ -502,8 +511,9 @@ fn events_schema_describes_todo_updated() {
     assert!(!validator.is_valid(&extra));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn start_command_offers_todo_v1_only_on_a_session_that_agreed_to_it(pool: PgPool) {
+#[tokio::test]
+async fn start_command_offers_todo_v1_only_on_a_session_that_agreed_to_it() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         config::HubTimers,
         grpc::KNOWN_OPTIONAL_CAPABILITIES,
@@ -555,8 +565,9 @@ fn debug_of_a_list_shows_no_item_text() {
     assert!(!debug.contains(marker), "{debug}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn list_update_counts_as_a_sign_of_life_for_the_stalled_check(pool: PgPool) {
+#[tokio::test]
+async fn list_update_counts_as_a_sign_of_life_for_the_stalled_check() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let last_event_at = || async {
@@ -590,8 +601,9 @@ async fn list_update_counts_as_a_sign_of_life_for_the_stalled_check(pool: PgPool
 }
 
 // Снимок несёт основную дорожку и недавно обновлённые дорожки субагентов.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn snapshot_carries_main_and_recent_lanes_only(pool: PgPool) {
+#[tokio::test]
+async fn snapshot_carries_main_and_recent_lanes_only() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     for n in 0..=60 {
         let lane = (n > 0).then(Uuid::now_v7);

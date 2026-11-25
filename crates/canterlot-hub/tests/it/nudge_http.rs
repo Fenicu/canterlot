@@ -52,8 +52,9 @@ impl Fx {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_creates_pauses_resumes_and_clears_a_rule(pool: PgPool) {
+#[tokio::test]
+async fn owner_creates_pauses_resumes_and_clears_a_rule() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let path = format!("/api/v1/conversations/{}/nudge", f.session);
 
@@ -111,8 +112,9 @@ async fn owner_creates_pauses_resumes_and_clears_a_rule(pool: PgPool) {
     assert_eq!(again.status.as_u16(), 204);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_rule_accepts_only_nudge_text_presets(pool: PgPool) {
+#[tokio::test]
+async fn owner_rule_accepts_only_nudge_text_presets() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let path = format!("/api/v1/conversations/{}/nudge", f.session);
     let nudge = presets::create(
@@ -175,8 +177,9 @@ async fn owner_rule_accepts_only_nudge_text_presets(pool: PgPool) {
     assert_eq!(row.as_deref(), Some(nudge.summary.id.as_str()));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nudge_http_is_limited_to_the_owners_sessions(pool: PgPool) {
+#[tokio::test]
+async fn nudge_http_is_limited_to_the_owners_sessions() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let other = testkit::seed(&f.pool).await;
     let foreign = testkit::seed_conversation(&f.pool, other.owner_id, other.machine_id).await;
@@ -193,8 +196,9 @@ async fn nudge_http_is_limited_to_the_owners_sessions(pool: PgPool) {
 
 /// Правило боковой копии: GET владельца его показывает, значит PUT и DELETE владельца тоже
 /// его принимают. Скрыта копия только от инструментов агентов.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_can_edit_and_clear_the_rule_of_a_side_chat_that_get_shows(pool: PgPool) {
+#[tokio::test]
+async fn owner_can_edit_and_clear_the_rule_of_a_side_chat_that_get_shows() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool.clone()).await;
     let path = format!("/api/v1/conversations/{}/nudge", f.session);
     let created = f

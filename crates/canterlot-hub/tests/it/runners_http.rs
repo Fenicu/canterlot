@@ -94,8 +94,9 @@ impl Api {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machines_expose_role_parent_rank_labels_and_carrier(pool: PgPool) {
+#[tokio::test]
+async fn machines_expose_role_parent_rank_labels_and_carrier() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool).await;
     let runner = api.machine(api.runner).await;
     assert_eq!(runner["role"], "runner");
@@ -134,8 +135,9 @@ async fn machines_expose_role_parent_rank_labels_and_carrier(pool: PgPool) {
     assert_eq!(listed["rank"], 20);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_runners_availability_follows_the_spec_rule(pool: PgPool) {
+#[tokio::test]
+async fn a_runners_availability_follows_the_spec_rule() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut api = Api::new(pool).await;
     // Ничего не известно.
     let runner = api.machine(api.runner).await;
@@ -188,8 +190,9 @@ async fn a_runners_availability_follows_the_spec_rule(pool: PgPool) {
     assert_eq!(runner["offline_since"], Value::Null);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_new_session_route_refuses_a_runner(pool: PgPool) {
+#[tokio::test]
+async fn the_new_session_route_refuses_a_runner() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool).await;
     // Каталог раннеру не нужен: отказ раньше любой проверки каталога и возможностей.
     let body = json!({
@@ -233,8 +236,9 @@ async fn the_new_session_route_refuses_a_runner(pool: PgPool) {
     assert_eq!(on_runner, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_execution_on_a_runner_is_refused(pool: PgPool) {
+#[tokio::test]
+async fn an_execution_on_a_runner_is_refused() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool).await;
     // Беседа, оказавшаяся на раннере в обход маршрута создания (например, до смены роли).
     let conversation = testkit::seed_conversation(&api.pool, api.owner, api.runner).await;
@@ -268,8 +272,9 @@ async fn an_execution_on_a_runner_is_refused(pool: PgPool) {
 
 /// Пауза раннера (выключатель) закрывает новые привязки, а её снятие через HTTP ставит
 /// ожидающую задачу на раннер без ожидания таймера.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn switching_the_runner_on_places_the_waiting_job(pool: PgPool) {
+#[tokio::test]
+async fn switching_the_runner_on_places_the_waiting_job() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut api = Api::new(pool).await;
     sqlx::query(
         "update machines set capabilities=array['jobs_inplace_v1'], jobs_max_running=1

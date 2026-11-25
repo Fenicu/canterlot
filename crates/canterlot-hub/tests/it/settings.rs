@@ -8,8 +8,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unsupported_setting_returns_422_with_reason(pool: PgPool) {
+#[tokio::test]
+async fn unsupported_setting_returns_422_with_reason() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -35,8 +36,9 @@ async fn unsupported_setting_returns_422_with_reason(pool: PgPool) {
     assert_eq!(response.json::<Value>()["error"]["code"], "model_unknown");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn session_on_a_model_gone_from_the_catalog_keeps_its_other_settings_open(pool: PgPool) {
+#[tokio::test]
+async fn session_on_a_model_gone_from_the_catalog_keeps_its_other_settings_open() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -77,8 +79,9 @@ async fn session_on_a_model_gone_from_the_catalog_keeps_its_other_settings_open(
     assert_eq!(gone.json::<Value>()["error"]["code"], "model_unknown");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn pending_settings_are_visible_in_detail_and_event(pool: PgPool) {
+#[tokio::test]
+async fn pending_settings_are_visible_in_detail_and_event() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -153,8 +156,9 @@ async fn pending_settings_are_visible_in_detail_and_event(pool: PgPool) {
     assert_eq!(event["pending"]["effort"], "low");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn settings_promotion_ignores_keys_changed_after_dispatch(pool: PgPool) {
+#[tokio::test]
+async fn settings_promotion_ignores_keys_changed_after_dispatch() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         conversations,
         delivery::submit::{self, ContentBlock, SubmitInput},
@@ -216,8 +220,9 @@ async fn settings_promotion_ignores_keys_changed_after_dispatch(pool: PgPool) {
     assert_eq!(row.2, json!({"model":"newer"}));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn dispatch_gate_holds_settings_inputs_for_a_session_without_pilot_v1(pool: PgPool) {
+#[tokio::test]
+async fn dispatch_gate_holds_settings_inputs_for_a_session_without_pilot_v1() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         delivery::dispatch::{self, BlockReason, DispatchOutcome, GateInputs},
         executions,
@@ -307,8 +312,9 @@ async fn dispatch_gate_holds_settings_inputs_for_a_session_without_pilot_v1(pool
     assert_eq!(payload["settings"], json!({"effort":"low"}));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn dispatch_revalidates_pending_settings_and_drops_invalid_keys_with_an_event(pool: PgPool) {
+#[tokio::test]
+async fn dispatch_revalidates_pending_settings_and_drops_invalid_keys_with_an_event() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         delivery::{
             dispatch::{self, GateInputs},
@@ -378,8 +384,9 @@ async fn dispatch_revalidates_pending_settings_and_drops_invalid_keys_with_an_ev
     assert_eq!(event["rejected"]["reason"], "settings_unavailable");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn settings_change_applies_with_next_input_and_survives_redispatch(pool: PgPool) {
+#[tokio::test]
+async fn settings_change_applies_with_next_input_and_survives_redispatch() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         conversations::{self, SettingsPatch},
         delivery::{
@@ -521,8 +528,9 @@ async fn settings_client(pool: &PgPool) -> (TestClient, Uuid, Uuid, tempfile::Te
     )
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn model_change_with_an_effort_the_model_lacks_is_refused_at_change_time(pool: PgPool) {
+#[tokio::test]
+async fn model_change_with_an_effort_the_model_lacks_is_refused_at_change_time() {
+    let pool = canterlot_hub::testkit::db().await;
     let (client, id, machine, _dir) = settings_client(&pool).await;
     sqlx::query("update machine_harnesses set models=models || $2::jsonb where machine_id=$1")
         .bind(machine)
@@ -549,8 +557,9 @@ async fn model_change_with_an_effort_the_model_lacks_is_refused_at_change_time(p
     assert_eq!(pending, json!({}));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn midsession_unsupported_harness_explains_the_reason(pool: PgPool) {
+#[tokio::test]
+async fn midsession_unsupported_harness_explains_the_reason() {
+    let pool = canterlot_hub::testkit::db().await;
     let (client, id, machine, _dir) = settings_client(&pool).await;
     sqlx::query("update machine_harnesses set settings_midsession=false where machine_id=$1")
         .bind(machine)
@@ -580,8 +589,9 @@ async fn midsession_unsupported_harness_explains_the_reason(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn rejected_settings_do_not_poison_following_inputs(pool: PgPool) {
+#[tokio::test]
+async fn rejected_settings_do_not_poison_following_inputs() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         conversations::{self, SettingsPatch},
         delivery::{
@@ -686,8 +696,9 @@ async fn rejected_settings_do_not_poison_following_inputs(pool: PgPool) {
 use crate::support::settings_process_guard;
 
 #[cfg(feature = "fault-injection")]
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn settings_survive_worker_restart_between_dispatch_and_accept(pool: PgPool) {
+#[tokio::test]
+async fn settings_survive_worker_restart_between_dispatch_and_accept() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         config::HubTimers,
         conversations::{self, SettingsPatch},
@@ -1030,8 +1041,9 @@ async fn settings_survive_worker_restart_between_dispatch_and_accept(pool: PgPoo
     hub.join.await.unwrap().unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn pending_settings_are_dropped_when_effective_model_disappears(pool: PgPool) {
+#[tokio::test]
+async fn pending_settings_are_dropped_when_effective_model_disappears() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         delivery::{
             dispatch::{self, GateInputs},
@@ -1104,8 +1116,9 @@ async fn pending_settings_are_dropped_when_effective_model_disappears(pool: PgPo
     assert_eq!(event["rejected"]["keys"], json!(["permission_mode"]));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn rejected_settings_report_sent_keys_and_preserve_newer_pending_values(pool: PgPool) {
+#[tokio::test]
+async fn rejected_settings_report_sent_keys_and_preserve_newer_pending_values() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         conversations,
         delivery::submit::{self, ContentBlock, SubmitInput},
@@ -1199,8 +1212,9 @@ fn gate(capabilities: &[&str]) -> canterlot_hub::delivery::dispatch::GateInputs 
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn preset_change_is_pending_until_accepted_then_promoted_with_revision(pool: PgPool) {
+#[tokio::test]
+async fn preset_change_is_pending_until_accepted_then_promoted_with_revision() {
+    let pool = canterlot_hub::testkit::db().await;
     let (client, conversation, _machine, _dir) = settings_client(&pool).await;
     let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
         .bind(conversation)
@@ -1297,8 +1311,9 @@ async fn preset_change_is_pending_until_accepted_then_promoted_with_revision(poo
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn rejected_input_drops_pending_preset(pool: PgPool) {
+#[tokio::test]
+async fn rejected_input_drops_pending_preset() {
+    let pool = canterlot_hub::testkit::db().await;
     let (client, conversation, _machine, _dir) = settings_client(&pool).await;
     let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
         .bind(conversation)
@@ -1363,8 +1378,9 @@ async fn rejected_input_drops_pending_preset(pool: PgPool) {
     assert_eq!(event["rejected"]["reason"], "settings_unavailable");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reapplying_same_preset_takes_the_new_revision(pool: PgPool) {
+#[tokio::test]
+async fn reapplying_same_preset_takes_the_new_revision() {
+    let pool = canterlot_hub::testkit::db().await;
     let (client, conversation, _machine, _dir) = settings_client(&pool).await;
     let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
         .bind(conversation)
@@ -1448,8 +1464,9 @@ async fn reapplying_same_preset_takes_the_new_revision(pool: PgPool) {
     assert_eq!(payload["settings"]["instructions"]["text"], "текст B");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn views_and_events_never_contain_preset_text(pool: PgPool) {
+#[tokio::test]
+async fn views_and_events_never_contain_preset_text() {
+    let pool = canterlot_hub::testkit::db().await;
     let (client, conversation, _machine, _dir) = settings_client(&pool).await;
     let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
         .bind(conversation)
@@ -1499,8 +1516,9 @@ async fn views_and_events_never_contain_preset_text(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn promoting_clean_snapshot_clears_pinned_revision(pool: PgPool) {
+#[tokio::test]
+async fn promoting_clean_snapshot_clears_pinned_revision() {
+    let pool = canterlot_hub::testkit::db().await;
     // Регрессия зависания хода 4: снимок «Без инструкций» несёт revision 0,
     // в строке закрепление должно стать NULL, иначе ограничение
     // conversations_instruction_ref отклоняет продвижение и ввод висит.
@@ -1649,8 +1667,9 @@ async fn promoting_clean_snapshot_clears_pinned_revision(pool: PgPool) {
     assert_eq!(row, ("clean".to_owned(), None));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn midsession_effort_change_is_refused_when_the_harness_cannot_apply_it(pool: PgPool) {
+#[tokio::test]
+async fn midsession_effort_change_is_refused_when_the_harness_cannot_apply_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let (client, id, machine, _dir) = settings_client(&pool).await;
     sqlx::query(
         "update machine_harnesses set settings_midsession_effort=false where machine_id=$1",
@@ -1700,8 +1719,9 @@ async fn midsession_effort_change_is_refused_when_the_harness_cannot_apply_it(po
 
 /// Харнесс со сменой усилия на ходу (Claude Code через `apply_flag_settings`, Codex, OpenCode):
 /// смена у живого исполнения ждёт в `pending` и уходит со следующим вводом.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn midsession_effort_change_travels_with_the_next_input(pool: PgPool) {
+#[tokio::test]
+async fn midsession_effort_change_travels_with_the_next_input() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::delivery::dispatch::{self, DispatchOutcome};
     let (client, id, _machine, _dir) = settings_client(&pool).await;
     let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
@@ -1753,8 +1773,9 @@ async fn midsession_effort_change_travels_with_the_next_input(pool: PgPool) {
     assert_eq!(payload["settings"]["effort"], "low", "{payload}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn worker_rejection_of_unsupported_settings_drops_them(pool: PgPool) {
+#[tokio::test]
+async fn worker_rejection_of_unsupported_settings_drops_them() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         conversations::{self, SettingsPatch},
         delivery::{
@@ -1939,8 +1960,9 @@ async fn settings_columns(pool: &PgPool, conversation: Uuid) -> (String, String,
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn effort_changed_on_a_stopped_session_is_used_at_launch_and_the_input_passes(pool: PgPool) {
+#[tokio::test]
+async fn effort_changed_on_a_stopped_session_is_used_at_launch_and_the_input_passes() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::delivery::dispatch::{self, DispatchOutcome};
     let (client, id, machine, _dir) = settings_client(&pool).await;
     sqlx::query(
@@ -2012,8 +2034,9 @@ async fn effort_changed_on_a_stopped_session_is_used_at_launch_and_the_input_pas
     assert!(payload.get("settings").is_none(), "{payload}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn all_three_launch_settings_are_promoted_together_at_start(pool: PgPool) {
+#[tokio::test]
+async fn all_three_launch_settings_are_promoted_together_at_start() {
+    let pool = canterlot_hub::testkit::db().await;
     let (client, id, machine, _dir) = settings_client(&pool).await;
     sqlx::query(
         "update machine_harnesses set settings_midsession=false,permission_modes=$2 where machine_id=$1",
@@ -2064,10 +2087,9 @@ async fn all_three_launch_settings_are_promoted_together_at_start(pool: PgPool) 
     assert_eq!(pending, json!({}));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stale_pending_value_is_dropped_at_start_and_the_launch_keeps_the_effective_one(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn stale_pending_value_is_dropped_at_start_and_the_launch_keeps_the_effective_one() {
+    let pool = canterlot_hub::testkit::db().await;
     let (client, id, machine, _dir) = settings_client(&pool).await;
     let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
         .bind(id)
@@ -2109,8 +2131,9 @@ async fn stale_pending_value_is_dropped_at_start_and_the_launch_keeps_the_effect
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn start_refused_by_a_live_execution_does_not_promote_pending_settings(pool: PgPool) {
+#[tokio::test]
+async fn start_refused_by_a_live_execution_does_not_promote_pending_settings() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::delivery::dispatch::{self, DispatchOutcome};
     let (client, id, _machine, _dir) = settings_client(&pool).await;
     let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
@@ -2168,10 +2191,9 @@ async fn start_refused_by_a_live_execution_does_not_promote_pending_settings(poo
     assert_eq!(payload["settings"], json!({"model":"synthetic-large"}));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn preset_changed_on_a_stopped_session_stays_pending_and_arrives_with_the_input(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn preset_changed_on_a_stopped_session_stays_pending_and_arrives_with_the_input() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::delivery::dispatch::{self, DispatchOutcome};
     let (client, id, _machine, _dir) = settings_client(&pool).await;
     let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")

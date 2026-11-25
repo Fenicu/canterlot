@@ -16,7 +16,6 @@ use canterlot_hub::{
     testkit::{self, TestClient, TestResponse},
 };
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn repo_file(path: &str) -> String {
@@ -335,8 +334,9 @@ fn exempt(method: &str, path: &str) -> bool {
             && (path.ends_with("/answer") || path.ends_with("/revoke")))
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool: PgPool) {
+#[tokio::test]
+async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api() {
+    let pool = canterlot_hub::testkit::db().await;
     let (mut deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;

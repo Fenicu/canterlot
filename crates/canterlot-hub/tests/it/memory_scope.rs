@@ -98,8 +98,9 @@ fn classify_work_personal_neutral() {
     assert_eq!(classify("/h/work/x", &roots, None), Classification::Work);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn new_root_under_work_gets_work_and_its_project(pool: PgPool) {
+#[tokio::test]
+async fn new_root_under_work_gets_work_and_its_project() {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     let work = create(&pool, &registry, request(&seed, "/h/work/p", None))
         .await
@@ -126,8 +127,9 @@ async fn new_root_under_work_gets_work_and_its_project(pool: PgPool) {
     assert_eq!(scope(&pool, neutral).await, (None, None));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn new_root_without_capability_gets_null(pool: PgPool) {
+#[tokio::test]
+async fn new_root_without_capability_gets_null() {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, registry) = fixture(&pool, &["pilot_v1"]).await;
     let id = create(&pool, &registry, request(&seed, "/h/work/p", None))
         .await
@@ -155,8 +157,9 @@ fn hub_negotiates_memory_scope_v1() {
 
 /// Корни не присланы или список пуст (у воркера нет `~/work`): домен выдаёт правило по
 /// умолчанию `/home/<user>/work`, а не пустое значение.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unknown_or_empty_work_roots_fall_back_to_the_default_rule(pool: PgPool) {
+#[tokio::test]
+async fn unknown_or_empty_work_roots_fall_back_to_the_default_rule() {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     sqlx::query("update machines set allowed_roots='[\"/home\"]' where id=$1")
         .bind(seed.machine_id)
@@ -199,8 +202,9 @@ async fn unknown_or_empty_work_roots_fall_back_to_the_default_rule(pool: PgPool)
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_side_fork_routine_copy_inherit_parent_scope(pool: PgPool) {
+#[tokio::test]
+async fn spawn_side_fork_routine_copy_inherit_parent_scope() {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     let _lease = registry.connect_for_tests(
         seed.machine_id,
@@ -263,8 +267,9 @@ async fn own_worktree(pool: &PgPool, owner: Uuid, path: &str) {
         .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_into_a_worktree_is_classified_by_the_conversation_that_owns_it(pool: PgPool) {
+#[tokio::test]
+async fn spawn_into_a_worktree_is_classified_by_the_conversation_that_owns_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     let work = create(&pool, &registry, request(&seed, "/h/work/p", None))
         .await
@@ -300,8 +305,9 @@ async fn spawn_into_a_worktree_is_classified_by_the_conversation_that_owns_it(po
     assert_eq!(scope(&pool, child).await, some("work", "/h/work/p"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn child_with_other_domain_workdir_is_domain_mismatch(pool: PgPool) {
+#[tokio::test]
+async fn child_with_other_domain_workdir_is_domain_mismatch() {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     let work = create(&pool, &registry, request(&seed, "/h/work/p", None))
         .await
@@ -398,8 +404,9 @@ async fn conflicts(pool: &PgPool, conversation: Uuid) -> i64 {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn isolated_launch_is_classified_by_its_source_repo(pool: PgPool) {
+#[tokio::test]
+async fn isolated_launch_is_classified_by_its_source_repo() {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     // Личный на вид путь, за которым рабочий репозиторий; копия лежит в нейтральной базе.
     let linked = create(&pool, &registry, request(&seed, "/h/play/link", None))
@@ -432,8 +439,9 @@ async fn isolated_launch_is_classified_by_its_source_repo(pool: PgPool) {
     assert_eq!(scope(&pool, old).await, some("personal", "/h/play/old"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn launch_canonical_path_contradicting_domain_sets_null_and_records_conflict(pool: PgPool) {
+#[tokio::test]
+async fn launch_canonical_path_contradicting_domain_sets_null_and_records_conflict() {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     // Личный путь, который симлинк ведёт в рабочий корень.
     let linked = create(&pool, &registry, request(&seed, "/h/play/link", None))
@@ -487,8 +495,9 @@ async fn launch_canonical_path_contradicting_domain_sets_null_and_records_confli
 /// Отправка держит `for key share` на разговоре цели и потом ждёт её очередь; приём журнала
 /// держит очередь. Проверка запуска не должна ждать `key share`, иначе цикл: PostgreSQL
 /// оборвёт одну из транзакций. Здесь отправка держит строку, а запуск идёт мимо неё.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn launch_recheck_does_not_wait_for_key_share_held_by_send(pool: PgPool) {
+#[tokio::test]
+async fn launch_recheck_does_not_wait_for_key_share_held_by_send() {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     // Совпавший домен и домен, который придётся обнулить: оба хода не ждут `key share`.
     for (workdir, canonical, expected) in [

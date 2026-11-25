@@ -8,8 +8,9 @@ use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-#[sqlx::test(migrations = "./migrations")]
-async fn machine_token_verifies_and_revokes(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn machine_token_verifies_and_revokes() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let owner = Uuid::now_v7();
     sqlx::query("insert into owners (id) values ($1)")
         .bind(owner)
@@ -59,8 +60,9 @@ async fn machine_token_verifies_and_revokes(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn credentials_are_unique_and_failed_add_is_atomic(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn credentials_are_unique_and_failed_add_is_atomic() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let owner = Uuid::now_v7();
     sqlx::query("insert into owners (id) values ($1)")
         .bind(owner)
@@ -251,10 +253,9 @@ async fn cli_initializes_adds_checks_and_revokes(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn revoke_and_rotate_notify_transactionally_and_rotation_is_atomic(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn revoke_and_rotate_notify_transactionally_and_rotation_is_atomic() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     use sqlx::postgres::PgListener;
     let owner = Uuid::now_v7();
     sqlx::query("insert into owners (id) values ($1)")

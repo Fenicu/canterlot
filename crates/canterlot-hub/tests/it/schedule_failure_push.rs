@@ -117,8 +117,9 @@ async fn pending(pool: &PgPool, id: Uuid) -> i64 {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn pending_failure_pushes_of_one_schedule_coalesce(pool: PgPool) {
+#[tokio::test]
+async fn pending_failure_pushes_of_one_schedule_coalesce() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let f = Fixture::new(pool.clone()).await;
     let id = broken_schedule(&f).await;
@@ -127,8 +128,9 @@ async fn pending_failure_pushes_of_one_schedule_coalesce(pool: PgPool) {
     assert_eq!(pending(&pool, id).await, 1, "one pending push per schedule");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delayed_first_push_does_not_open_a_second_one_within_the_hour(pool: PgPool) {
+#[tokio::test]
+async fn delayed_first_push_does_not_open_a_second_one_within_the_hour() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let f = Fixture::new(pool.clone()).await;
     let id = broken_schedule(&f).await;
@@ -163,8 +165,9 @@ async fn delayed_first_push_does_not_open_a_second_one_within_the_hour(pool: PgP
     assert_eq!(seen.lock().unwrap().len(), 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn dropped_first_push_does_not_suppress_the_next_failure(pool: PgPool) {
+#[tokio::test]
+async fn dropped_first_push_does_not_suppress_the_next_failure() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let f = Fixture::new(pool.clone()).await;
     let id = broken_schedule(&f).await;
@@ -217,8 +220,9 @@ pub(crate) async fn dropping_gotify() -> (Arc<std::sync::atomic::AtomicUsize>, S
 
 /// 3: потерянный ответ не повод слать второй раз. Попытка и метка охлаждения
 /// ставятся атомарно, после неоднозначной доставки повтора нет.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn lost_response_is_not_resent(pool: PgPool) {
+#[tokio::test]
+async fn lost_response_is_not_resent() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let f = Fixture::new(pool.clone()).await;
     let id = broken_schedule(&f).await;
@@ -249,8 +253,9 @@ async fn lost_response_is_not_resent(pool: PgPool) {
 }
 
 /// 3: отказ, не доставивший пуш, возвращает ПРЕЖНЮЮ метку, а не NULL.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn definite_rejection_restores_the_previous_stamp(pool: PgPool) {
+#[tokio::test]
+async fn definite_rejection_restores_the_previous_stamp() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let f = Fixture::new(pool.clone()).await;
     let id = broken_schedule(&f).await;
@@ -280,8 +285,9 @@ async fn definite_rejection_restores_the_previous_stamp(pool: PgPool) {
 }
 
 /// 4: свежий исход, слитый в давно ждущий пуш, продлевает его срок годности.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn coalesced_fresh_failure_is_not_dropped_as_stale(pool: PgPool) {
+#[tokio::test]
+async fn coalesced_fresh_failure_is_not_dropped_as_stale() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let f = Fixture::new(pool.clone()).await;
     let id = broken_schedule(&f).await;
@@ -299,8 +305,9 @@ async fn coalesced_fresh_failure_is_not_dropped_as_stale(pool: PgPool) {
 }
 
 /// 4: сброс как устаревшего условен по версии строки, которую видел отправитель.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stale_drop_loses_to_a_coalesce_that_lands_after_inspection(pool: PgPool) {
+#[tokio::test]
+async fn stale_drop_loses_to_a_coalesce_that_lands_after_inspection() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let f = Fixture::new(pool.clone()).await;
     let id = broken_schedule(&f).await;

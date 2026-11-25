@@ -620,8 +620,9 @@ async fn live_in(f: &Fixture, conversation: Uuid, state: &str) -> Uuid {
     id
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_leaves_no_row_in_any_table_that_references_the_conversation(pool: PgPool) {
+#[tokio::test]
+async fn delete_leaves_no_row_in_any_table_that_references_the_conversation() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let groups = group(&f).await;
     let victim = seed_everything(&f, f.conversation, f.machine, groups).await;
@@ -768,8 +769,9 @@ async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str, 
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_deleted_sender_leaves_no_name_in_other_sessions(pool: PgPool) {
+#[tokio::test]
+async fn a_deleted_sender_leaves_no_name_in_other_sessions() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let (sender, receiver, other) = (
         f.conversation().await,
@@ -931,8 +933,9 @@ enum Removal {
 }
 
 /// Итог делегата остаётся у родителя без строки с названием при любом пути удаления.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_delegate_result_keeps_its_text_in_the_parent_after_any_delete(pool: PgPool) {
+#[tokio::test]
+async fn a_delegate_result_keeps_its_text_in_the_parent_after_any_delete() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for removal in [Removal::Trash, Removal::Manual, Removal::AcceptedRetention] {
         let parent = f.conversation().await;
@@ -1043,8 +1046,9 @@ async fn a_delegate_result_keeps_its_text_in_the_parent_after_any_delete(pool: P
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_frees_the_files_of_the_session_and_no_others(pool: PgPool) {
+#[tokio::test]
+async fn delete_frees_the_files_of_the_session_and_no_others() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let groups = group(&f).await;
     let victim = seed_everything(&f, f.conversation, f.machine, groups).await;
@@ -1082,8 +1086,9 @@ async fn delete_frees_the_files_of_the_session_and_no_others(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn retry_replays_and_a_new_request_gets_a_clear_not_found(pool: PgPool) {
+#[tokio::test]
+async fn retry_replays_and_a_new_request_gets_a_clear_not_found() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.conversation;
     assert_eq!(trash(&f, id, "same").await.status, 204);
@@ -1110,8 +1115,9 @@ async fn retry_replays_and_a_new_request_gets_a_clear_not_found(pool: PgPool) {
     assert_eq!(tombstones, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_key_of_another_request_is_a_conflict(pool: PgPool) {
+#[tokio::test]
+async fn a_key_of_another_request_is_a_conflict() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let other = f.conversation().await;
     assert_eq!(delete(&f, f.conversation, "shared").await.status, 204);
@@ -1126,8 +1132,9 @@ async fn a_key_of_another_request_is_a_conflict(pool: PgPool) {
     assert!(alive);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn every_live_state_refuses_and_changes_nothing(pool: PgPool) {
+#[tokio::test]
+async fn every_live_state_refuses_and_changes_nothing() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for state in ["created", "starting", "running", "stopping", "owner_lost"] {
         let id = f.conversation().await;
@@ -1141,8 +1148,9 @@ async fn every_live_state_refuses_and_changes_nothing(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_conversation_of_another_owner_is_invisible(pool: PgPool) {
+#[tokio::test]
+async fn a_conversation_of_another_owner_is_invisible() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let stranger = Uuid::now_v7();
     exec(&f.pool, "insert into owners(id) values($1)", &[stranger]).await;
@@ -1165,8 +1173,9 @@ async fn a_conversation_of_another_owner_is_invisible(pool: PgPool) {
     assert!(alive);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_reference_from_a_neighbour_hands_the_attachment_over(pool: PgPool) {
+#[tokio::test]
+async fn a_reference_from_a_neighbour_hands_the_attachment_over() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let groups = group(&f).await;
     let victim = seed_everything(&f, f.conversation, f.machine, groups).await;
@@ -1241,8 +1250,9 @@ async fn a_reference_from_a_neighbour_hands_the_attachment_over(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn other_devices_learn_through_the_event_flow(pool: PgPool) {
+#[tokio::test]
+async fn other_devices_learn_through_the_event_flow() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let groups = group(&f).await;
     let victim = seed_everything(&f, f.conversation, f.machine, groups).await;
@@ -1308,8 +1318,9 @@ async fn other_devices_learn_through_the_event_flow(pool: PgPool) {
     assert!(!scope_row);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_deleted_conversation_answers_conversation_deleted_everywhere(pool: PgPool) {
+#[tokio::test]
+async fn a_deleted_conversation_answers_conversation_deleted_everywhere() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.conversation;
     assert_eq!(delete(&f, id, "gone").await.status, 204);
@@ -1411,8 +1422,9 @@ fn delta(block: Uuid) -> record_body::Body {
     })
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn late_journal_records_are_acknowledged_and_change_nothing(pool: PgPool) {
+#[tokio::test]
+async fn late_journal_records_are_acknowledged_and_change_nothing() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let (machine, digest, seeded) = machine_with_session(&f).await;
     assert_eq!(delete(&f, seeded.conversation, "late").await.status, 204);
@@ -1464,8 +1476,9 @@ async fn late_journal_records_are_acknowledged_and_change_nothing(pool: PgPool) 
     assert_eq!(conversation_events, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_journal_first_seen_after_delete_is_acknowledged(pool: PgPool) {
+#[tokio::test]
+async fn a_journal_first_seen_after_delete_is_acknowledged() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let (machine, digest, seeded) = machine_with_session(&f).await;
     assert_eq!(delete(&f, seeded.conversation, "late").await.status, 204);
@@ -1487,8 +1500,9 @@ async fn a_journal_first_seen_after_delete_is_acknowledged(pool: PgPool) {
     assert_eq!(outcome, IngestOutcome::Committed { up_to_seq: 2 });
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_journal_of_a_truly_unknown_execution_is_still_refused(pool: PgPool) {
+#[tokio::test]
+async fn a_journal_of_a_truly_unknown_execution_is_still_refused() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let (machine, digest, seeded) = machine_with_session(&f).await;
     assert_eq!(delete(&f, seeded.conversation, "late").await.status, 204);
@@ -1508,8 +1522,9 @@ async fn a_journal_of_a_truly_unknown_execution_is_still_refused(pool: PgPool) {
     assert!(outcome.is_err(), "{outcome:?}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn late_control_facts_are_acknowledged(pool: PgPool) {
+#[tokio::test]
+async fn late_control_facts_are_acknowledged() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let (machine, digest, seeded) = machine_with_session(&f).await;
     assert_eq!(delete(&f, seeded.conversation, "late").await.status, 204);
@@ -1550,8 +1565,9 @@ async fn late_control_facts_are_acknowledged(pool: PgPool) {
     assert_eq!(command, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reconcile_is_quiet_about_a_deleted_execution(pool: PgPool) {
+#[tokio::test]
+async fn reconcile_is_quiet_about_a_deleted_execution() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let (machine, _, seeded) = machine_with_session(&f).await;
     assert_eq!(delete(&f, seeded.conversation, "late").await.status, 204);
@@ -1581,8 +1597,9 @@ async fn reconcile_is_quiet_about_a_deleted_execution(pool: PgPool) {
     assert_eq!(divergences, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_racing_a_start_never_loses_either_side(pool: PgPool) {
+#[tokio::test]
+async fn delete_racing_a_start_never_loses_either_side() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for round in 0..20 {
         let id = f.conversation().await;
@@ -1617,8 +1634,9 @@ async fn delete_racing_a_start_never_loses_either_side(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stopped_session_with_a_real_execution_can_be_deleted(pool: PgPool) {
+#[tokio::test]
+async fn a_stopped_session_with_a_real_execution_can_be_deleted() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let started = executions::start(&f.pool, f.owner, f.conversation, Uuid::now_v7())
         .await
@@ -1642,8 +1660,9 @@ async fn a_stopped_session_with_a_real_execution_can_be_deleted(pool: PgPool) {
 /// Текст правки отложенного сообщения лежит в ответе строки идемпотентности, поэтому
 /// окончательное удаление должно уносить её вместе с остальными данными разговора,
 /// а не ждать семидневной уборки планировщика.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn deleting_a_conversation_removes_scheduled_message_text_from_idempotency(pool: PgPool) {
+#[tokio::test]
+async fn deleting_a_conversation_removes_scheduled_message_text_from_idempotency() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         config::SchedulerConfig,
         scheduler::{self, NewScheduled, PatchScheduled},

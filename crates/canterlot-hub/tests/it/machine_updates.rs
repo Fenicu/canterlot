@@ -65,8 +65,9 @@ async fn count(pool: &PgPool, query: &'static str) -> i64 {
     sqlx::query_scalar(query).fetch_one(pool).await.unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn version_available_is_deduped_per_latest_version(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn version_available_is_deduped_per_latest_version() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let first = versioned("1.0.0", "1.1.0", "0.9.0", &["a"]);
     apply(&pool, &seed, &first, true).await;
@@ -90,8 +91,9 @@ async fn version_available_is_deduped_per_latest_version(pool: PgPool) -> TestRe
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn below_minimum_is_deduped_per_installed_version(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn below_minimum_is_deduped_per_installed_version() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let first = versioned("0.9.0", "1.1.0", "1.0.0", &["a"]);
     apply(&pool, &seed, &first, true).await;
@@ -117,8 +119,9 @@ async fn below_minimum_is_deduped_per_installed_version(pool: PgPool) -> TestRes
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cli_updated_fires_only_when_installed_version_changes(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn cli_updated_fires_only_when_installed_version_changes() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     apply(
         &pool,
@@ -158,8 +161,9 @@ async fn cli_updated_fires_only_when_installed_version_changes(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn first_report_is_the_model_baseline_and_changes_are_grouped(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn first_report_is_the_model_baseline_and_changes_are_grouped() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     apply(
         &pool,
@@ -191,8 +195,9 @@ async fn first_report_is_the_model_baseline_and_changes_are_grouped(pool: PgPool
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn report_without_the_capability_has_no_version_events(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn report_without_the_capability_has_no_version_events() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     apply(
         &pool,
@@ -213,8 +218,9 @@ async fn report_without_the_capability_has_no_version_events(pool: PgPool) -> Te
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn prerelease_versions_compare_by_the_worker_rules(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn prerelease_versions_compare_by_the_worker_rules() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     apply(
         &pool,
@@ -230,8 +236,9 @@ async fn prerelease_versions_compare_by_the_worker_rules(pool: PgPool) -> TestRe
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_failed_report_apply_leaves_no_events_and_no_state(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_failed_report_apply_leaves_no_events_and_no_state() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     sqlx::raw_sql("create function fail_updates() returns trigger language plpgsql as $$ begin raise exception 'updates_outage'; end $$; create trigger fail_updates before insert on machine_updates for each row execute function fail_updates();").execute(&pool).await?;
     let result = machine_info::apply_report_with_capabilities(
@@ -255,8 +262,9 @@ async fn a_failed_report_apply_leaves_no_events_and_no_state(pool: PgPool) -> Te
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn repeated_report_after_restart_does_not_duplicate_events(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn repeated_report_after_restart_does_not_duplicate_events() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let report = versioned("1.0.0", "1.1.0", "0.9.0", &["a"]);
     apply(&pool, &seed, &report, true).await;
@@ -279,8 +287,9 @@ async fn repeated_report_after_restart_does_not_duplicate_events(pool: PgPool) -
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn every_new_item_emits_a_live_machine_event(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn every_new_item_emits_a_live_machine_event() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     apply(
         &pool,
@@ -316,8 +325,9 @@ async fn every_new_item_emits_a_live_machine_event(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn retention_keeps_the_last_five_hundred_items(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn retention_keeps_the_last_five_hundred_items() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     for i in 0..520 {
         sqlx::query("insert into machine_updates(id,owner_id,machine_id,kind,harness,dedup_key,payload,created_at) values($1,$2,$3,'models_added','codex',$4,'{}',clock_timestamp() - $5 * interval '1 day')")

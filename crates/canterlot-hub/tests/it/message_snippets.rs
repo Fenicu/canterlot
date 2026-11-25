@@ -90,8 +90,9 @@ async fn snippet_events(fx: &Fx) -> Vec<Value> {
         .collect()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn crud_filters_scopes_and_rejects_stale_revision(pool: PgPool) {
+#[tokio::test]
+async fn crud_filters_scopes_and_rejects_stale_revision() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let global = fx
         .create(
@@ -182,8 +183,9 @@ async fn crud_filters_scopes_and_rejects_stale_revision(pool: PgPool) {
     assert!(!reorder.status.is_success());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reorder_delete_and_events(pool: PgPool) {
+#[tokio::test]
+async fn reorder_delete_and_events() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let first = fx
         .create(
@@ -245,8 +247,9 @@ async fn reorder_delete_and_events(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn input_limits_and_duplicates(pool: PgPool) {
+#[tokio::test]
+async fn input_limits_and_duplicates() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let long_title = "ж".repeat(81);
     let response = fx

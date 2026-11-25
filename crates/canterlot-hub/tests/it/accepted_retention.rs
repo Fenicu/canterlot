@@ -105,8 +105,9 @@ async fn exists(pool: &PgPool, id: Uuid) -> bool {
         .unwrap()
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn accepted_delegate_older_than_retention_is_deleted(pool: PgPool) {
+#[tokio::test]
+async fn accepted_delegate_older_than_retention_is_deleted() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let now = Utc::now();
     let id = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
@@ -138,8 +139,9 @@ async fn accepted_delegate_older_than_retention_is_deleted(pool: PgPool) {
     assert!(exists(&pool, seed.conversation_id).await, "родитель цел");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn accepted_delegate_younger_than_retention_is_kept(pool: PgPool) {
+#[tokio::test]
+async fn accepted_delegate_younger_than_retention_is_kept() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let now = Utc::now();
     let id = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
@@ -154,8 +156,9 @@ async fn accepted_delegate_younger_than_retention_is_kept(pool: PgPool) {
     assert!(exists(&pool, id).await);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn owners_own_archived_session_is_kept(pool: PgPool) {
+#[tokio::test]
+async fn owners_own_archived_session_is_kept() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let now = Utc::now();
     let own = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
@@ -170,8 +173,9 @@ async fn owners_own_archived_session_is_kept(pool: PgPool) {
     assert!(exists(&pool, own).await, "сессии владельца не трогаются");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn delegate_that_was_not_accepted_is_kept(pool: PgPool) {
+#[tokio::test]
+async fn delegate_that_was_not_accepted_is_kept() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let now = Utc::now();
     let id = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
@@ -191,8 +195,9 @@ async fn delegate_that_was_not_accepted_is_kept(pool: PgPool) {
     assert!(exists(&pool, id).await);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn pinned_group_pinned_and_grouped_delegates_are_kept(pool: PgPool) {
+#[tokio::test]
+async fn pinned_group_pinned_and_grouped_delegates_are_kept() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let now = Utc::now();
     let pinned = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
@@ -237,8 +242,9 @@ async fn pinned_group_pinned_and_grouped_delegates_are_kept(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn delegate_with_a_kept_unique_branch_is_kept(pool: PgPool) {
+#[tokio::test]
+async fn delegate_with_a_kept_unique_branch_is_kept() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let now = Utc::now();
     let id = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
@@ -264,8 +270,9 @@ async fn delegate_with_a_kept_unique_branch_is_kept(pool: PgPool) {
     assert!(exists(&pool, id).await);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn delegate_with_a_live_child_is_kept(pool: PgPool) {
+#[tokio::test]
+async fn delegate_with_a_live_child_is_kept() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let now = Utc::now();
     let id = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
@@ -286,8 +293,9 @@ async fn delegate_with_a_live_child_is_kept(pool: PgPool) {
     assert!(exists(&pool, id).await);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn retention_zero_disables_the_purge(pool: PgPool) {
+#[tokio::test]
+async fn retention_zero_disables_the_purge() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let now = Utc::now();
     let id = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
@@ -303,8 +311,9 @@ async fn retention_zero_disables_the_purge(pool: PgPool) {
     assert!(exists(&pool, id).await);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn purge_is_silent_for_the_closed_parent_subscription(pool: PgPool) {
+#[tokio::test]
+async fn purge_is_silent_for_the_closed_parent_subscription() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let now = Utc::now();
     let id = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
@@ -346,8 +355,9 @@ async fn purge_is_silent_for_the_closed_parent_subscription(pool: PgPool) {
     assert_eq!(notes, 0, "родителю не приходит новых вводов");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn maintenance_runs_retention_at_most_every_few_hours(pool: PgPool) {
+#[tokio::test]
+async fn maintenance_runs_retention_at_most_every_few_hours() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let now = Utc::now();
     let first = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
@@ -365,8 +375,9 @@ async fn maintenance_runs_retention_at_most_every_few_hours(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn archive_list_excludes_accepted_delegate_but_tree_and_detail_keep_it(pool: PgPool) {
+#[tokio::test]
+async fn archive_list_excludes_accepted_delegate_but_tree_and_detail_keep_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let now = Utc::now();
     let accepted = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;

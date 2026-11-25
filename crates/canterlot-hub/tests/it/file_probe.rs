@@ -328,8 +328,9 @@ impl Fx {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn file_alarm_polls_and_fires_with_size_time_and_head(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn file_alarm_polls_and_fires_with_size_time_and_head() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let armed_at = Utc::now();
@@ -380,8 +381,9 @@ async fn file_alarm_polls_and_fires_with_size_time_and_head(pool: PgPool) -> Tes
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn fresh_file_is_not_rewritten_until_its_mtime_changes(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn fresh_file_is_not_rewritten_until_its_mtime_changes() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
@@ -418,8 +420,9 @@ async fn fresh_file_is_not_rewritten_until_its_mtime_changes(pool: PgPool) -> Te
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn fresh_compares_mtime_with_the_worker_clock(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn fresh_compares_mtime_with_the_worker_clock() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     // Часы воркера далеко от часов хаба: граница взвода живёт на машине.
@@ -455,8 +458,9 @@ async fn fresh_compares_mtime_with_the_worker_clock(pool: PgPool) -> TestResult 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_file_at_the_arming_cutoff_is_not_fresh(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_file_at_the_arming_cutoff_is_not_fresh() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let cutoff = 1_500_000_000_000u64;
@@ -479,8 +483,9 @@ async fn a_file_at_the_arming_cutoff_is_not_fresh(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_unknown_mtime_is_not_fresh(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn an_unknown_mtime_is_not_fresh() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     worker.push(missing());
@@ -504,8 +509,9 @@ async fn an_unknown_mtime_is_not_fresh(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cancelling_a_file_alarm_cleans_up_its_probe_job(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn cancelling_a_file_alarm_cleans_up_its_probe_job() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
@@ -537,8 +543,9 @@ async fn cancelling_a_file_alarm_cleans_up_its_probe_job(pool: PgPool) -> TestRe
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_delayed_reply_is_not_polled_again_on_every_tick(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_delayed_reply_is_not_polled_again_on_every_tick() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
@@ -565,8 +572,9 @@ async fn a_delayed_reply_is_not_polled_again_on_every_tick(pool: PgPool) -> Test
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn min_bytes_waits_for_a_larger_file(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn min_bytes_waits_for_a_larger_file() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
@@ -603,8 +611,9 @@ async fn min_bytes_waits_for_a_larger_file(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn arming_refuses_a_denied_path(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn arming_refuses_a_denied_path() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     worker.push(denied("denied"));
@@ -651,8 +660,9 @@ fn exists_at(canonical: &str, head: &str) -> path_probe::Outcome {
     })
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn non_work_caller_cannot_arm_a_file_alarm_under_a_work_root(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn non_work_caller_cannot_arm_a_file_alarm_under_a_work_root() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     for domain in [Some("personal"), None] {
@@ -687,10 +697,9 @@ async fn non_work_caller_cannot_arm_a_file_alarm_under_a_work_root(pool: PgPool)
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn personal_caller_cannot_arm_a_file_alarm_inside_a_work_delegates_worktree(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn personal_caller_cannot_arm_a_file_alarm_inside_a_work_delegates_worktree() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     scope_caller(&f, Some("personal"), r#"["/h/work"]"#).await;
@@ -727,10 +736,9 @@ async fn personal_caller_cannot_arm_a_file_alarm_inside_a_work_delegates_worktre
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn without_reported_roots_the_default_work_rule_denies_a_personal_caller(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn without_reported_roots_the_default_work_rule_denies_a_personal_caller() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     sqlx::query("update conversations set memory_domain='personal' where id=$1")
@@ -759,8 +767,9 @@ async fn without_reported_roots_the_default_work_rule_denies_a_personal_caller(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn file_alarm_outside_work_roots_and_work_callers_still_arm(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn file_alarm_outside_work_roots_and_work_callers_still_arm() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     // Личный вызывающий вне рабочих корней — как раньше.
@@ -789,8 +798,9 @@ async fn file_alarm_outside_work_roots_and_work_callers_still_arm(pool: PgPool) 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_armed_alarm_on_a_file_that_became_work_delivers_nothing(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn an_armed_alarm_on_a_file_that_became_work_delivers_nothing() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     scope_caller(&f, Some("personal"), r#"["/h/work"]"#).await;
@@ -825,8 +835,9 @@ async fn an_armed_alarm_on_a_file_that_became_work_delivers_nothing(pool: PgPool
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn arming_needs_path_probe_v1_and_sends_nothing_without_it(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn arming_needs_path_probe_v1_and_sends_nothing_without_it() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1"]).await;
     let error = f
@@ -839,8 +850,9 @@ async fn arming_needs_path_probe_v1_and_sends_nothing_without_it(pool: PgPool) -
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_offline_machine_retries_and_the_deadline_names_it(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn an_offline_machine_retries_and_the_deadline_names_it() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
@@ -885,8 +897,9 @@ async fn an_offline_machine_retries_and_the_deadline_names_it(pool: PgPool) -> T
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_hung_probe_does_not_block_another_scheduler_job(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_hung_probe_does_not_block_another_scheduler_job() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
@@ -939,8 +952,9 @@ async fn a_hung_probe_does_not_block_another_scheduler_job(pool: PgPool) -> Test
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_file_alarm_is_picked_up_by_a_new_scheduler(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_file_alarm_is_picked_up_by_a_new_scheduler() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
@@ -962,8 +976,9 @@ async fn a_file_alarm_is_picked_up_by_a_new_scheduler(pool: PgPool) -> TestResul
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_file_alarm_coalesces_with_a_time_alarm(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_file_alarm_coalesces_with_a_time_alarm() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
@@ -1179,8 +1194,9 @@ async fn nudge_inputs(pool: &PgPool, child: Uuid) -> Vec<String> {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn report_growth_counts_as_progress_and_prevents_exhaustion(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn report_growth_counts_as_progress_and_prevents_exhaustion() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
@@ -1230,8 +1246,9 @@ async fn report_growth_counts_as_progress_and_prevents_exhaustion(pool: PgPool) 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_unchanged_report_is_not_progress(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn an_unchanged_report_is_not_progress() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
@@ -1281,8 +1298,9 @@ async fn an_unchanged_report_is_not_progress(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_missing_report_is_named_in_the_text_and_signals(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_missing_report_is_named_in_the_text_and_signals() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
@@ -1327,8 +1345,9 @@ async fn a_missing_report_is_named_in_the_text_and_signals(pool: PgPool) -> Test
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_failed_probe_is_recorded_and_does_not_block_the_nudge(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_failed_probe_is_recorded_and_does_not_block_the_nudge() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let now = Utc::now();
     prime_idle(&f.pool, &f, now).await;
@@ -1373,8 +1392,9 @@ async fn a_failed_probe_is_recorded_and_does_not_block_the_nudge(pool: PgPool) -
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nudge_set_resolves_the_report_path_and_refuses_a_denied_one(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn nudge_set_resolves_the_report_path_and_refuses_a_denied_one() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     worker.push(missing());
@@ -1409,8 +1429,9 @@ async fn nudge_set_resolves_the_report_path_and_refuses_a_denied_one(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nudge_set_needs_path_probe_v1_for_a_report(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn nudge_set_needs_path_probe_v1_for_a_report() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let _worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1"]).await;
     let error = session_tools::call(

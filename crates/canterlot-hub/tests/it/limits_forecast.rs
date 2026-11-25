@@ -8,7 +8,6 @@ use canterlot_hub::{
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::Value;
-use sqlx::PgPool;
 use support::Fixture;
 use uuid::Uuid;
 
@@ -65,8 +64,9 @@ async fn seed_window(
         .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_fresh_window_has_no_forecast(pool: PgPool) {
+#[tokio::test]
+async fn a_fresh_window_has_no_forecast() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let now = Utc::now();
     // Сброс через полное окно: начало окна совпадает с показанием, прошло 0 часов.
@@ -86,8 +86,9 @@ async fn a_fresh_window_has_no_forecast(pool: PgPool) {
     assert!(weekly.get("forecast").is_none(), "{weekly}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_forecast_lasts_until_the_reset(pool: PgPool) {
+#[tokio::test]
+async fn the_forecast_lasts_until_the_reset() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let now = Utc::now();
     let reset = now + TimeDelta::days(2);
@@ -122,8 +123,9 @@ async fn the_forecast_lasts_until_the_reset(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_forecast_runs_out_before_the_reset(pool: PgPool) {
+#[tokio::test]
+async fn the_forecast_runs_out_before_the_reset() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let now = Utc::now();
     let reset = now + TimeDelta::days(6);
@@ -150,8 +152,9 @@ async fn the_forecast_runs_out_before_the_reset(pool: PgPool) {
     assert!(forecast["exhausts_at"].is_string(), "{forecast}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_new_observation_emits_the_recomputed_forecast(pool: PgPool) {
+#[tokio::test]
+async fn a_new_observation_emits_the_recomputed_forecast() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let now = Utc::now();
     let reset = now + TimeDelta::days(6);

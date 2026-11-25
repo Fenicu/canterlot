@@ -23,8 +23,9 @@ fn body(f: &Fixture, cron: &str) -> Value {
     })
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn create_list_get_update_and_delete_a_schedule(pool: sqlx::PgPool) {
+#[tokio::test]
+async fn create_list_get_update_and_delete_a_schedule() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let (code, created) = send(
         &f,
@@ -98,8 +99,9 @@ async fn create_list_get_update_and_delete_a_schedule(pool: sqlx::PgPool) {
     assert_eq!(code, 404);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn pause_resume_and_preview(pool: sqlx::PgPool) {
+#[tokio::test]
+async fn pause_resume_and_preview() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let (code, created) = send(
         &f,
@@ -151,8 +153,9 @@ async fn pause_resume_and_preview(pool: sqlx::PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn invalid_cron_and_too_frequent_are_refused(pool: sqlx::PgPool) {
+#[tokio::test]
+async fn invalid_cron_and_too_frequent_are_refused() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let (code, _) = send(
         &f,
@@ -174,8 +177,9 @@ async fn invalid_cron_and_too_frequent_are_refused(pool: sqlx::PgPool) {
     assert_eq!(code, 422);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn defaults_follow_the_owner_push_timezone(pool: sqlx::PgPool) {
+#[tokio::test]
+async fn defaults_follow_the_owner_push_timezone() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let (code, fallback) = send(
         &f,

@@ -116,8 +116,9 @@ fn assert_schema(response: &TestResponse, status: &str) {
     assert!(errors.is_empty(), "{errors:?}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn post_decision_commits_permission_and_returns_200(pool: PgPool) {
+#[tokio::test]
+async fn post_decision_commits_permission_and_returns_200() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.request("permission", json!({"tool":"Bash"})).await;
     let response = f.post(id, "permission", permission()).await;
@@ -160,8 +161,9 @@ async fn post_decision_commits_permission_and_returns_200(pool: PgPool) {
     assert_schema(&response, "200");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_approval_decision_goes_to_a_job_not_to_the_machine(pool: PgPool) {
+#[tokio::test]
+async fn spawn_approval_decision_goes_to_a_job_not_to_the_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let request = f
         .request("spawn_approval", json!({"harness":"codex"}))
@@ -190,8 +192,9 @@ async fn spawn_approval_decision_goes_to_a_job_not_to_the_machine(pool: PgPool) 
     assert_eq!(jobs, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn post_decision_commits_question_answers_and_validates_options(pool: PgPool) {
+#[tokio::test]
+async fn post_decision_commits_question_answers_and_validates_options() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.request("question", contract()).await;
     for (i, answer) in [
@@ -220,8 +223,9 @@ async fn post_decision_commits_question_answers_and_validates_options(pool: PgPo
     assert_schema(&response, "200");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn post_decision_validates_multi_question_up_to_four_questions(pool: PgPool) {
+#[tokio::test]
+async fn post_decision_validates_multi_question_up_to_four_questions() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let payload = json!({"questions":[
         {"id":"q1", "options":[{"label":"one"}], "multiSelect":false},
@@ -278,8 +282,9 @@ async fn post_decision_validates_multi_question_up_to_four_questions(pool: PgPoo
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn decision_conflict_returns_409_with_winning_decision_payload(pool: PgPool) {
+#[tokio::test]
+async fn decision_conflict_returns_409_with_winning_decision_payload() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.request("permission", json!({})).await;
     let deny = json!({"kind":"permission", "behavior":"deny", "message":"Отказ"});
@@ -307,8 +312,9 @@ async fn decision_conflict_returns_409_with_winning_decision_payload(pool: PgPoo
     assert_schema(&loser, "409");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn identical_key_post_decision_returns_200_replay(pool: PgPool) {
+#[tokio::test]
+async fn identical_key_post_decision_returns_200_replay() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.request("permission", json!({})).await;
     let first = f.post(id, "same", permission()).await;
@@ -344,8 +350,9 @@ async fn identical_key_post_decision_returns_200_replay(pool: PgPool) {
     assert_eq!(events_count, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn post_decision_on_closed_request_returns_409_with_terminal_state(pool: PgPool) {
+#[tokio::test]
+async fn post_decision_on_closed_request_returns_409_with_terminal_state() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.request("permission", json!({})).await;
     sqlx::query("update requests set state='closed_without_decision' where id=$1")
@@ -381,8 +388,9 @@ async fn post_decision_on_closed_request_returns_409_with_terminal_state(pool: P
     assert_eq!(f.counts().await, (0, 0));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn post_decision_requires_idempotency_key_and_client_header(pool: PgPool) {
+#[tokio::test]
+async fn post_decision_requires_idempotency_key_and_client_header() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.request("permission", json!({})).await;
     assert_error(
@@ -414,8 +422,9 @@ async fn post_decision_requires_idempotency_key_and_client_header(pool: PgPool) 
     assert_eq!(f.counts().await, (0, 0));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn post_decision_unknown_or_foreign_request_is_not_found(pool: PgPool) {
+#[tokio::test]
+async fn post_decision_unknown_or_foreign_request_is_not_found() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let response = f.post(Uuid::now_v7(), "unknown", permission()).await;
     assert_error(&response, 404, "not_found");
@@ -470,8 +479,9 @@ fn openapi_document_drift_test_matches_requests_api() {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn concurrent_same_key_decisions_return_the_same_winner_once(pool: PgPool) {
+#[tokio::test]
+async fn concurrent_same_key_decisions_return_the_same_winner_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.request("permission", json!({})).await;
     let (a, b) = tokio::join!(
@@ -492,8 +502,9 @@ async fn concurrent_same_key_decisions_return_the_same_winner_once(pool: PgPool)
     assert_eq!(events_count, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn post_decision_refuses_nul_in_text_and_keeps_the_request_open(pool: PgPool) {
+#[tokio::test]
+async fn post_decision_refuses_nul_in_text_and_keeps_the_request_open() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let permission_request = f.request("permission", json!({"tool":"Bash"})).await;
     let response = f
@@ -540,8 +551,9 @@ async fn post_decision_refuses_nul_in_text_and_keeps_the_request_open(pool: PgPo
     assert_eq!(accepted.status, 200);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn decision_takes_the_queue_lock_before_the_request_row(pool: PgPool) {
+#[tokio::test]
+async fn decision_takes_the_queue_lock_before_the_request_row() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let request = f.request("permission", json!({"tool":"Bash"})).await;
     // Пакет SJ держит очередь с первой записи и позже берёт счётчик событий и строку запроса.
@@ -590,8 +602,9 @@ async fn decision_takes_the_queue_lock_before_the_request_row(pool: PgPool) {
     assert_eq!(decision.await.unwrap().status, 200);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn post_decision_free_text_requires_an_explicit_true_contract_flag(pool: PgPool) {
+#[tokio::test]
+async fn post_decision_free_text_requires_an_explicit_true_contract_flag() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for flag in ["allow_custom", "isOther", "is_other"] {
         for value in [json!(true), json!(false), json!("true"), Value::Null] {
@@ -621,8 +634,9 @@ async fn post_decision_free_text_requires_an_explicit_true_contract_flag(pool: P
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn decision_record_failure_rolls_back_the_winner_command_and_key(pool: PgPool) {
+#[tokio::test]
+async fn decision_record_failure_rolls_back_the_winner_command_and_key() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.request("permission", json!({})).await;
     sqlx::raw_sql("create function reject_decision_key() returns trigger language plpgsql as $$ begin if new.key='fail_record' then raise exception 'test record failure'; end if; return new; end $$;
@@ -638,8 +652,9 @@ async fn decision_record_failure_rolls_back_the_winner_command_and_key(pool: PgP
     assert_eq!(f.counts().await, (1, 1));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn post_decision_rejects_changed_payload_after_idempotency_retention(pool: PgPool) {
+#[tokio::test]
+async fn post_decision_rejects_changed_payload_after_idempotency_retention() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.request("permission", json!({})).await;
     let first = f.post(id, "retained_request", permission()).await;
@@ -662,8 +677,9 @@ async fn post_decision_rejects_changed_payload_after_idempotency_retention(pool:
     assert_eq!(f.counts().await, (1, 1));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn post_decision_for_missing_request_rolls_back_synchronously(pool: PgPool) {
+#[tokio::test]
+async fn post_decision_for_missing_request_rolls_back_synchronously() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let mut probe = f.pool.acquire().await.unwrap();
     for _ in 0..10 {
@@ -720,8 +736,9 @@ fn captured_logs() -> &'static LogBuffer {
     })
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn secret_answers_reach_only_the_delivery_command(pool: PgPool) {
+#[tokio::test]
+async fn secret_answers_reach_only_the_delivery_command() {
+    let pool = canterlot_hub::testkit::db().await;
     const SECRET: &str = "hunter2-very-secret";
     let logs = captured_logs();
     let f = Fixture::new(pool).await;

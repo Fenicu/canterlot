@@ -45,8 +45,9 @@ async fn start_command(pool: &PgPool, seed: &Seed) -> (executions::StartedExecut
     (execution, payload)
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_toggle_round_trip(pool: PgPool) {
+#[tokio::test]
+async fn owner_toggle_round_trip() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let mut conn = pool.acquire().await.unwrap();
     assert_eq!(
@@ -90,8 +91,9 @@ async fn owner_toggle_round_trip(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn start_execution_carries_flag_only_for_capable_workers(pool: PgPool) {
+#[tokio::test]
+async fn start_execution_carries_flag_only_for_capable_workers() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = claude_seed(&pool).await;
     put(&pool, seed.owner_id, ClaudeAutoMemory::Off).await;
     let (execution, payload) = start_command(&pool, &seed).await;
@@ -129,15 +131,17 @@ async fn start_execution_carries_flag_only_for_capable_workers(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn default_setting_sends_no_flag(pool: PgPool) {
+#[tokio::test]
+async fn default_setting_sends_no_flag() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = claude_seed(&pool).await;
     let (_, payload) = start_command(&pool, &seed).await;
     assert!(payload.get("disable_claude_auto_memory").is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn non_claude_harness_never_gets_the_flag(pool: PgPool) {
+#[tokio::test]
+async fn non_claude_harness_never_gets_the_flag() {
+    let pool = canterlot_hub::testkit::db().await;
     // Синтетический харнес сида — не Claude Code.
     let seed = testkit::seed(&pool).await;
     put(&pool, seed.owner_id, ClaudeAutoMemory::Off).await;

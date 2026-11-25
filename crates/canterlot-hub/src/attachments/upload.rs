@@ -167,10 +167,10 @@ mod tests {
 
     /// Готовое вложение нельзя отметить активным: `touch` возвращает `NotUploadable`
     /// и синхронно откатывает транзакцию, не оставляя блокировки строки.
-    #[sqlx::test(migrations = "./migrations")]
-    async fn touch_not_uploadable_rolls_back_row_lock(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[tokio::test]
+    async fn touch_not_uploadable_rolls_back_row_lock()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pool = crate::testkit::db().await;
         let seed = crate::testkit::seed(&pool).await;
         let id = uuid::Uuid::now_v7();
         sqlx::query(

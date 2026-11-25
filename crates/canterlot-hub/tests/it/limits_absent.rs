@@ -86,10 +86,9 @@ async fn changes(pool: &PgPool) -> i64 {
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_future_observation_is_clamped_and_does_not_block_a_newer_one(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_future_observation_is_clamped_and_does_not_block_a_newer_one() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe(
@@ -115,8 +114,9 @@ async fn a_future_observation_is_clamped_and_does_not_block_a_newer_one(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_future_absence_is_clamped_and_does_not_hide_a_later_window(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_future_absence_is_clamped_and_does_not_hide_a_later_window() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     absent(&pool, &s, Utc::now() + Duration::hours(1)).await;
@@ -127,8 +127,9 @@ async fn a_future_absence_is_clamped_and_does_not_hide_a_later_window(pool: PgPo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stored_future_observation_does_not_block_a_new_reading(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_stored_future_observation_does_not_block_a_new_reading() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let future = at(24 * 60);
@@ -152,8 +153,9 @@ async fn a_stored_future_observation_does_not_block_a_new_reading(pool: PgPool) 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stored_future_absence_does_not_block_a_new_reading(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_stored_future_absence_does_not_block_a_new_reading() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let future = at(24 * 60);
@@ -180,8 +182,9 @@ async fn a_stored_future_absence_does_not_block_a_new_reading(pool: PgPool) -> T
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stored_timestamp_inside_the_future_tolerance_still_wins(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_stored_timestamp_inside_the_future_tolerance_still_wins() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let ahead = at(1);
@@ -203,8 +206,9 @@ async fn a_stored_timestamp_inside_the_future_tolerance_still_wins(pool: PgPool)
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn absence_hides_the_window_keeps_history_and_tells_clients(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn absence_hides_the_window_keeps_history_and_tells_clients() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe(&pool, &s, Window::FiveHour, 440, at(-30)).await;
@@ -233,10 +237,9 @@ async fn absence_hides_the_window_keeps_history_and_tells_clients(pool: PgPool) 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_late_reading_from_before_the_absence_does_not_bring_the_window_back(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_late_reading_from_before_the_absence_does_not_bring_the_window_back() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe(&pool, &s, Window::Weekly, 530, at(-30)).await;
@@ -254,8 +257,9 @@ async fn a_late_reading_from_before_the_absence_does_not_bring_the_window_back(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn absence_of_a_window_that_was_never_seen_is_still_recorded(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn absence_of_a_window_that_was_never_seen_is_still_recorded() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     assert!(absent(&pool, &s, at(-1)).await);
     let state = claude(&pool).await;
@@ -263,8 +267,9 @@ async fn absence_of_a_window_that_was_never_seen_is_still_recorded(pool: PgPool)
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn monthly_readings_are_stored_and_emitted(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn monthly_readings_are_stored_and_emitted() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe(&pool, &s, Window::Monthly, 93, at(-30)).await;
@@ -282,8 +287,9 @@ async fn monthly_readings_are_stored_and_emitted(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn only_the_five_hour_window_can_be_absent(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn only_the_five_hour_window_can_be_absent() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let mut tx = pool.begin().await?;
     let error = limits::record_absence_in_tx(
@@ -300,8 +306,9 @@ async fn only_the_five_hour_window_can_be_absent(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn opencode_readings_store_and_its_absence_leaves_claude_alone(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn opencode_readings_store_and_its_absence_leaves_claude_alone() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     async fn observe_as(
         pool: &PgPool,

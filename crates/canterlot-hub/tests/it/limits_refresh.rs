@@ -6,7 +6,6 @@ use axum::http::Method;
 use canterlot_hub::testkit;
 use canterlot_proto::worker::v1::control_down;
 use serde_json::Value;
-use sqlx::PgPool;
 use support::Fixture;
 
 async fn post(f: &Fixture) -> (u16, Value) {
@@ -17,8 +16,9 @@ async fn post(f: &Fixture) -> (u16, Value) {
     (r.status.as_u16(), r.json())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn refresh_asks_the_worker_once_and_throttles_the_repeat(pool: PgPool) {
+#[tokio::test]
+async fn refresh_asks_the_worker_once_and_throttles_the_repeat() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     sqlx::query("update machines set availability='available' where id=$1")
         .bind(f.seed.machine_id)
@@ -44,8 +44,9 @@ async fn refresh_asks_the_worker_once_and_throttles_the_repeat(pool: PgPool) {
     assert!(session.commands.try_recv().is_err(), "no second request");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn refresh_without_an_available_worker_is_machine_unavailable(pool: PgPool) {
+#[tokio::test]
+async fn refresh_without_an_available_worker_is_machine_unavailable() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let (status, body) = post(&f).await;
     assert_eq!(status, 409, "{body}");

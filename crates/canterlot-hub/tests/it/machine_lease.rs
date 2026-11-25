@@ -127,8 +127,9 @@ async fn available(pool: &PgPool, machine: Uuid) {
         .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn latest_state_replaces_the_previous_and_reaches_clients(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn latest_state_replaces_the_previous_and_reaches_clients() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let execution = running(&pool, s.owner_id, s.conversation_id).await;
     let now = Utc::now();
@@ -203,8 +204,9 @@ async fn latest_state_replaces_the_previous_and_reaches_clients(pool: PgPool) ->
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn malformed_state_is_ignored_without_touching_the_stored_one(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn malformed_state_is_ignored_without_touching_the_stored_one() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
     apply(
@@ -228,8 +230,9 @@ async fn malformed_state_is_ignored_without_touching_the_stored_one(pool: PgPool
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machine_snapshot_carries_the_queue(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn machine_snapshot_carries_the_queue() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let snap = snapshot::machines(&pool, s.owner_id).await?;
     assert!(serde_json::to_value(&snap.data.items[0])?["lease"].is_null());
@@ -247,8 +250,9 @@ async fn machine_snapshot_carries_the_queue(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unavailable_machine_drops_the_queue(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn unavailable_machine_drops_the_queue() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     available(&pool, s.machine_id).await;
     let now = Utc::now();
@@ -326,8 +330,9 @@ fn tool_context(pool: &PgPool) -> ToolContext {
 /// Сроки, которые дают `stalled` молчащему инструменту без потомков: два часа
 /// без событий, живой CLI без CPU. Пока исполнение стоит в очереди, оно работает,
 /// подписчик не слышит о зависании, а инструменты чтения показывают место.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn waiting_for_the_queue_is_never_stalled(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn waiting_for_the_queue_is_never_stalled() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     available(&pool, s.machine_id).await;
     let target = testkit::seed_conversation(&pool, s.owner_id, s.machine_id).await;
@@ -461,10 +466,9 @@ async fn long_hold_jobs(pool: &PgPool) -> Vec<(Uuid, Value)> {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn long_hold_warns_holder_subscribers_once_and_only_from_fresh_state(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn long_hold_warns_holder_subscribers_once_and_only_from_fresh_state() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let holder = testkit::seed_conversation(&pool, s.owner_id, s.machine_id).await;
     sqlx::query("update conversations set title='Баннер связи' where id=$1")
@@ -594,10 +598,9 @@ async fn long_hold_warns_holder_subscribers_once_and_only_from_fresh_state(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn lease_state_travels_the_control_stream_only_with_the_capability(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn lease_state_travels_the_control_stream_only_with_the_capability() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = wire_seed(&pool).await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     let c = connect_with(

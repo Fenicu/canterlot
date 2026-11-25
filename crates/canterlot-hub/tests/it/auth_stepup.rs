@@ -5,7 +5,6 @@ use canterlot_hub::{
     testkit::{Method, TEST_SESSION_ID, TestClient, TestResponse},
 };
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::support::auth::{AuthHub, PASSWORD, error_code, session_token};
@@ -50,8 +49,9 @@ async fn guarded(hub: &AuthHub, client: &TestClient) -> Vec<(&'static str, TestR
     ]
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_stepup_qr_born_session_is_never_fresh(pool: PgPool) {
+#[tokio::test]
+async fn auth_stepup_qr_born_session_is_never_fresh() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let (qr, token) = hub.session(SignInMethod::Qr, Some(TEST_SESSION_ID)).await;
     let client = hub.with_session(&token, None);
@@ -96,8 +96,9 @@ async fn auth_stepup_qr_born_session_is_never_fresh(pool: PgPool) {
     assert_eq!(logout.status, 200);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_stepup_stale_session_reauths_with_the_password(pool: PgPool) {
+#[tokio::test]
+async fn auth_stepup_stale_session_reauths_with_the_password() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let (qr, token) = hub.session(SignInMethod::Qr, Some(TEST_SESSION_ID)).await;
@@ -165,8 +166,9 @@ async fn auth_stepup_stale_session_reauths_with_the_password(pool: PgPool) {
     assert_eq!(error_code(&reauth(PASSWORD).await), "wrong_password");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_stepup_each_guarded_action_works_when_fresh(pool: PgPool) {
+#[tokio::test]
+async fn auth_stepup_each_guarded_action_works_when_fresh() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     hub.make_stale(TEST_SESSION_ID).await;
     for (name, response) in guarded(&hub, &hub.owner()).await {

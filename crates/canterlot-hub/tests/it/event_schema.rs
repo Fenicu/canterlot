@@ -8,7 +8,6 @@ use canterlot_hub::{
 };
 use canterlot_proto::worker::v1::{record_body::Body, *};
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use std::collections::BTreeSet;
 use support::*;
 use uuid::Uuid;
@@ -206,8 +205,9 @@ async fn attach_and_submit(f: &Fixture) {
     assert_eq!(input.status.as_u16(), 201);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
+#[tokio::test]
+async fn emitted_event_payloads_match_published_schema() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let refused = canterlot_proto::worker::v1::JournalRecords {
         journal_id: Uuid::now_v7().to_string(),

@@ -80,8 +80,9 @@ async fn observe(
     tx.commit().await.unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn fable_window_is_listed_in_the_api_history_and_report(pool: PgPool) {
+#[tokio::test]
+async fn fable_window_is_listed_in_the_api_history_and_report() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let now = Utc::now();
     let reset = now + TimeDelta::days(4);
@@ -139,8 +140,9 @@ async fn fable_window_is_listed_in_the_api_history_and_report(pool: PgPool) {
 const FABLE_FRAME: &str =
     include_str!("../../../canterlot-proto/tests/fixtures/fable_rate_limit.json");
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_verbatim_fable_frame_reaches_the_hub_limits(pool: PgPool) {
+#[tokio::test]
+async fn the_verbatim_fable_frame_reaches_the_hub_limits() {
+    let pool = canterlot_hub::testkit::db().await;
     let frame: Value = serde_json::from_str(FABLE_FRAME).unwrap();
     let row = &frame["unifiedWindows"]["seven_day_overage_included"];
     let used = (row["utilization"].as_f64().unwrap() * 1000.0).round() as u32;
@@ -214,8 +216,9 @@ async fn the_verbatim_fable_frame_reaches_the_hub_limits(pool: PgPool) {
     hub.join.await.unwrap().unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_opus_observation_without_fable_keeps_the_known_value(pool: PgPool) {
+#[tokio::test]
+async fn an_opus_observation_without_fable_keeps_the_known_value() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let now = Utc::now();
     let reset = now + TimeDelta::days(4);
@@ -255,8 +258,9 @@ async fn an_opus_observation_without_fable_keeps_the_known_value(pool: PgPool) {
     assert_eq!(view[0]["weekly_fable"]["used_pct"], 5.0, "{view}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_fable_limit_pauses_only_that_session_and_no_provider_reserve(pool: PgPool) {
+#[tokio::test]
+async fn a_fable_limit_pauses_only_that_session_and_no_provider_reserve() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let execution = f.execution().await;
     let reset = Utc::now() + TimeDelta::days(3);
@@ -301,8 +305,9 @@ async fn a_fable_limit_pauses_only_that_session_and_no_provider_reserve(pool: Pg
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stored_future_fable_timestamp_does_not_block_a_new_reading(pool: PgPool) {
+#[tokio::test]
+async fn a_stored_future_fable_timestamp_does_not_block_a_new_reading() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let future = Utc::now() + TimeDelta::days(1);
@@ -338,8 +343,9 @@ async fn a_stored_future_fable_timestamp_does_not_block_a_new_reading(pool: PgPo
     assert_eq!(fable.used_permille, 50);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_unknown_window_value_is_rejected_not_stored(pool: PgPool) {
+#[tokio::test]
+async fn an_unknown_window_value_is_rejected_not_stored() {
+    let pool = canterlot_hub::testkit::db().await;
     let _seed = testkit::seed(&pool).await;
     assert!(matches!(
         Window::from_proto(999),

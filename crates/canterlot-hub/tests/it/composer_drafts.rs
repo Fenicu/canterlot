@@ -138,8 +138,9 @@ fn system_input(owner: Uuid, conversation: Uuid, key: &str, text: &str) -> Submi
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn put_get_round_trip_keeps_revision_and_updated_at(pool: PgPool) {
+#[tokio::test]
+async fn put_get_round_trip_keeps_revision_and_updated_at() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let empty = f.get(f.conversation).await;
     assert_eq!(empty["text"], "");
@@ -181,8 +182,9 @@ async fn put_get_round_trip_keeps_revision_and_updated_at(pool: PgPool) {
     assert!(second["revision"].as_i64().unwrap() > first_revision);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn empty_text_deletes_the_row_and_emits_a_clear(pool: PgPool) {
+#[tokio::test]
+async fn empty_text_deletes_the_row_and_emits_a_clear() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let saved = f
         .put(
@@ -215,8 +217,9 @@ async fn empty_text_deletes_the_row_and_emits_a_clear(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn text_is_capped_at_64_kib(pool: PgPool) {
+#[tokio::test]
+async fn text_is_capped_at_64_kib() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let at_limit = "x".repeat(65_536);
     f.put(
@@ -238,8 +241,9 @@ async fn text_is_capped_at_64_kib(pool: PgPool) {
     assert_eq!(f.stored_text().await.unwrap().len(), 65_536);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_foreign_conversation_is_not_found(pool: PgPool) {
+#[tokio::test]
+async fn a_foreign_conversation_is_not_found() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let other_owner = Uuid::now_v7();
     let foreign = Uuid::now_v7();
@@ -284,8 +288,9 @@ async fn a_foreign_conversation_is_not_found(pool: PgPool) {
     assert_eq!(rows, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn snapshot_and_event_carry_the_draft(pool: PgPool) {
+#[tokio::test]
+async fn snapshot_and_event_carry_the_draft() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let saved = f
         .put(
@@ -315,8 +320,9 @@ async fn snapshot_and_event_carry_the_draft(pool: PgPool) {
     assert_eq!(events[0]["device_id"], "phone");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn sending_an_input_clears_the_draft_in_the_same_transaction(pool: PgPool) {
+#[tokio::test]
+async fn sending_an_input_clears_the_draft_in_the_same_transaction() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.put(
         f.conversation,
@@ -350,8 +356,9 @@ async fn sending_an_input_clears_the_draft_in_the_same_transaction(pool: PgPool)
     assert_eq!(last["device_id"], "phone");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_system_input_keeps_the_draft(pool: PgPool) {
+#[tokio::test]
+async fn a_system_input_keeps_the_draft() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let saved = f
         .put(
@@ -381,8 +388,9 @@ async fn a_system_input_keeps_the_draft(pool: PgPool) {
     assert_eq!(f.draft_events().await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_forwarded_input_keeps_the_draft(pool: PgPool) {
+#[tokio::test]
+async fn a_forwarded_input_keeps_the_draft() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     sqlx::query("update machines set capabilities='{pilot_v1}', limits_ok=true where id=$1")
         .bind(f.machine)
@@ -422,8 +430,9 @@ async fn a_forwarded_input_keeps_the_draft(pool: PgPool) {
     assert_eq!(f.draft_events().await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_scheduled_message_firing_keeps_the_draft(pool: PgPool) {
+#[tokio::test]
+async fn a_scheduled_message_firing_keeps_the_draft() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let saved = f
         .put(
@@ -459,8 +468,9 @@ async fn a_scheduled_message_firing_keeps_the_draft(pool: PgPool) {
     assert_eq!(f.draft_events().await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_refused_input_keeps_the_draft(pool: PgPool) {
+#[tokio::test]
+async fn a_refused_input_keeps_the_draft() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.put(
         f.conversation,
@@ -488,8 +498,9 @@ async fn a_refused_input_keeps_the_draft(pool: PgPool) {
     assert!(f.draft_events().await.len() == 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn scheduling_from_the_composer_clears_the_draft(pool: PgPool) {
+#[tokio::test]
+async fn scheduling_from_the_composer_clears_the_draft() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.put(
         f.conversation,
@@ -524,8 +535,9 @@ async fn scheduling_from_the_composer_clears_the_draft(pool: PgPool) {
     assert_eq!(events.last().unwrap()["device_id"], "phone");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn deleting_the_conversation_cascades_to_its_draft(pool: PgPool) {
+#[tokio::test]
+async fn deleting_the_conversation_cascades_to_its_draft() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.put(
         f.conversation,
@@ -550,8 +562,9 @@ async fn deleting_the_conversation_cascades_to_its_draft(pool: PgPool) {
     assert_eq!(rows, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_id_is_stored_with_the_draft(pool: PgPool) {
+#[tokio::test]
+async fn owner_id_is_stored_with_the_draft() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.put(
         f.conversation,
@@ -568,8 +581,9 @@ async fn owner_id_is_stored_with_the_draft(pool: PgPool) {
     assert_eq!(owner, f.owner);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn attachment_list_round_trips_and_empty_draft_deletes_the_row(pool: PgPool) {
+#[tokio::test]
+async fn attachment_list_round_trips_and_empty_draft_deletes_the_row() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let first = f.attachment(f.conversation, "ready").await;
     let second = f.attachment(f.conversation, "ready").await;
@@ -618,8 +632,9 @@ async fn attachment_list_round_trips_and_empty_draft_deletes_the_row(pool: PgPoo
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn foreign_or_not_ready_attachments_are_rejected(pool: PgPool) {
+#[tokio::test]
+async fn foreign_or_not_ready_attachments_are_rejected() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let other = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
     let foreign = f.attachment(other, "ready").await;
@@ -640,8 +655,9 @@ async fn foreign_or_not_ready_attachments_are_rejected(pool: PgPool) {
     assert!(f.draft_events().await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn sending_with_attachments_consumes_them_and_clears_the_draft(pool: PgPool) {
+#[tokio::test]
+async fn sending_with_attachments_consumes_them_and_clears_the_draft() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     sqlx::query("update machines set capabilities='{pilot_v1}', limits_ok=true where id=$1")
         .bind(f.machine)
@@ -695,8 +711,9 @@ async fn sending_with_attachments_consumes_them_and_clears_the_draft(pool: PgPoo
     assert_eq!(last["attachment_ids"], json!([]));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn replaying_a_sent_input_does_not_clear_a_new_draft(pool: PgPool) {
+#[tokio::test]
+async fn replaying_a_sent_input_does_not_clear_a_new_draft() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let body = json!({
         "content":[{"type":"text","text":"ушло"}],
@@ -736,8 +753,9 @@ async fn replaying_a_sent_input_does_not_clear_a_new_draft(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stale_base_revision_conflicts_and_carries_the_current_draft(pool: PgPool) {
+#[tokio::test]
+async fn a_stale_base_revision_conflicts_and_carries_the_current_draft() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let saved = f
         .put(
@@ -788,8 +806,9 @@ async fn a_stale_base_revision_conflicts_and_carries_the_current_draft(pool: PgP
     assert_eq!(f.draft_events().await.len(), 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_empty_put_clears_the_draft_even_without_a_base(pool: PgPool) {
+#[tokio::test]
+async fn an_empty_put_clears_the_draft_even_without_a_base() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.put(
         f.conversation,

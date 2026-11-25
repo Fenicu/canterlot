@@ -394,8 +394,9 @@ async fn stop(hub: TestHub) {
         .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn queued_input_reaches_live_worker_and_becomes_on_machine(pool: PgPool) {
+#[tokio::test]
+async fn queued_input_reaches_live_worker_and_becomes_on_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), timers()).await;
     let (machine, conversation) = setup(&pool, &hub).await;
     let mut worker = Worker::connect(&hub, &machine).await;
@@ -436,8 +437,9 @@ async fn queued_input_reaches_live_worker_and_becomes_on_machine(pool: PgPool) {
     assert!(worker.data_down.message().await.unwrap().is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nothing_is_sent_to_unavailable_machine(pool: PgPool) {
+#[tokio::test]
+async fn nothing_is_sent_to_unavailable_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(
         pool.clone(),
         HubTimers {
@@ -464,8 +466,9 @@ async fn nothing_is_sent_to_unavailable_machine(pool: PgPool) {
     stop(hub).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn submit_and_committed_receipts_trigger_without_waiting_for_sweep(pool: PgPool) {
+#[tokio::test]
+async fn submit_and_committed_receipts_trigger_without_waiting_for_sweep() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(
         pool.clone(),
         HubTimers {
@@ -505,8 +508,9 @@ async fn submit_and_committed_receipts_trigger_without_waiting_for_sweep(pool: P
     stop(hub).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn pending_commands_are_sent_in_created_at_order(pool: PgPool) {
+#[tokio::test]
+async fn pending_commands_are_sent_in_created_at_order() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(
         pool.clone(),
         HubTimers {
@@ -697,8 +701,9 @@ fn to_proto_checks_utf8_metadata_and_control_envelope_limits() {
     assert!(matches!(to_proto(&start), Err(OutboxError::ResourceLimit)));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn missing_receipt_resends_once_then_restarts_session(pool: PgPool) {
+#[tokio::test]
+async fn missing_receipt_resends_once_then_restarts_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(
         pool.clone(),
         HubTimers {
@@ -753,8 +758,9 @@ async fn missing_receipt_resends_once_then_restarts_session(pool: PgPool) {
     stop(hub).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn oversize_command_is_rejected_not_sent(pool: PgPool) {
+#[tokio::test]
+async fn oversize_command_is_rejected_not_sent() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), timers()).await;
     let (machine, conversation) = setup(&pool, &hub).await;
     let submitted = input(&pool, &hub, conversation).await;
@@ -792,8 +798,9 @@ async fn oversize_command_is_rejected_not_sent(pool: PgPool) {
     stop(hub).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn restart_redelivers_pending_commands(pool: PgPool) {
+#[tokio::test]
+async fn restart_redelivers_pending_commands() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), timers()).await;
     let (machine, conversation) = setup(&pool, &hub).await;
     let submitted = input(&pool, &hub, conversation).await;
@@ -827,8 +834,9 @@ async fn restart_redelivers_pending_commands(pool: PgPool) {
     stop(hub).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn live_revocation_closes_both_streams_and_blocks_delivery_and_ingest(pool: PgPool) {
+#[tokio::test]
+async fn live_revocation_closes_both_streams_and_blocks_delivery_and_ingest() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::grpc::Ingest as _;
     let hub = spawn_test_hub(pool.clone(), timers()).await;
     let (machine, conversation) = setup(&pool, &hub).await;
@@ -893,8 +901,9 @@ async fn live_revocation_closes_both_streams_and_blocks_delivery_and_ingest(pool
     stop(hub).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn degraded_outbox_resends_past_older_unsent_row_without_spinning(pool: PgPool) {
+#[tokio::test]
+async fn degraded_outbox_resends_past_older_unsent_row_without_spinning() {
+    let pool = canterlot_hub::testkit::db().await;
     use std::sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -960,8 +969,9 @@ async fn degraded_outbox_resends_past_older_unsent_row_without_spinning(pool: Pg
     stop(hub).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn app_probe_timeout_disconnects_a_worker_that_stops_answering(pool: PgPool) {
+#[tokio::test]
+async fn app_probe_timeout_disconnects_a_worker_that_stops_answering() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(
         pool.clone(),
         HubTimers {
@@ -1003,8 +1013,9 @@ async fn app_probe_timeout_disconnects_a_worker_that_stops_answering(pool: PgPoo
     stop(hub).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_live_probe_keeps_a_slow_worker_connected_and_is_rate_limited(pool: PgPool) {
+#[tokio::test]
+async fn a_live_probe_keeps_a_slow_worker_connected_and_is_rate_limited() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(
         pool.clone(),
         HubTimers {
@@ -1082,8 +1093,9 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn diagnostics_cover_sessions_ingest_resend_and_restart_without_secrets(pool: PgPool) {
+#[tokio::test]
+async fn diagnostics_cover_sessions_ingest_resend_and_restart_without_secrets() {
+    let pool = canterlot_hub::testkit::db().await;
     let buffer = LogBuffer(Default::default());
     tracing::subscriber::set_global_default(
         tracing_subscriber::fmt()
@@ -1238,8 +1250,9 @@ async fn diagnostics_cover_sessions_ingest_resend_and_restart_without_secrets(po
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn revoked_outbox_backstop_blocks_pending_command_before_notification(pool: PgPool) {
+#[tokio::test]
+async fn revoked_outbox_backstop_blocks_pending_command_before_notification() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), timers()).await;
     let (machine, conversation) = setup(&pool, &hub).await;
     let mut worker = Worker::connect(&hub, &machine).await;
@@ -1411,8 +1424,9 @@ async fn decide(pool: &PgPool, conversation: Uuid, request: Uuid, generation: i6
     (row.winner_decision_id.unwrap(), command_id)
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn saved_decision_reaches_worker_as_deliver_decision(pool: PgPool) {
+#[tokio::test]
+async fn saved_decision_reaches_worker_as_deliver_decision() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), timers()).await;
     let (machine, conversation) = setup(&pool, &hub).await;
     let mut worker = Worker::connect(&hub, &machine).await;
@@ -1450,8 +1464,9 @@ async fn saved_decision_reaches_worker_as_deliver_decision(pool: PgPool) {
     stop(hub).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn decision_wakes_outbox_without_waiting_for_sweep(pool: PgPool) {
+#[tokio::test]
+async fn decision_wakes_outbox_without_waiting_for_sweep() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(
         pool.clone(),
         HubTimers {
@@ -1498,8 +1513,9 @@ async fn start_with_instructions_is_withheld_from_a_session_without_instructions
     assert!(canterlot_hub::outbox::to_proto_for_session(&row("owner"), &registry).is_ok());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn decision_command_the_outbox_cannot_send_closes_the_request(pool: PgPool) {
+#[tokio::test]
+async fn decision_command_the_outbox_cannot_send_closes_the_request() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), timers()).await;
     let (machine, conversation) = setup(&pool, &hub).await;
     let (request, generation) = open_permission(&pool, &machine, conversation, "toolu_03").await;
@@ -1687,8 +1703,9 @@ async fn steer_input_needs_the_capability() {
 /// Вливание ушло по первому соединению, после переподключения его повтор не
 /// попадает в транспорт. Захват прошлого соединения снимать нельзя: воркер уже
 /// мог влить текст, и отмена или правка разошлись бы с тем, что видит агент.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn steer_sent_before_reconnect_keeps_its_claim(pool: PgPool) {
+#[tokio::test]
+async fn steer_sent_before_reconnect_keeps_its_claim() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::delivery::{
         control::{CancelOutcome, SendNowOutcome, cancel_input, request_send_now},
         receipts::{InputReceipt, apply_input_receipt},
@@ -1795,8 +1812,9 @@ async fn wait_completed(pool: &PgPool, command_id: Uuid) {
 /// Сеанс машины не умеет «Отправить сейчас»: вливание не висит вечно, а
 /// завершается отказом `capability_missing`, ввод остаётся в очереди, и
 /// владелец видит причину.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn steer_without_capability_is_refused_and_input_stays_queued(pool: PgPool) {
+#[tokio::test]
+async fn steer_without_capability_is_refused_and_input_stays_queued() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::delivery::{
         control::{SendNowOutcome, request_send_now},
         receipts::{InputReceipt, apply_input_receipt},
@@ -1869,8 +1887,9 @@ async fn steer_without_capability_is_refused_and_input_stays_queued(pool: PgPool
 
 /// Служебная команда, которую сеанс не поймёт, тоже не висит: она
 /// завершается отказом `capability_missing`.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn command_without_capability_completes_as_capability_missing(pool: PgPool) {
+#[tokio::test]
+async fn command_without_capability_completes_as_capability_missing() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), timers()).await;
     let (machine, conversation) = setup(&pool, &hub).await;
     let (execution_id, generation): (Uuid, i64) =
@@ -1909,8 +1928,9 @@ async fn command_without_capability_completes_as_capability_missing(pool: PgPool
     stop(hub).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn start_execution_waits_until_the_session_is_reconciled(pool: PgPool) {
+#[tokio::test]
+async fn start_execution_waits_until_the_session_is_reconciled() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), timers()).await;
     let machine = machines::add(&pool, hub.installation.owner_id, "synthetic")
         .await
@@ -1968,8 +1988,9 @@ async fn start_execution_waits_until_the_session_is_reconciled(pool: PgPool) {
 }
 
 /// Команда, уже уходившая прошлому сеансу, тоже не висит, если новый сеанс её не поймёт.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn resent_command_without_capability_completes_as_capability_missing(pool: PgPool) {
+#[tokio::test]
+async fn resent_command_without_capability_completes_as_capability_missing() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), timers()).await;
     let (machine, conversation) = setup(&pool, &hub).await;
     let (execution_id, generation): (Uuid, i64) =
@@ -2011,8 +2032,9 @@ async fn resent_command_without_capability_completes_as_capability_missing(pool:
 
 /// Выданный под сеанс с `pilot_v1` ввод встретил при отправке сеанс без неё: ввод
 /// возвращается в очередь и ждёт подходящего сеанса, а не отвергается.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn input_dispatched_for_pilot_waits_when_the_session_lacks_it(pool: PgPool) {
+#[tokio::test]
+async fn input_dispatched_for_pilot_waits_when_the_session_lacks_it() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::delivery::dispatch::DispatchOutcome;
     let hub = spawn_test_hub(pool.clone(), timers()).await;
     let (machine, conversation) = setup(&pool, &hub).await;
@@ -2088,9 +2110,10 @@ async fn input_dispatched_for_pilot_waits_when_the_session_lacks_it(pool: PgPool
 /// канал gRPC с воркером, квитанция воркера и её приём. Воркер получает охранный interrupt с
 /// именем хода и отметкой прогресса, отвечает квитанциями, и только тогда в ленте появляется
 /// строка о спасении, а родитель получает заметку.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+#[tokio::test]
 #[ignore = "автоматическое спасение выключено в 1.40: фоновый проектор в режиме alert опережает сцену с Auto; вернуть вместе с автоматикой в 1.41"]
-async fn a_hung_turn_is_interrupted_through_the_real_worker_channel(pool: PgPool) {
+async fn a_hung_turn_is_interrupted_through_the_real_worker_channel() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         activity,
         delivery::receipts::{InputReceipt, apply_input_receipt},
@@ -2304,8 +2327,9 @@ async fn a_hung_turn_is_interrupted_through_the_real_worker_channel(pool: PgPool
 }
 
 /// Воркер отказал: ход уже ушёл дальше. Отказ виден в ленте, а не выдаётся за спасение.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_worker_refusal_of_a_stale_interrupt_is_surfaced(pool: PgPool) {
+#[tokio::test]
+async fn a_worker_refusal_of_a_stale_interrupt_is_surfaced() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), timers()).await;
     let (machine, conversation) = setup(&pool, &hub).await;
     let owner = hub.installation.owner_id;
@@ -2370,8 +2394,9 @@ async fn a_worker_refusal_of_a_stale_interrupt_is_surfaced(pool: PgPool) {
 
 /// Повтор той же фазы от воркера — сигнал жизни хода: он двигает молчание, но не отметку
 /// фазы и не множит события.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_repeated_phase_is_liveness_and_keeps_the_phase_mark(pool: PgPool) {
+#[tokio::test]
+async fn a_repeated_phase_is_liveness_and_keeps_the_phase_mark() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), timers()).await;
     let (machine, conversation) = setup(&pool, &hub).await;
     let mut worker = Worker::connect(&hub, &machine).await;

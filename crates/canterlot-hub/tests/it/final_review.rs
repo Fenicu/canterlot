@@ -120,8 +120,9 @@ async fn controls(pool: &PgPool, seed: &Seed, input: &SubmittedInput) -> (Uuid, 
     (cancel_command_id, withdraw)
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn resolved_owner_lost_is_removed_but_restore_pending_stays(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn resolved_owner_lost_is_removed_but_restore_pending_stays() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
     state(
@@ -161,8 +162,9 @@ async fn resolved_owner_lost_is_removed_but_restore_pending_stays(pool: PgPool) 
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn quote_heavy_text_uses_protobuf_limits(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn quote_heavy_text_uses_protobuf_limits() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let text = "\"x".repeat(70_000);
     assert_eq!(text.len(), 140_000);
@@ -183,8 +185,9 @@ async fn assert_queue_event(pool: &PgPool, seed: &Seed, correlation: Uuid) -> Te
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn queue_events_cover_lifecycle_receipts_controls_and_run_slot(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn queue_events_cover_lifecycle_receipts_controls_and_run_slot() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let correlation = Uuid::now_v7();
     let execution =
@@ -302,8 +305,9 @@ async fn queue_events_cover_lifecycle_receipts_controls_and_run_slot(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn queue_event_failure_rolls_back_state_and_control_completion(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn queue_event_failure_rolls_back_state_and_control_completion() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, _, input) = setup(&pool).await;
     let (cancel, withdraw) = controls(&pool, &seed, &input).await;
     sqlx::query("alter table events add constraint reject_queue_events check (kind <> 'queue_state_changed') not valid").execute(&pool).await?;
@@ -332,8 +336,9 @@ async fn queue_event_failure_rolls_back_state_and_control_completion(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn receipt_causes_distinguish_withdrawn_and_deferred(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn receipt_causes_distinguish_withdrawn_and_deferred() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for (value, cause) in [
         (InputReceipt::Withdrawn, "withdrawn"),
         (
@@ -358,8 +363,9 @@ async fn receipt_causes_distinguish_withdrawn_and_deferred(pool: PgPool) -> Test
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn control_payloads_and_completion_are_attempt_scoped(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn control_payloads_and_completion_are_attempt_scoped() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for value in [
         InputReceipt::Withdrawn,
         InputReceipt::DispatchDeferred {
@@ -412,8 +418,9 @@ async fn control_payloads_and_completion_are_attempt_scoped(pool: PgPool) -> Tes
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn late_control_receipt_completes_only_its_attempt(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn late_control_receipt_completes_only_its_attempt() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, _, input) = setup(&pool).await;
     let StopOutcome::Requested {
         withdraw_command_id: Some(old),
@@ -464,8 +471,9 @@ async fn late_control_receipt_completes_only_its_attempt(pool: PgPool) -> TestRe
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn old_generation_deferral_does_not_hold_running_generation(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn old_generation_deferral_does_not_hold_running_generation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, execution, input) = setup(&pool).await;
     state(
         &pool,
@@ -498,8 +506,9 @@ async fn old_generation_deferral_does_not_hold_running_generation(pool: PgPool) 
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cancelled_withdrawn_or_deferred_input_never_redispatches(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn cancelled_withdrawn_or_deferred_input_never_redispatches() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for value in [
         InputReceipt::Withdrawn,
         InputReceipt::DispatchDeferred {
@@ -535,8 +544,9 @@ async fn cancelled_withdrawn_or_deferred_input_never_redispatches(pool: PgPool) 
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn start_notifies_outbox_after_commit(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn start_notifies_outbox_after_commit() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let mut listener = PgListener::connect_with(&pool).await?;
     listener.listen("canterlot_outbox").await?;
@@ -566,8 +576,9 @@ async fn start_notifies_outbox_after_commit(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn empty_content_and_invalid_keys_are_rejected_before_sql(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn empty_content_and_invalid_keys_are_rejected_before_sql() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let mut conn = pool.acquire().await?;
     let mut tx = sqlx::Connection::begin(&mut *conn).await?;
@@ -597,8 +608,9 @@ async fn empty_content_and_invalid_keys_are_rejected_before_sql(pool: PgPool) ->
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn invalid_idempotency_keys_fail_before_pool_acquisition(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn invalid_idempotency_keys_fail_before_pool_acquisition() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     pool.close().await;
     for key in [String::new(), "k".repeat(257), "é".repeat(129)] {
@@ -645,8 +657,9 @@ async fn invalid_idempotency_keys_fail_before_pool_acquisition(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn receipt_reasons_are_sanitized_and_bounded(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn receipt_reasons_are_sanitized_and_bounded() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let reason = format!("a\0{}", "é".repeat(600));
     for value in [
         InputReceipt::ExplicitRejection {
@@ -672,8 +685,9 @@ async fn receipt_reasons_are_sanitized_and_bounded(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cursor_ahead_of_head_requires_resync(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn cursor_ahead_of_head_requires_resync() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let scope = Scope::Conversation { id: Uuid::now_v7() };
     assert!(matches!(
         events::read_after(&pool, &scope, 1, 10).await?,
@@ -711,8 +725,9 @@ async fn cursor_ahead_of_head_requires_resync(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn owner_initiated_terminal_outcomes_add_no_pause(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn owner_initiated_terminal_outcomes_add_no_pause() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for outcome in ["start_cancelled", "force_stopped"] {
         let seed = testkit::seed(&pool).await;
         let execution = if outcome == "start_cancelled" {
@@ -745,8 +760,9 @@ async fn owner_initiated_terminal_outcomes_add_no_pause(pool: PgPool) -> TestRes
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn committed_at_defaults_use_wall_clock(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn committed_at_defaults_use_wall_clock() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let defaults: Vec<(String, String)> = sqlx::query_as("select table_name, column_default from information_schema.columns where table_schema = 'public' and table_name in ('inputs', 'events') and column_name = 'committed_at' order by table_name").fetch_all(&pool).await?;
     assert_eq!(
         defaults,
@@ -758,8 +774,9 @@ async fn committed_at_defaults_use_wall_clock(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn transmission_implies_machine_storage(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn transmission_implies_machine_storage() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for stored_first in [false, true] {
         let (_, _, input) = setup(&pool).await;
         if stored_first {
@@ -785,8 +802,9 @@ async fn transmission_implies_machine_storage(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn debug_redacts_content_and_event_payloads(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn debug_redacts_content_and_event_payloads() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let marker = "PRIVATE_MARKER_TEXT_123";
     let req = request(&seed, marker);
@@ -825,8 +843,9 @@ async fn debug_redacts_content_and_event_payloads(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn production_pool_sets_lock_timeout_on_every_connection(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn production_pool_sets_lock_timeout_on_every_connection() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let url = pool.connect_options().to_url_lossy();
     let configured = db::connect(url.as_str()).await?;
     let mut first = configured.acquire().await?;
@@ -843,8 +862,9 @@ async fn production_pool_sets_lock_timeout_on_every_connection(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn repeated_controls_with_different_keys_reuse_commands(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn repeated_controls_with_different_keys_reuse_commands() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, _, input) = setup(&pool).await;
     let first = controls(&pool, &seed, &input).await;
     let second = controls(&pool, &seed, &input).await;
@@ -858,10 +878,9 @@ async fn repeated_controls_with_different_keys_reuse_commands(pool: PgPool) -> T
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn message_limit_maps_to_submit_resource_limit_without_binding_key(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn message_limit_maps_to_submit_resource_limit_without_binding_key() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::delivery::LimitKind;
     use canterlot_proto::limits::MAX_MESSAGE_BYTES;
     let seed = testkit::seed(&pool).await;
@@ -887,8 +906,9 @@ async fn message_limit_maps_to_submit_resource_limit_without_binding_key(
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn idempotency_key_boundary_and_in_tx_validation(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn idempotency_key_boundary_and_in_tx_validation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::delivery::control::ControlError;
     let seed = testkit::seed(&pool).await;
     let mut req = request(&seed, "x");
@@ -941,8 +961,9 @@ async fn idempotency_key_boundary_and_in_tx_validation(pool: PgPool) -> TestResu
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn terminal_receipts_still_complete_pending_controls(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn terminal_receipts_still_complete_pending_controls() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for value in [
         InputReceipt::Withdrawn,
         InputReceipt::DispatchDeferred {

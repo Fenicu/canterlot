@@ -350,8 +350,9 @@ async fn cj(
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn three_open_requests_hold_the_card_and_the_fourth_is_refused(pool: PgPool) {
+#[tokio::test]
+async fn three_open_requests_hold_the_card_and_the_fourth_is_refused() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     for index in 0..secrets::MAX_OPEN_PER_CONVERSATION {
         fx.open(&format!("Секрет {index}")).await;
@@ -369,8 +370,9 @@ async fn three_open_requests_hold_the_card_and_the_fourth_is_refused(pool: PgPoo
     assert!(matches!(error, secrets::SecretError::Limit), "{error:?}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_value_is_delivered_once_over_the_live_stream_and_never_stored(pool: PgPool) {
+#[tokio::test]
+async fn a_value_is_delivered_once_over_the_live_stream_and_never_stored() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let marker = format!("canterlot-secret-PROBE-{}", Uuid::now_v7());
     let row = fx.open("Пароль от базы").await;
@@ -407,8 +409,9 @@ async fn a_value_is_delivered_once_over_the_live_stream_and_never_stored(pool: P
     assert_absent_everywhere(&fx.pool, &marker).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_decline_answers_the_card_and_tells_the_agent(pool: PgPool) {
+#[tokio::test]
+async fn a_decline_answers_the_card_and_tells_the_agent() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Токен").await;
     let response = fx.answer(row.id, json!({"decline": true})).await;
@@ -423,8 +426,9 @@ async fn a_decline_answers_the_card_and_tells_the_agent(pool: PgPool) {
     assert_eq!(again.json::<Value>()["error"]["code"], "not_open");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_offline_machine_refuses_the_value_and_keeps_the_request_open(pool: PgPool) {
+#[tokio::test]
+async fn an_offline_machine_refuses_the_value_and_keeps_the_request_open() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Ключ").await;
     let response = fx
@@ -437,8 +441,9 @@ async fn an_offline_machine_refuses_the_value_and_keeps_the_request_open(pool: P
     assert_absent_everywhere(&fx.pool, "canterlot-secret-PROBE-offline").await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_v1_only_worker_gets_no_deliver_and_no_revoke(pool: PgPool) {
+#[tokio::test]
+async fn a_v1_only_worker_gets_no_deliver_and_no_revoke() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Ключ").await;
     // Хаб не знает `secret_requests_v1` и не согласует его: для хаба это
@@ -491,8 +496,9 @@ async fn a_v1_only_worker_gets_no_deliver_and_no_revoke(pool: PgPool) {
     assert_absent_everywhere(&fx.pool, "canterlot-secret-PROBE-v1").await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_idempotency_header_of_the_answer_leaves_no_row(pool: PgPool) {
+#[tokio::test]
+async fn the_idempotency_header_of_the_answer_leaves_no_row() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Ключ").await;
     let key = format!("answer-key-{}", Uuid::now_v7());
@@ -512,8 +518,9 @@ async fn the_idempotency_header_of_the_answer_leaves_no_row(pool: PgPool) {
     assert_eq!(stored, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_value_over_16_kib_answers_413(pool: PgPool) {
+#[tokio::test]
+async fn a_value_over_16_kib_answers_413() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Большой").await;
     let value = "x".repeat(secrets::MAX_VALUE_BYTES + 1);
@@ -523,8 +530,9 @@ async fn a_value_over_16_kib_answers_413(pool: PgPool) {
     assert_eq!(fx.row(row.id).await.generation, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_delivered_secret_is_revoked_and_the_queued_message_is_withdrawn(pool: PgPool) {
+#[tokio::test]
+async fn a_delivered_secret_is_revoked_and_the_queued_message_is_withdrawn() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Пароль").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
@@ -594,8 +602,9 @@ async fn a_delivered_secret_is_revoked_and_the_queued_message_is_withdrawn(pool:
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_timed_out_attempt_becomes_lost_with_an_obligation(pool: PgPool) {
+#[tokio::test]
+async fn a_timed_out_attempt_becomes_lost_with_an_obligation() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Ключ").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
@@ -612,8 +621,9 @@ async fn a_timed_out_attempt_becomes_lost_with_an_obligation(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_hub_restart_turns_sending_into_lost_with_an_obligation(pool: PgPool) {
+#[tokio::test]
+async fn a_hub_restart_turns_sending_into_lost_with_an_obligation() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Ключ").await;
     sqlx::query(
@@ -636,8 +646,9 @@ async fn a_hub_restart_turns_sending_into_lost_with_an_obligation(pool: PgPool) 
 
 /// Стенд возвращается, только когда стартовое восстановление и первая сверка
 /// уже позади: тест не гоняется со службой за одни и те же строки.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stand_returns_only_after_the_startup_sweep(pool: PgPool) {
+#[tokio::test]
+async fn a_stand_returns_only_after_the_startup_sweep() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let id = Uuid::now_v7();
     sqlx::query(
@@ -676,8 +687,9 @@ async fn a_stand_returns_only_after_the_startup_sweep(pool: PgPool) {
     drop(hub);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn re_filling_a_lost_request_supersedes_the_old_generation(pool: PgPool) {
+#[tokio::test]
+async fn re_filling_a_lost_request_supersedes_the_old_generation() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Ключ").await;
     sqlx::query("update secret_requests set state='lost', generation=1, note=$2 where id=$1")
@@ -697,8 +709,9 @@ async fn re_filling_a_lost_request_supersedes_the_old_generation(pool: PgPool) {
     assert_eq!(fx.state(row.id).await, "sending");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_late_delivery_receipt_after_loss_is_ignored_and_the_obligation_stays(pool: PgPool) {
+#[tokio::test]
+async fn a_late_delivery_receipt_after_loss_is_ignored_and_the_obligation_stays() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Ключ").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
@@ -717,8 +730,9 @@ async fn a_late_delivery_receipt_after_loss_is_ignored_and_the_obligation_stays(
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_expired_delivery_becomes_revoking_until_the_worker_confirms(pool: PgPool) {
+#[tokio::test]
+async fn an_expired_delivery_becomes_revoking_until_the_worker_confirms() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Ключ").await;
     sqlx::query(
@@ -749,8 +763,9 @@ async fn an_expired_delivery_becomes_revoking_until_the_worker_confirms(pool: Pg
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn session_end_revokes_every_generation_that_may_have_materialised(pool: PgPool) {
+#[tokio::test]
+async fn session_end_revokes_every_generation_that_may_have_materialised() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let open = fx.open("Открытый").await;
     let delivered = fx.open("Переданный").await;
@@ -799,8 +814,9 @@ async fn session_end_revokes_every_generation_that_may_have_materialised(pool: P
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn purge_keeps_the_obligation_and_a_later_receipt_completes_it(pool: PgPool) {
+#[tokio::test]
+async fn purge_keeps_the_obligation_and_a_later_receipt_completes_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Пережить уборку").await;
     sqlx::query(
@@ -872,8 +888,9 @@ async fn purge_keeps_the_obligation_and_a_later_receipt_completes_it(pool: PgPoo
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_older_cap_receipt_does_not_close_a_newer_obligation(pool: PgPool) {
+#[tokio::test]
+async fn an_older_cap_receipt_does_not_close_a_newer_obligation() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Новое поколение").await;
     sqlx::query(
@@ -914,8 +931,9 @@ async fn an_older_cap_receipt_does_not_close_a_newer_obligation(pool: PgPool) {
     assert!(fx.obligation(row.id).await.is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_removal_failure_reschedules_the_obligation_and_keeps_revoking(pool: PgPool) {
+#[tokio::test]
+async fn a_removal_failure_reschedules_the_obligation_and_keeps_revoking() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Не удалился").await;
     sqlx::query(
@@ -976,8 +994,9 @@ async fn a_removal_failure_reschedules_the_obligation_and_keeps_revoking(pool: P
     assert!(due, "the retry is not immediate");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_successful_removal_retires_the_revoke_command(pool: PgPool) {
+#[tokio::test]
+async fn a_successful_removal_retires_the_revoke_command() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Убранная команда").await;
     sqlx::query("update secret_requests set state='revoking', generation=1 where id=$1")
@@ -998,8 +1017,9 @@ async fn a_successful_removal_retires_the_revoke_command(pool: PgPool) {
     assert!(fx.obligation(row.id).await.is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_failed_removal_retires_the_command_and_the_obligation_resends(pool: PgPool) {
+#[tokio::test]
+async fn a_failed_removal_retires_the_command_and_the_obligation_resends() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Повтор после ошибки").await;
     sqlx::query("update secret_requests set state='revoking', generation=1 where id=$1")
@@ -1080,8 +1100,9 @@ async fn a_failed_removal_retires_the_command_and_the_obligation_resends(pool: P
     assert_eq!(total, 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_rejected_revoke_is_retired_and_rescheduled(pool: PgPool) {
+#[tokio::test]
+async fn a_rejected_revoke_is_retired_and_rescheduled() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Отказ воркера").await;
     sqlx::query("update secret_requests set state='revoking', generation=1 where id=$1")
@@ -1131,8 +1152,9 @@ async fn a_rejected_revoke_is_retired_and_rescheduled(pool: PgPool) {
     assert_eq!(attempts, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_offline_backlog_does_not_starve_a_live_obligation(pool: PgPool) {
+#[tokio::test]
+async fn an_offline_backlog_does_not_starve_a_live_obligation() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let offline = Uuid::now_v7();
     sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'Офлайн')")
@@ -1195,8 +1217,9 @@ async fn an_offline_backlog_does_not_starve_a_live_obligation(pool: PgPool) {
     assert_eq!(offline_commands, 0, "offline machines get no command");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_vanished_obligation_does_not_abort_the_batch(pool: PgPool) {
+#[tokio::test]
+async fn a_vanished_obligation_does_not_abort_the_batch() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let _worker = fx.connect(CAPS, "epoch-1").await;
     let gone = fx.open("Исчезнет").await;
@@ -1256,8 +1279,9 @@ async fn a_vanished_obligation_does_not_abort_the_batch(pool: PgPool) {
     assert_eq!(vanished, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_huge_attempt_count_does_not_overflow_the_backoff(pool: PgPool) {
+#[tokio::test]
+async fn a_huge_attempt_count_does_not_overflow_the_backoff() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Много попыток").await;
     let _worker = fx.connect(CAPS, "epoch-1").await;
@@ -1303,8 +1327,9 @@ async fn a_huge_attempt_count_does_not_overflow_the_backoff(pool: PgPool) {
     assert_eq!(reason, "revoked");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_epoch_change_marks_delivered_requests_lost(pool: PgPool) {
+#[tokio::test]
+async fn an_epoch_change_marks_delivered_requests_lost() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Ключ").await;
     let journal = Uuid::now_v7();
@@ -1335,8 +1360,9 @@ async fn an_epoch_change_marks_delivered_requests_lost(pool: PgPool) {
     assert_eq!((up_to, reason.as_str()), (1, "epoch"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_re_filled_generation_gets_its_own_delivered_message(pool: PgPool) {
+#[tokio::test]
+async fn a_re_filled_generation_gets_its_own_delivered_message() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Дважды переданный").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
@@ -1370,8 +1396,9 @@ async fn a_re_filled_generation_gets_its_own_delivered_message(pool: PgPool) {
     assert!(prompts.iter().any(|text| text.contains("/run/two")));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_delivered_secret_message_shows_the_full_expiry_date(pool: PgPool) {
+#[tokio::test]
+async fn a_delivered_secret_message_shows_the_full_expiry_date() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Срок в сообщении").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
@@ -1394,8 +1421,9 @@ async fn a_delivered_secret_message_shows_the_full_expiry_date(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_removal_receipt_from_another_conversation_is_ignored(pool: PgPool) {
+#[tokio::test]
+async fn a_removal_receipt_from_another_conversation_is_ignored() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Чужой разговор").await;
     sqlx::query("update secret_requests set state='revoking', generation=1 where id=$1")
@@ -1433,8 +1461,9 @@ async fn a_removal_receipt_from_another_conversation_is_ignored(pool: PgPool) {
     assert!(fx.obligation(row.id).await.is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_delivery_receipt_from_another_conversation_is_ignored(pool: PgPool) {
+#[tokio::test]
+async fn a_delivery_receipt_from_another_conversation_is_ignored() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Чужой разговор доставки").await;
     sqlx::query("update secret_requests set state='sending', generation=1 where id=$1")
@@ -1459,8 +1488,9 @@ async fn a_delivery_receipt_from_another_conversation_is_ignored(pool: PgPool) {
     assert!(kept.path.is_none(), "a foreign path is not recorded");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_epoch_change_marks_sending_requests_lost(pool: PgPool) {
+#[tokio::test]
+async fn an_epoch_change_marks_sending_requests_lost() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("В полёте").await;
     // Живое соединение: стартовая сверка не вправе объявить строку потерянной
@@ -1491,8 +1521,9 @@ async fn an_epoch_change_marks_sending_requests_lost(pool: PgPool) {
     assert_eq!((up_to, reason.as_str()), (1, "epoch"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_replayed_delivery_receipt_from_an_old_epoch_becomes_lost(pool: PgPool) {
+#[tokio::test]
+async fn a_replayed_delivery_receipt_from_an_old_epoch_becomes_lost() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Квитанция из прошлой загрузки").await;
     let _worker = fx.connect(CAPS, "epoch-b").await;
@@ -1537,8 +1568,9 @@ async fn a_replayed_delivery_receipt_from_an_old_epoch_becomes_lost(pool: PgPool
     assert_eq!((up_to, reason.as_str()), (1, "epoch"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_revoke_command_carries_the_hub_expiry_of_the_covered_generation(pool: PgPool) {
+#[tokio::test]
+async fn a_revoke_command_carries_the_hub_expiry_of_the_covered_generation() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Срок в отзыве").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
@@ -1576,8 +1608,9 @@ async fn a_revoke_command_carries_the_hub_expiry_of_the_covered_generation(pool:
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_session_end_obligation_carries_the_generation_expiry(pool: PgPool) {
+#[tokio::test]
+async fn a_session_end_obligation_carries_the_generation_expiry() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let row = fx.open("Срок конца сессии").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
@@ -1596,8 +1629,9 @@ async fn a_session_end_obligation_carries_the_generation_expiry(pool: PgPool) {
     assert_eq!(max, i64::try_from(deliver.expires_at_ms).unwrap());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_delayed_epoch_reconciliation_from_the_previous_connection_changes_nothing(pool: PgPool) {
+#[tokio::test]
+async fn a_delayed_epoch_reconciliation_from_the_previous_connection_changes_nothing() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let old = fx.open("Старая загрузка").await;
     let fresh = fx.open("Новая загрузка").await;
@@ -1661,8 +1695,9 @@ async fn a_delayed_epoch_reconciliation_from_the_previous_connection_changes_not
     assert!(fx.obligation(fresh.id).await.is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_open_secret_keeps_the_session_in_waiting_for_user(pool: PgPool) {
+#[tokio::test]
+async fn an_open_secret_keeps_the_session_in_waiting_for_user() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.open("Пароль").await;
     activity::refresh(
@@ -1693,8 +1728,9 @@ async fn an_open_secret_keeps_the_session_in_waiting_for_user(pool: PgPool) {
     assert_eq!(evidence["question"], "Пароль");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn twenty_open_requests_per_owner_are_the_limit_across_conversations(pool: PgPool) {
+#[tokio::test]
+async fn twenty_open_requests_per_owner_are_the_limit_across_conversations() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool.clone()).await;
     let per_conversation = secrets::MAX_OPEN_PER_CONVERSATION;
     let conversations = (secrets::MAX_OPEN_PER_OWNER + per_conversation - 1) / per_conversation;
@@ -1732,8 +1768,9 @@ async fn twenty_open_requests_per_owner_are_the_limit_across_conversations(pool:
     assert!(matches!(error, secrets::SecretError::Limit), "{error:?}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn secret_request_is_refused_while_owner_stop_is_pending(pool: PgPool) {
+#[tokio::test]
+async fn secret_request_is_refused_while_owner_stop_is_pending() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     sqlx::query(
         "insert into queue_state (conversation_id, pause_reasons)
@@ -1760,8 +1797,9 @@ async fn secret_request_is_refused_while_owner_stop_is_pending(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_session_tool_returns_a_request_id_and_holds_the_limit(pool: PgPool) {
+#[tokio::test]
+async fn the_session_tool_returns_a_request_id_and_holds_the_limit() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         config::SessionToolsConfig,
         session_tools::{Caller, ToolContext, ToolErrorCode, settle::SettleConfig},
@@ -1838,8 +1876,9 @@ async fn the_session_tool_returns_a_request_id_and_holds_the_limit(pool: PgPool)
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_whole_path_leaves_no_plaintext_or_hash_in_the_database(pool: PgPool) {
+#[tokio::test]
+async fn the_whole_path_leaves_no_plaintext_or_hash_in_the_database() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let marker = format!("canterlot-secret-PROBE-{}", Uuid::now_v7());
     let value = format!("{marker}\n");

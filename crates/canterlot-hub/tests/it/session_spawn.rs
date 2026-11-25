@@ -406,8 +406,9 @@ impl Api {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn put_whitelist_validates_and_resets(pool: PgPool) {
+#[tokio::test]
+async fn put_whitelist_validates_and_resets() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool).await;
     let view: Value = api
         .client
@@ -467,8 +468,9 @@ async fn put_whitelist_validates_and_resets(pool: PgPool) {
     assert_eq!(stored, None);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn no_agent_call_changes_whitelist(pool: PgPool) {
+#[tokio::test]
+async fn no_agent_call_changes_whitelist() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     sqlx::query("update owners set spawn_whitelist=$2 where id=$1")
         .bind(f.owner)
@@ -500,8 +502,9 @@ async fn no_agent_call_changes_whitelist(pool: PgPool) {
     assert_eq!(snapshot(f.pool.clone()).await, before);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_inside_whitelist_starts_session_with_brief_and_subscription(pool: PgPool) {
+#[tokio::test]
+async fn spawn_inside_whitelist_starts_session_with_brief_and_subscription() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (child, answer) = f.started(inside()).await;
     assert_eq!(answer["permission_mode"], "bypass");
@@ -579,8 +582,9 @@ async fn spawn_inside_whitelist_starts_session_with_brief_and_subscription(pool:
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_largest_brief_fits(pool: PgPool) {
+#[tokio::test]
+async fn the_largest_brief_fits() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let mut args = inside();
     args["brief"] = json!("б".repeat(32 * 1024));
@@ -588,8 +592,9 @@ async fn the_largest_brief_fits(pool: PgPool) {
     assert!(f.inputs(child).await[0].0.ends_with('б'));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_without_a_list_gets_the_default_one(pool: PgPool) {
+#[tokio::test]
+async fn owner_without_a_list_gets_the_default_one() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     sqlx::query("update owners set spawn_whitelist=null where id=$1")
         .bind(f.owner)
@@ -603,8 +608,9 @@ async fn owner_without_a_list_gets_the_default_one(pool: PgPool) {
     f.pending(json!({"harness":"synthetic","brief":"b"})).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nudge_appends_one_marker_line_to_the_brief(pool: PgPool) {
+#[tokio::test]
+async fn nudge_appends_one_marker_line_to_the_brief() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (child, _) = f
         .started(json!({
@@ -634,8 +640,9 @@ async fn nudge_appends_one_marker_line_to_the_brief(pool: PgPool) {
     assert_eq!(markers, vec!["STATUS: DONE", "STATUS: BLOCKED"]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nudge_marker_line_uses_the_rules_markers_and_is_idempotent(pool: PgPool) {
+#[tokio::test]
+async fn nudge_marker_line_uses_the_rules_markers_and_is_idempotent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (child, _) = f
         .started(json!({
@@ -671,8 +678,9 @@ async fn nudge_marker_line_uses_the_rules_markers_and_is_idempotent(pool: PgPool
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn without_nudge_the_brief_has_no_marker_line(pool: PgPool) {
+#[tokio::test]
+async fn without_nudge_the_brief_has_no_marker_line() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     for nudge in [json!(false), json!(null)] {
         let (child, _) = f
@@ -685,8 +693,9 @@ async fn without_nudge_the_brief_has_no_marker_line(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_without_subscription_stays_unsubscribed(pool: PgPool) {
+#[tokio::test]
+async fn spawn_without_subscription_stays_unsubscribed() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let mut args = inside();
     args["subscribe"] = json!(false);
@@ -700,8 +709,9 @@ async fn spawn_without_subscription_stays_unsubscribed(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_outside_whitelist_opens_card_and_creates_nothing(pool: PgPool) {
+#[tokio::test]
+async fn spawn_outside_whitelist_opens_card_and_creates_nothing() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let before = f.sessions().await;
     let request = f.pending(outside()).await;
@@ -756,8 +766,9 @@ async fn spawn_outside_whitelist_opens_card_and_creates_nothing(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn catalog_errors_open_no_card(pool: PgPool) {
+#[tokio::test]
+async fn catalog_errors_open_no_card() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     assert_eq!(
         code(f.spawn(json!({"harness":"nope","brief":"b"})).await),
@@ -808,8 +819,9 @@ async fn catalog_errors_open_no_card(pool: PgPool) {
     assert_eq!(opened, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn allow_creates_session_and_notifies_parent(pool: PgPool) {
+#[tokio::test]
+async fn allow_creates_session_and_notifies_parent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let request = f.pending(outside()).await;
     assert!(matches!(
@@ -845,8 +857,9 @@ async fn allow_creates_session_and_notifies_parent(pool: PgPool) {
     assert_eq!(f.inputs(f.parent).await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn deny_notifies_parent_and_creates_nothing(pool: PgPool) {
+#[tokio::test]
+async fn deny_notifies_parent_and_creates_nothing() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let request = f.pending(outside()).await;
     f.decide(request, PermissionBehavior::Deny).await;
@@ -863,8 +876,9 @@ async fn deny_notifies_parent_and_creates_nothing(pool: PgPool) {
     assert_eq!(origin["event"]["request_id"], json!(request));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn failed_allow_closes_as_not_applied_and_notifies_parent(pool: PgPool) {
+#[tokio::test]
+async fn failed_allow_closes_as_not_applied_and_notifies_parent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let request = f.pending(outside()).await;
     sqlx::query(
@@ -891,8 +905,9 @@ async fn failed_allow_closes_as_not_applied_and_notifies_parent(pool: PgPool) {
     assert_eq!(origin["event"]["detail"], "model_unknown");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn allow_after_the_parent_narrowed_never_runs_wider(pool: PgPool) {
+#[tokio::test]
+async fn allow_after_the_parent_narrowed_never_runs_wider() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let request = f.pending(outside()).await;
     f.set_modes(f.parent, "ask", json!({})).await;
@@ -906,8 +921,9 @@ async fn allow_after_the_parent_narrowed_never_runs_wider(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn second_decision_loses(pool: PgPool) {
+#[tokio::test]
+async fn second_decision_loses() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let request = f.pending(outside()).await;
     f.decide(request, PermissionBehavior::Deny).await;
@@ -937,8 +953,9 @@ async fn second_decision_loses(pool: PgPool) {
     assert_eq!(jobs, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn approval_lapses_with_parent_execution(pool: PgPool) {
+#[tokio::test]
+async fn approval_lapses_with_parent_execution() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let request = f.pending(outside()).await;
     f.stop_parent().await;
@@ -960,8 +977,9 @@ async fn approval_lapses_with_parent_execution(pool: PgPool) {
     assert!(f.child().await.is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn saved_decision_survives_the_end_of_the_parent_execution(pool: PgPool) {
+#[tokio::test]
+async fn saved_decision_survives_the_end_of_the_parent_execution() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let request = f.pending(outside()).await;
     f.decide(request, PermissionBehavior::Allow).await;
@@ -972,8 +990,9 @@ async fn saved_decision_survives_the_end_of_the_parent_execution(pool: PgPool) {
     assert_eq!(f.request_state(request).await, "decision_applied");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn no_deliver_decision_command_for_spawn(pool: PgPool) {
+#[tokio::test]
+async fn no_deliver_decision_command_for_spawn() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let request = f.pending(outside()).await;
     f.decide(request, PermissionBehavior::Allow).await;
@@ -1001,8 +1020,9 @@ async fn no_deliver_decision_command_for_spawn(pool: PgPool) {
     assert_eq!(decided, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn child_inherits_parent_mode(pool: PgPool) {
+#[tokio::test]
+async fn child_inherits_parent_mode() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.set_modes(f.parent, "ask", json!({})).await;
     let (child, answer) = f.started(inside()).await;
@@ -1040,8 +1060,9 @@ async fn child_inherits_parent_mode(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn requested_wider_mode_is_refused(pool: PgPool) {
+#[tokio::test]
+async fn requested_wider_mode_is_refused() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.set_modes(f.parent, "ask", json!({})).await;
     for wider in ["bypass", "owner"] {
@@ -1077,8 +1098,9 @@ async fn requested_wider_mode_is_refused(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_mode_across_harness_becomes_ask(pool: PgPool) {
+#[tokio::test]
+async fn owner_mode_across_harness_becomes_ask() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.set_modes(f.parent, "owner", json!({})).await;
     let (_, across) = f.started(inside()).await;
@@ -1101,8 +1123,9 @@ async fn owner_mode_across_harness_becomes_ask(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn human_model_name_starts_the_canonical_model(pool: PgPool) {
+#[tokio::test]
+async fn human_model_name_starts_the_canonical_model() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     sqlx::query("update owners set spawn_whitelist=spawn_whitelist||$2::jsonb where id=$1")
         .bind(f.owner)
@@ -1130,8 +1153,9 @@ async fn human_model_name_starts_the_canonical_model(pool: PgPool) {
     assert_eq!(pending["model"], OUTSIDE);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn ambiguous_and_unknown_model_names_list_catalog_ids(pool: PgPool) {
+#[tokio::test]
+async fn ambiguous_and_unknown_model_names_list_catalog_ids() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let ambiguous = f
         .spawn(json!({"harness":"codex","model":"gpt","brief":"b"}))
@@ -1156,8 +1180,9 @@ async fn ambiguous_and_unknown_model_names_list_catalog_ids(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn codex_default_resolves_to_first_catalog_model(pool: PgPool) {
+#[tokio::test]
+async fn codex_default_resolves_to_first_catalog_model() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let (first, _) = f.started(json!({"harness":"codex","brief":"b"})).await;
     let (named, _) = f
@@ -1186,8 +1211,9 @@ async fn codex_default_resolves_to_first_catalog_model(pool: PgPool) {
     assert_eq!(first_model["status"], "pending_approval");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_depth_limit(pool: PgPool) {
+#[tokio::test]
+async fn spawn_depth_limit() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     sqlx::query("update conversations set spawn_depth=2 where id=$1")
         .bind(f.parent)
@@ -1214,8 +1240,9 @@ async fn spawn_depth_limit(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_limits_count_children_and_cards(pool: PgPool) {
+#[tokio::test]
+async fn spawn_limits_count_children_and_cards() {
+    let pool = canterlot_hub::testkit::db().await;
     let config = SessionToolsConfig {
         parent_spawns: 3,
         ..Default::default()
@@ -1239,8 +1266,9 @@ async fn spawn_limits_count_children_and_cards(pool: PgPool) {
     assert_eq!(code(f.spawn(args).await), Code::RateLimited);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_brief_stops_a_deep_chain(pool: PgPool) {
+#[tokio::test]
+async fn spawn_brief_stops_a_deep_chain() {
+    let pool = canterlot_hub::testkit::db().await;
     let config = SessionToolsConfig {
         max_chain_depth: 1,
         ..Default::default()
@@ -1272,8 +1300,9 @@ async fn spawn_brief_stops_a_deep_chain(pool: PgPool) {
     assert_eq!(code(f.spawn(inside()).await), Code::ChainDepthExceeded);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn transport_retry_starts_nothing_twice(pool: PgPool) {
+#[tokio::test]
+async fn transport_retry_starts_nothing_twice() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let caller = f.caller();
     let first = session_tools::call(&f.context, &caller, "sessions.spawn", inside())
@@ -1300,8 +1329,9 @@ async fn transport_retry_starts_nothing_twice(pool: PgPool) {
     assert_eq!(cards, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn isolated_spawn_needs_capability(pool: PgPool) {
+#[tokio::test]
+async fn isolated_spawn_needs_capability() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(
         pool,
         SessionToolsConfig::default(),
@@ -1322,8 +1352,9 @@ async fn isolated_spawn_needs_capability(pool: PgPool) {
     f.started(inside()).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn isolated_spawn_needs_a_worktree_root(pool: PgPool) {
+#[tokio::test]
+async fn isolated_spawn_needs_a_worktree_root() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     sqlx::query("update machines set worktree_root=null where id=$1")
         .bind(f.machine)
@@ -1335,8 +1366,9 @@ async fn isolated_spawn_needs_a_worktree_root(pool: PgPool) {
     assert_eq!(code(f.spawn(args).await), Code::CapabilityMissing);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn isolated_path_is_not_remembered(pool: PgPool) {
+#[tokio::test]
+async fn isolated_path_is_not_remembered() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let mut args = inside();
     args["isolated"] = json!(true);
@@ -1381,8 +1413,9 @@ async fn isolated_path_is_not_remembered(pool: PgPool) {
     assert!(!prefix.contains('\n'));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn plain_spawn_is_remembered_like_any_session(pool: PgPool) {
+#[tokio::test]
+async fn plain_spawn_is_remembered_like_any_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.started(inside()).await;
     let remembered: Vec<String> =
@@ -1394,8 +1427,9 @@ async fn plain_spawn_is_remembered_like_any_session(pool: PgPool) {
     assert_eq!(remembered, ["/tmp/w"]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn branches_of_quick_spawns_differ(pool: PgPool) {
+#[tokio::test]
+async fn branches_of_quick_spawns_differ() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let mut branches = BTreeSet::new();
     for _ in 0..5 {
@@ -1407,8 +1441,9 @@ async fn branches_of_quick_spawns_differ(pool: PgPool) {
     assert_eq!(branches.len(), 5, "{branches:?}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn isolated_parent_spawns_from_its_source_and_branch(pool: PgPool) {
+#[tokio::test]
+async fn isolated_parent_spawns_from_its_source_and_branch() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     sqlx::query(
         "update conversations set workdir='/data/worktrees/x',
@@ -1428,8 +1463,9 @@ async fn isolated_parent_spawns_from_its_source_and_branch(pool: PgPool) {
     assert_eq!(code(f.spawn(inside()).await), Code::WorkdirNotAllowed);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn workdir_error_in_a_worktree_names_both_choices(pool: PgPool) {
+#[tokio::test]
+async fn workdir_error_in_a_worktree_names_both_choices() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     sqlx::query(
         "update conversations set workdir='/data/worktrees/x',
@@ -1448,15 +1484,17 @@ async fn workdir_error_in_a_worktree_names_both_choices(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn card_answers_after_the_caller_stopped_are_refused(pool: PgPool) {
+#[tokio::test]
+async fn card_answers_after_the_caller_stopped_are_refused() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.stop_parent().await;
     assert_eq!(code(f.spawn(outside()).await), Code::ConversationClosed);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_deleted_child_leaves_no_name_in_the_parent(pool: PgPool) {
+#[tokio::test]
+async fn a_deleted_child_leaves_no_name_in_the_parent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let mut args = outside();
     args["title"] = json!("секретное название");
@@ -1510,8 +1548,9 @@ fn spawn_spec_debug_hides_the_brief() {
     assert!(!printed.contains("секрет"), "{printed}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_job_that_exhausts_attempts_closes_the_request(pool: PgPool) {
+#[tokio::test]
+async fn spawn_job_that_exhausts_attempts_closes_the_request() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     // Закрывающее задание не вставляется: задание запуска падает на каждой попытке.
     sqlx::query(
@@ -1567,8 +1606,9 @@ async fn spawn_job_that_exhausts_attempts_closes_the_request(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delegated_start_carries_the_isolation_flag_on_every_start(pool: PgPool) {
+#[tokio::test]
+async fn delegated_start_carries_the_isolation_flag_on_every_start() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     // Владелец запустил родителя: у него флага нет.
     let root: Value = sqlx::query_scalar(
@@ -1617,8 +1657,9 @@ async fn delegated_start_carries_the_isolation_flag_on_every_start(pool: PgPool)
     assert_eq!(flags, vec![Some(true), Some(true)]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn brief_carries_the_callers_attachments(pool: PgPool) {
+#[tokio::test]
+async fn brief_carries_the_callers_attachments() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let file = f.attachment("brief.pdf", "application/pdf").await;
     let (child, _) = f
@@ -1642,8 +1683,9 @@ async fn brief_carries_the_callers_attachments(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn foreign_attachment_is_refused_for_spawn(pool: PgPool) {
+#[tokio::test]
+async fn foreign_attachment_is_refused_for_spawn() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let other = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
     let id = Uuid::now_v7();
@@ -1669,8 +1711,9 @@ async fn foreign_attachment_is_refused_for_spawn(pool: PgPool) {
     assert!(f.child().await.is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn codex_ask_from_an_ask_parent_needs_the_owner(pool: PgPool) {
+#[tokio::test]
+async fn codex_ask_from_an_ask_parent_needs_the_owner() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.set_modes(f.parent, "ask", json!({})).await;
     let before = f.sessions().await;
@@ -1692,8 +1735,9 @@ async fn codex_ask_from_an_ask_parent_needs_the_owner(pool: PgPool) {
     assert_eq!(f.mode(child).await, "ask");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn codex_child_without_a_mode_gets_the_strictest_equivalent(pool: PgPool) {
+#[tokio::test]
+async fn codex_child_without_a_mode_gets_the_strictest_equivalent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     for parent in ["ask", "owner"] {
         f.set_modes(f.parent, parent, json!({})).await;
@@ -1713,8 +1757,9 @@ async fn codex_child_without_a_mode_gets_the_strictest_equivalent(pool: PgPool) 
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn approved_wider_child_is_rechecked_against_a_narrowed_parent(pool: PgPool) {
+#[tokio::test]
+async fn approved_wider_child_is_rechecked_against_a_narrowed_parent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.set_modes(f.parent, "ask", json!({})).await;
     let request = f
@@ -1730,8 +1775,9 @@ async fn approved_wider_child_is_rechecked_against_a_narrowed_parent(pool: PgPoo
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn child_cannot_start_with_the_owner_preset(pool: PgPool) {
+#[tokio::test]
+async fn child_cannot_start_with_the_owner_preset() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let mut args = inside();
     args["preset"] = json!("owner");
@@ -1783,8 +1829,9 @@ fn with_plan(mut args: Value, number: i64) -> Value {
     args
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn direct_spawn_links_the_plan_task(pool: PgPool) {
+#[tokio::test]
+async fn direct_spawn_links_the_plan_task() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.plan_add(&["Парсер", "Тесты"]).await;
     let (child, answer) = f.started(with_plan(inside(), 2)).await;
@@ -1797,8 +1844,9 @@ async fn direct_spawn_links_the_plan_task(pool: PgPool) {
     assert_eq!(f.task(1).await, ("waiting".into(), None, 0));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_validates_the_plan_task_before_creating_anything(pool: PgPool) {
+#[tokio::test]
+async fn spawn_validates_the_plan_task_before_creating_anything() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.plan_add(&["Парсер"]).await;
     assert_eq!(
@@ -1817,8 +1865,9 @@ async fn spawn_validates_the_plan_task_before_creating_anything(pool: PgPool) {
     assert_eq!(f.sessions().await, 1, "nothing was created");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn approval_links_at_start_and_a_task_closed_meanwhile_stays_closed(pool: PgPool) {
+#[tokio::test]
+async fn approval_links_at_start_and_a_task_closed_meanwhile_stays_closed() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.plan_add(&["Парсер", "Тесты"]).await;
     let answer = f.spawn(with_plan(outside(), 1)).await.unwrap();
@@ -1858,8 +1907,9 @@ async fn approval_links_at_start_and_a_task_closed_meanwhile_stays_closed(pool: 
     assert!(executor.is_some_and(|id| id != child));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_explicit_workdir_of_other_domain_is_domain_mismatch(pool: PgPool) {
+#[tokio::test]
+async fn spawn_explicit_workdir_of_other_domain_is_domain_mismatch() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     sqlx::query(
         "update machines set capabilities=array['pilot_v1','memory_scope_v1'],
@@ -1899,8 +1949,9 @@ async fn spawn_explicit_workdir_of_other_domain_is_domain_mismatch(pool: PgPool)
 
 /// Отправка авторизовала цель, потом встала в очередь; за это время запуск обнулил домен цели
 /// и закоммитился. После очереди отправка проверяет домены заново и ничего не вставляет.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn send_rechecks_the_domain_after_waiting_for_the_queue(pool: PgPool) {
+#[tokio::test]
+async fn send_rechecks_the_domain_after_waiting_for_the_queue() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let target = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
     sqlx::query("update conversations set memory_domain='personal' where id=$1")
@@ -1960,8 +2011,9 @@ async fn send_rechecks_the_domain_after_waiting_for_the_queue(pool: PgPool) {
     assert_eq!(inputs, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_parent_without_a_domain_cannot_spawn_but_a_personal_one_can(pool: PgPool) {
+#[tokio::test]
+async fn a_parent_without_a_domain_cannot_spawn_but_a_personal_one_can() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     sqlx::query("update conversations set memory_domain=null,memory_project=null where id=$1")
         .bind(f.parent)
