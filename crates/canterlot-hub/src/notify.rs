@@ -3,6 +3,7 @@
 //! Событие ставит строку в `owner_pushes` в своей же транзакции: вставка дешёвая и ничего
 //! не ждёт по сети. Отправляет фоновая служба после commit, одна на базу (`singleton`),
 //! с коротким сроком запроса, ограниченным числом повторов и общим пределом в минуту.
+//! Пуш «ждёт владельца» повторяется без предела, пока его запрос открыт.
 //! Ключ `dedupe_key` уникален: повторная оценка того же эпизода пуш не повторяет.
 //! Строки настроек нет, пока в `hub.toml` не задан `[notify.gotify]`: тогда вставки нет.
 
@@ -72,8 +73,11 @@ const FRESH: TimeDelta = TimeDelta::minutes(10);
 /// перезапуска воркера воскрешает пуш о ходе, кончившемся дни назад. Меньше срока
 /// хранения строки дедупликации, чтобы в этом окне повтор не прошёл.
 const TURN_FINISHED_EXTENSION: TimeDelta = TimeDelta::hours(24);
-/// Пуш, не ушедший за это время (лимит, долгий сбой сервера), теряет смысл.
+/// Пуш, не ушедший за это время (лимит, долгий сбой сервера), теряет смысл. Пуша
+/// «ждёт владельца» это не касается: он нужен, пока запрос открыт.
 const STALE: TimeDelta = TimeDelta::minutes(30);
+/// Потолок паузы между повторами пуша «ждёт владельца» после исчерпания обычных попыток.
+const WAITING_RETRY_MAX: Duration = Duration::from_secs(15 * 60);
 /// Сколько строк забирает один проход.
 const BATCH: i64 = 20;
 /// Открытый чат откладывает пуш на минуту: телефон мог уснуть, не прислав «скрыто».
@@ -1589,6 +1593,25 @@ impl Sender {
         i32::try_from(self.backoff.len() + 1).unwrap_or(i32::MAX)
     }
 
+    /// Пауза после попытки, которой предшествовало `done` попыток. Обычный пуш после
+    /// списка пауз бросается, и пауза ему не нужна. Пуш «ждёт владельца» повторяется,
+    /// пока запрос открыт: последняя пауза списка удваивается до потолка.
+    fn pause_after(&self, done: i32, persistent: bool) -> Duration {
+        let done = usize::try_from(done).unwrap_or(usize::MAX);
+        if let Some(pause) = self.backoff.get(done) {
+            return *pause;
+        }
+        if !persistent {
+            return Duration::ZERO;
+        }
+        let last = self.backoff.last().copied().unwrap_or(POLL);
+        let doublings = u32::try_from(done.saturating_add(1) - self.backoff.len())
+            .unwrap_or(u32::MAX)
+            .min(16);
+        last.saturating_mul(1u32 << doublings)
+            .min(WAITING_RETRY_MAX)
+    }
+
     /// Скользящее окно минуты: место есть — оно занимается сразу.
     fn take_slot(&self) -> bool {
         let mut window = self.window.lock().unwrap_or_else(|e| e.into_inner());
@@ -1679,7 +1702,11 @@ impl Sender {
                 report.dropped += 1;
                 continue;
             }
-            if row.stale {
+            // Пуш «ждёт владельца» живёт, пока открыт его запрос: агент стоит и ждёт, и
+            // узнать об этом владелец должен, даже если сервер пушей лежал дольше обычных
+            // попыток. Решённый запрос отменяет строку в `compose`.
+            let persistent = row.kind == KIND_WAITING;
+            if row.stale && !persistent {
                 // Условно по версии: слияние свежего исхода после чтения строки
                 // меняет `updated_at`, и такая строка уже не устарела.
                 let dropped = sqlx::query(
@@ -1757,11 +1784,7 @@ impl Sender {
             let attempts = row.attempts.saturating_add(1);
             // Попытка и пауза фиксируются до запроса: потерянное подтверждение
             // стоит одного отложенного повтора, а не повторной доставки.
-            let pause = self
-                .backoff
-                .get(usize::try_from(row.attempts).unwrap_or(usize::MAX))
-                .copied()
-                .unwrap_or_default();
+            let pause = self.pause_after(row.attempts, persistent);
             // Попытка, пауза и метка охлаждения фиксируются одной транзакцией до
             // запроса: потерянное подтверждение или гибель хаба после отправки не
             // оставят строку, которая обойдёт охлаждение при повторе.
@@ -1806,7 +1829,7 @@ impl Sender {
                     finish(pool, row.id, "sent", Some(&status.to_string())).await?;
                     report.sent += 1;
                 }
-                Err(Failure::Retry(status)) if attempts < self.max_attempts() => {
+                Err(Failure::Retry(status)) if persistent || attempts < self.max_attempts() => {
                     sqlx::query(
                         "update owner_pushes set last_status=$2,updated_at=clock_timestamp()
                          where id=$1 and state='pending'",
@@ -1815,6 +1838,16 @@ impl Sender {
                     .bind(status.map(|code| code.to_string()))
                     .execute(pool)
                     .await?;
+                    // Одна строка на эпизод: обычные попытки кончились, дальше редкие повторы.
+                    if attempts == self.max_attempts() {
+                        tracing::warn!(
+                            kind = "owner_push_delayed",
+                            push_kind = %row.kind,
+                            conversation_id = ?row.conversation_id,
+                            status = status.map(i64::from),
+                            "owner push keeps retrying while the request is open"
+                        );
+                    }
                     report.retried += 1;
                 }
                 Err(failure) => {

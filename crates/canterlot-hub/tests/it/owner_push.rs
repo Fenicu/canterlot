@@ -1722,17 +1722,143 @@ async fn delivery_uses_the_database_clock() {
     // Часы хаба ушли на час вперёд: по ним свежий пуш был бы протухшим, по часам базы — нет.
     assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 1);
     // А строка, протухшая по часам базы, не уходит даже при тех же часах хаба.
-    let second = Uuid::now_v7();
-    open_question(&pool, &s, &question_batch(&execution, second, "Старый?")).await;
+    let other = seed(&pool).await;
+    let execution = start(&pool, other.owner_id, other.conversation_id).await;
+    queue_turn_finished(&pool, &other, &execution, "Готово").await;
     sqlx::query(
         "update owner_pushes set created_at=clock_timestamp()-interval '1 hour'
-         where dedupe_key=$1",
+         where kind='turn_finished'",
     )
-    .bind(format!("waiting:{second}"))
     .execute(&pool)
     .await
     .unwrap();
     assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().dropped, 1);
+    assert_eq!(fake.seen().len(), 1);
+}
+
+/// Пуш «Ход завершён» в очереди: ход с ответом кончился десять секунд назад.
+async fn queue_turn_finished(
+    pool: &PgPool,
+    s: &Seed,
+    execution: &executions::StartedExecution,
+    answer: &str,
+) {
+    let now = Utc::now();
+    long_idle(pool, s.conversation_id, now).await;
+    finish_turn(
+        pool,
+        s.machine_id,
+        s.conversation_id,
+        execution,
+        now - TimeDelta::seconds(10),
+    )
+    .await;
+    block(
+        pool,
+        execution.execution_id,
+        s.conversation_id,
+        "text",
+        answer,
+        now - TimeDelta::seconds(9),
+    )
+    .await;
+    for step in [6, 10] {
+        refresh_at(pool, s.conversation_id, now + TimeDelta::seconds(step)).await;
+    }
+    assert_eq!(turn_finished(pool, s.conversation_id).await, 1);
+}
+
+/// Сервер пушей лежит дольше трёх обычных попыток, а запрос всё ещё открыт и агент стоит.
+/// Пуш не бросается: он повторяется и уходит, как только сервер вернулся.
+#[tokio::test]
+async fn a_waiting_push_outlives_a_gotify_outage() {
+    let pool = canterlot_hub::testkit::db().await;
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    fake.script(&[500, 503, 500, 502]);
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let request = Uuid::now_v7();
+    open_question(&pool, &s, &question_batch(&execution, request, "Да?")).await;
+    let sender = sender(&config);
+    let mut reports = Vec::new();
+    for _ in 0..5 {
+        let report = sender.deliver_due(&pool).await.unwrap();
+        reports.push((report.sent, report.retried, report.dropped));
+        make_due(&pool).await;
+    }
+    assert_eq!(
+        reports,
+        [(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (1, 0, 0)]
+    );
+    let (state, attempts): (String, i32) =
+        sqlx::query_as("select state,attempts from owner_pushes where dedupe_key=$1")
+            .bind(format!("waiting:{request}"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((state.as_str(), attempts), ("sent", 5));
+    assert_eq!(fake.seen().len(), 5);
+}
+
+/// Паузы после обычных попыток растут вдвое до потолка в 15 минут, а не обнуляются:
+/// лежащий сервер не получает запрос каждую секунду.
+#[tokio::test]
+async fn a_waiting_push_retries_with_a_growing_pause() {
+    let pool = canterlot_hub::testkit::db().await;
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    fake.script(&[500; 6]);
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    open_question(
+        &pool,
+        &s,
+        &question_batch(&execution, Uuid::now_v7(), "Да?"),
+    )
+    .await;
+    // Боевые паузы: 60 и 180 секунд, дальше удвоение.
+    let sender = Sender::new(&config).unwrap();
+    let mut pauses = Vec::new();
+    for _ in 0..6 {
+        assert_eq!(sender.deliver_due(&pool).await.unwrap().retried, 1);
+        let pause: f64 = sqlx::query_scalar(
+            "select extract(epoch from run_at-updated_at)::float8 from owner_pushes",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        pauses.push(pause.round() as i64);
+        make_due(&pool).await;
+    }
+    assert_eq!(pauses, [60, 180, 360, 720, 900, 900]);
+    assert_eq!(pushes(&pool).await[0].2, "pending");
+}
+
+/// Строка старше получаса при открытом запросе всё равно уходит: лимит в минуту или
+/// долгий сбой сервера не отменяют того, что агент ждёт владельца.
+#[tokio::test]
+async fn an_old_waiting_push_is_sent_while_the_request_is_open() {
+    let pool = canterlot_hub::testkit::db().await;
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let request = Uuid::now_v7();
+    open_question(&pool, &s, &question_batch(&execution, request, "Старый?")).await;
+    sqlx::query(
+        "update owner_pushes set created_at=clock_timestamp()-interval '1 hour'
+         where dedupe_key=$1",
+    )
+    .bind(format!("waiting:{request}"))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let report = sender(&config).deliver_due(&pool).await.unwrap();
+    assert_eq!((report.sent, report.dropped), (1, 0));
     assert_eq!(fake.seen().len(), 1);
 }
 
@@ -1810,12 +1936,8 @@ async fn delivery_gives_up_after_the_last_attempt_without_leaking_the_key() {
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
-    open_question(
-        &pool,
-        &s,
-        &question_batch(&execution, Uuid::now_v7(), "Секретный вопрос?"),
-    )
-    .await;
+    // Итог хода: его не повторяют бесконечно, в отличие от пуша «ждёт владельца».
+    queue_turn_finished(&pool, &s, &execution, "Секретный ответ").await;
     let sender = sender(&config);
     let mut dropped = 0;
     for _ in 0..5 {
