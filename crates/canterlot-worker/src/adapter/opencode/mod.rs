@@ -108,6 +108,10 @@ pub const VERIFIED_OPENAPI_SHA256: &[(Triple, &str)] = &[
         (2, 2, 6),
         "4172c8b5a105c666235144d87ed9bef3baad837b7249a89fdc4af1bbf6be2b46",
     ),
+    (
+        (2, 4, 1),
+        "6e23e77072e41a75ec55b8da91d3abb32e5c66fc4e234763ed5a02f8f28ecbbb",
+    ),
 ];
 
 /// Итог проверки при старте воркера: версия CLI и каталог моделей.
