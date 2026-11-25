@@ -1370,6 +1370,110 @@ async fn a_report_on_connect_applies_forward() {
     assert_eq!(fx.job(finished).await.exit_code, Some(0));
 }
 
+/// Воркер принял запуск: команда запуска завершена фактом `JobDispatched`.
+async fn accepted_by_worker(fx: &Fx, id: Uuid) {
+    let a = fx.a;
+    let fact = canterlot_proto::worker::v1::JobDispatched {
+        job_id: id.to_string(),
+        attempt: 1,
+        ..Default::default()
+    };
+    fx.apply(move |conn| {
+        Box::pin(async move { facts::apply_dispatched(conn, a, &fact, Uuid::now_v7()).await })
+    })
+    .await;
+}
+
+/// Последний факт задачи и принятие её запуска были давно: отчёт застал не гонку с запуском.
+async fn long_ago(fx: &Fx, id: Uuid) {
+    sqlx::query(
+        "update jobs set last_fact_at = clock_timestamp() - interval '10 minutes',
+                dispatched_at = clock_timestamp() - interval '10 minutes' where id = $1",
+    )
+    .bind(id)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update commands set completed_at = clock_timestamp() - interval '10 minutes'
+          where kind = 'start_inplace_job' and payload->>'job_id' = $1",
+    )
+    .bind(id.to_string())
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+}
+
+async fn report_of(fx: &Fx, jobs: Vec<JobSnapshot>) {
+    let a = fx.a;
+    fx.apply(move |conn| {
+        Box::pin(async move {
+            let report = JobsReport {
+                jobs,
+                observed_at_ms: 0,
+            };
+            facts::apply_report(conn, a, &report, Uuid::now_v7()).await
+        })
+    })
+    .await;
+}
+
+/// Каталог состояния воркера утрачен: он на связи, но в отчёте о задачах её нет. Раньше такая
+/// задача висела в `running` вечно и занимала место машины: потерю по молчанию проход не
+/// объявляет машине на связи. Теперь отчёт сам закрывает её `lost`.
+#[tokio::test]
+async fn a_report_without_a_job_the_worker_accepted_long_ago_loses_it() {
+    let pool = canterlot_hub::testkit::db().await;
+    let fx = Fx::new(pool).await;
+    let forgotten = job_id(&fx.run("one").await);
+    let known = job_id(&fx.run("two").await);
+    let fresh = job_id(&fx.run("three").await);
+    let unaccepted = job_id(&fx.run("four").await);
+    for id in [forgotten, known, fresh] {
+        accepted_by_worker(&fx, id).await;
+    }
+    fx.started(fx.a, forgotten).await;
+    fx.started(fx.a, known).await;
+    for id in [forgotten, known, unaccepted] {
+        long_ago(&fx, id).await;
+    }
+
+    report_of(
+        &fx,
+        vec![JobSnapshot {
+            job_id: known.to_string(),
+            attempt: 1,
+            phase: JobPhase::Running as i32,
+            pid: 7,
+            start_time: 8,
+            started_at_ms: 1,
+            ..Default::default()
+        }],
+    )
+    .await;
+
+    assert_eq!(fx.state(forgotten).await, "lost");
+    assert_eq!(
+        fx.job(forgotten).await.end_reason.as_deref(),
+        Some("unknown_to_worker")
+    );
+    assert_eq!(fx.state(known).await, "running", "the worker reported it");
+    assert_eq!(
+        fx.state(fresh).await,
+        "dispatched",
+        "accepted a moment ago: the report may be older than the launch"
+    );
+    assert_eq!(
+        fx.state(unaccepted).await,
+        "dispatched",
+        "the worker never confirmed the launch: the command is still on its way"
+    );
+    // Поздний итог потерянной задачи ничего не меняет, как и после потери по молчанию.
+    fx.finished(fx.a, forgotten, JobOutcome::Succeeded, Some(0))
+        .await;
+    assert_eq!(fx.state(forgotten).await, "lost");
+}
+
 fn finished_report(id: Uuid, log_bytes: u64) -> JobsReport {
     JobsReport {
         jobs: vec![JobSnapshot {

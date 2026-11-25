@@ -303,8 +303,88 @@ pub async fn apply_report(
     for snapshot in &report.jobs {
         apply_snapshot(conn, machine_id, snapshot, correlation_id).await?;
     }
+    lose_unknown_in_tx(conn, machine_id, report, correlation_id).await?;
     // Машина вернулась: очередь на неё может идти.
     dispatch_machine_in_tx(conn, machine_id, correlation_id).await?;
+    Ok(())
+}
+
+/// Предел отчёта у воркера (`MAX_REPORT_JOBS`): отчёт такого размера мог быть обрезан, и
+/// отсутствие задачи в нём ничего не доказывает.
+const REPORT_CAP: usize = 1000;
+/// Сколько задача и принятие её запуска должны быть старше отчёта. Отчёт собирается один раз
+/// при подключении и идёт другим потоком, чем факты журнала: свежепринятая задача могла
+/// появиться у воркера уже после того, как он собрал отчёт.
+const UNKNOWN_AFTER_SECONDS: f64 = 120.0;
+
+/// Воркер называет в отчёте каждую попытку, каталог которой у него есть. Задача, запуск
+/// которой он давно принял, а в отчёте её нет, ему неизвестна: каталог состояния утрачен
+/// (переустановка, новый диск). Фактов о ней уже не будет, а потерю по молчанию проход
+/// (`sweep::lost_sweep`) машине на связи не объявляет, поэтому задача висела бы вечно и
+/// занимала место машины. Она заканчивается `lost` здесь.
+async fn lose_unknown_in_tx(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    report: &JobsReport,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    if report.jobs.len() >= REPORT_CAP {
+        return Ok(());
+    }
+    let (ids, attempts): (Vec<Uuid>, Vec<i32>) = report
+        .jobs
+        .iter()
+        .filter_map(|snapshot| {
+            Some((
+                Uuid::parse_str(&snapshot.job_id).ok()?,
+                i32::try_from(snapshot.attempt).ok()?,
+            ))
+        })
+        .unzip();
+    let unknown: Vec<Uuid> = sqlx::query_scalar(
+        "select j.id from jobs j
+          where j.machine_id = $1 and j.state in ('dispatched','waiting_lease','running')
+            and j.finish_reported_at is null
+            and coalesce(j.last_fact_at, j.dispatched_at, j.created_at)
+                < clock_timestamp() - make_interval(secs => $4)
+            and not exists(select 1 from unnest($2::uuid[], $3::int[]) as r(id, attempt)
+                            where r.id = j.id and r.attempt = j.attempt)
+            and exists(select 1 from commands c
+                        where c.machine_id = $1 and c.kind = 'start_inplace_job'
+                          and c.payload->>'job_id' = j.id::text
+                          and (c.payload->>'attempt')::int = j.attempt
+                          and c.delivery_state = 'completed'
+                          and c.completed_at < clock_timestamp() - make_interval(secs => $4))
+          order by j.id",
+    )
+    .bind(machine_id)
+    .bind(&ids)
+    .bind(&attempts)
+    .bind(UNKNOWN_AFTER_SECONDS)
+    .fetch_all(&mut *conn)
+    .await?;
+    for id in unknown {
+        lock_machine(conn, machine_id).await?;
+        let Some(job) = lock_row(conn, id).await? else {
+            continue;
+        };
+        if job.machine_id != Some(machine_id)
+            || !matches!(
+                job.state(),
+                State::Dispatched | State::WaitingLease | State::Running
+            )
+        {
+            continue;
+        }
+        tracing::warn!(kind = "job_unknown_to_worker", job_id = %id, "the connected worker does not know the job; it ends lost");
+        finish_in_tx(
+            conn,
+            &job,
+            Outcome::bare(State::Lost, Some("unknown_to_worker")),
+            correlation_id,
+        )
+        .await?;
+    }
     Ok(())
 }
 
