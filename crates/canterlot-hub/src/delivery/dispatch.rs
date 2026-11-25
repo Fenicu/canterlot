@@ -295,7 +295,16 @@ pub async fn dispatch_next(
                 .await?;
         }
     }
-    prepend_service_notes(&mut *conn, conversation_id, input_id, command_id).await?;
+    let noted = with_service_notes(&mut *conn, conversation_id, input_id).await?;
+    if !noted.notes.is_empty() {
+        sqlx::query(
+            "update commands set payload=jsonb_set(payload,'{content}',$2::jsonb) where id=$1",
+        )
+        .bind(command_id)
+        .bind(&noted.content)
+        .execute(&mut *conn)
+        .await?;
+    }
     let (execution_id, generation, _) = live.ok_or(sqlx::Error::RowNotFound)?;
     let (attempt, machine_id): (i32, Uuid) = sqlx::query_as(
         "update commands set delivery_state = 'pending', dispatch_attempt = dispatch_attempt + 1,
@@ -378,21 +387,39 @@ pub async fn dispatch_next(
     .await
 }
 
+/// Текст ввода для агента и заметки, которые в нём едут.
+#[derive(Debug, Clone)]
+pub(crate) struct NotedContent {
+    pub content: Value,
+    /// Заметки в приставке; пусто — `content` равен собственному тексту ввода.
+    pub notes: Vec<Uuid>,
+}
+
 /// Служебные строки, накопившиеся до этого ввода, идут агенту одним коротким блоком
 /// перед текстом владельца или событием. Сами они хода не начинали; приставка
-/// собирается здесь, при каждой выдаче, заново: из заметок и собственного текста ввода.
-/// Выдача может не состояться (отзыв, отложенная выдача), и ввод вернётся в очередь с уже
-/// привязанными заметками. Поэтому берутся и свободные заметки, и привязанные к этому
-/// вводу (правка между выдачами заменяет текст команды и стёрла бы приставку), и
-/// привязанные к вводу, который до агента так и не дошёл: отменён или отклонён.
-/// Карточка «Ход завис» (`turn_hung_notice`) адресована только владельцу: она остаётся
-/// в ленте и к агенту не идёт никогда.
-async fn prepend_service_notes(
+/// собирается здесь, при каждой выдаче и каждом вливании («Отправить сейчас»), заново:
+/// из заметок и собственного текста ввода, и заметки привязываются к вводу.
+/// Выдача может не состояться (отзыв, отложенная выдача, отказ вливания), и ввод
+/// вернётся в очередь с уже привязанными заметками. Поэтому берутся и свободные заметки,
+/// и привязанные к этому вводу (правка между выдачами заменяет текст команды и стёрла бы
+/// приставку), и привязанные к вводу, который до агента так и не дошёл: отменён или
+/// отклонён. Карточка «Ход завис» (`turn_hung_notice`) адресована только владельцу: она
+/// остаётся в ленте и к агенту не идёт никогда.
+pub(crate) async fn with_service_notes(
     conn: &mut PgConnection,
     conversation_id: Uuid,
     input_id: Uuid,
-    command_id: Uuid,
-) -> Result<(), sqlx::Error> {
+) -> Result<NotedContent, sqlx::Error> {
+    // Основа — текст самого ввода, а не прежнее содержимое команды: в команде после
+    // несостоявшейся выдачи уже стоит приставка, и вторая легла бы поверх первой.
+    let own: Value = sqlx::query_scalar("select content from inputs where id=$1")
+        .bind(input_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let plain = |own: Value| NotedContent {
+        content: own,
+        notes: Vec::new(),
+    };
     let notes: Vec<(Uuid, Value)> = sqlx::query_as(
         "select n.id,n.content from inputs n
          where n.conversation_id=$1 and n.service_note
@@ -408,7 +435,7 @@ async fn prepend_service_notes(
     .fetch_all(&mut *conn)
     .await?;
     if notes.is_empty() {
-        return Ok(());
+        return Ok(plain(own));
     }
     let text = notes
         .iter()
@@ -422,21 +449,10 @@ async fn prepend_service_notes(
         .collect::<Vec<_>>()
         .join("\n\n");
     if text.is_empty() {
-        return Ok(());
+        return Ok(plain(own));
     }
-    // Основа — текст самого ввода, а не прежнее содержимое команды: в команде после
-    // несостоявшейся выдачи уже стоит приставка, и вторая легла бы поверх первой.
-    let own: Value = sqlx::query_scalar("select content from inputs where id=$1")
-        .bind(input_id)
-        .fetch_one(&mut *conn)
-        .await?;
     let mut content = own.as_array().cloned().unwrap_or_default();
     content.insert(0, json!({"type":"text","text":text}));
-    sqlx::query("update commands set payload=jsonb_set(payload,'{content}',$2::jsonb) where id=$1")
-        .bind(command_id)
-        .bind(json!(content))
-        .execute(&mut *conn)
-        .await?;
     let ids: Vec<Uuid> = notes.iter().map(|(id, _)| *id).collect();
     sqlx::query(
         "update inputs set note_attached_to=$2
@@ -446,5 +462,8 @@ async fn prepend_service_notes(
     .bind(input_id)
     .execute(&mut *conn)
     .await?;
-    Ok(())
+    Ok(NotedContent {
+        content: json!(content),
+        notes: ids,
+    })
 }

@@ -119,6 +119,10 @@ struct SteerPayload {
     settings_rev: Option<i64>,
     #[serde(default)]
     expected_running_command_id: String,
+    /// Заметки в тексте вливания: нужны только квитанции на хабе.
+    #[serde(default)]
+    #[allow(dead_code)]
+    note_ids: Vec<Uuid>,
 }
 
 #[derive(Deserialize)]

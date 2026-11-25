@@ -379,3 +379,163 @@ async fn a_note_of_a_cancelled_input_rides_with_the_next_one() {
             .unwrap();
     assert_eq!(attached, Some(next.input_id));
 }
+
+mod send_now {
+    //! «Отправить сейчас» собирает текст и привязывает заметки той же операцией, что
+    //! обычная выдача.
+
+    use canterlot_hub::delivery::{
+        control::{SendNowOutcome, request_send_now},
+        receipts::{InputReceipt, apply_input_receipt},
+    };
+
+    use super::*;
+
+    async fn text_input(pool: &PgPool, seed: &Seed, text: &str) -> delivery::SubmittedInput {
+        delivery::submit_input(
+            pool,
+            SubmitInput {
+                owner_id: seed.owner_id,
+                conversation_id: seed.conversation_id,
+                idempotency_key: Uuid::now_v7().to_string(),
+                content: vec![ContentBlock::Text { text: text.into() }],
+                received_at: Utc::now(),
+                correlation_id: Uuid::now_v7(),
+                origin: None,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Сессия Codex с идущим ходом.
+    async fn running_turn(pool: &PgPool) -> Seed {
+        let seed = seed(pool).await;
+        sqlx::query("update conversations set harness='codex' where id=$1")
+            .bind(seed.conversation_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        start(pool, &seed).await;
+        text_input(pool, &seed, "первый ход").await;
+        let DispatchOutcome::Dispatched {
+            command_id,
+            attempt,
+            ..
+        } = dispatch(pool, &seed).await
+        else {
+            panic!("the turn did not dispatch");
+        };
+        for receipt in [
+            InputReceipt::Stored,
+            InputReceipt::TransmissionStarted,
+            InputReceipt::Accepted,
+        ] {
+            apply_input_receipt(pool, command_id, attempt, receipt, Uuid::now_v7())
+                .await
+                .unwrap();
+        }
+        seed
+    }
+
+    async fn steer(pool: &PgPool, seed: &Seed, input_id: Uuid) -> Uuid {
+        let outcome = request_send_now(
+            pool,
+            seed.owner_id,
+            seed.conversation_id,
+            input_id,
+            &Uuid::now_v7().to_string(),
+            Uuid::now_v7(),
+            &["send_now_v1".to_owned()],
+        )
+        .await
+        .unwrap();
+        let SendNowOutcome::Requested { steer_command_id } = outcome else {
+            panic!("send now not requested: {outcome:?}");
+        };
+        steer_command_id
+    }
+
+    async fn bound(pool: &PgPool, note: Uuid) -> Option<Uuid> {
+        sqlx::query_scalar("select note_attached_to from inputs where id=$1")
+            .bind(note)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    const EARLIER: &str = "[canterlot] Session \"Ранний\" was accepted.";
+
+    /// Вливание несёт свободную заметку и заметку, которую этому вводу уже привязала
+    /// прежняя, не состоявшаяся выдача. Принятое вливание забирает обе: следующей
+    /// выдаче они не достаются, но и в тексте вливания они были.
+    #[tokio::test]
+    async fn send_now_carries_the_service_notes_of_its_input() {
+        let pool = canterlot_hub::testkit::db().await;
+        let seed = running_turn(&pool).await;
+        let earlier = note(&pool, &seed, accepted_origin(Uuid::now_v7()), EARLIER).await;
+        let free = note(&pool, &seed, accepted_origin(Uuid::now_v7()), ACCEPTED).await;
+        let steered = text_input(&pool, &seed, "влей это").await;
+        // Состояние после выдачи, которая вернулась в очередь: заметка привязана к вводу.
+        sqlx::query("update inputs set note_attached_to=$2 where id=$1")
+            .bind(earlier)
+            .bind(steered.input_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let command = steer(&pool, &seed, steered.input_id).await;
+        assert_eq!(
+            command_content(&pool, command).await,
+            json!([
+                {"type":"text","text":format!("{EARLIER}\n\n{ACCEPTED}")},
+                {"type":"text","text":"влей это"},
+            ])
+        );
+        apply_input_receipt(&pool, command, 0, InputReceipt::Accepted, Uuid::now_v7())
+            .await
+            .unwrap();
+        assert_eq!(bound(&pool, earlier).await, Some(steered.input_id));
+        assert_eq!(bound(&pool, free).await, Some(steered.input_id));
+    }
+
+    /// Заметка, привязанная к вводу уже после того, как собрано вливание, в его тексте не
+    /// была. Принятое вливание её отпускает: её несёт следующая выдача. Отказ вливания
+    /// отпускает и те, что в нём были.
+    #[tokio::test]
+    async fn send_now_releases_notes_its_text_did_not_carry() {
+        let pool = canterlot_hub::testkit::db().await;
+        let seed = running_turn(&pool).await;
+        let carried = note(&pool, &seed, accepted_origin(Uuid::now_v7()), EARLIER).await;
+        let steered = text_input(&pool, &seed, "влей это").await;
+        let command = steer(&pool, &seed, steered.input_id).await;
+        assert_eq!(bound(&pool, carried).await, Some(steered.input_id));
+        let late = note(&pool, &seed, accepted_origin(Uuid::now_v7()), ACCEPTED).await;
+        sqlx::query("update inputs set note_attached_to=$2 where id=$1")
+            .bind(late)
+            .bind(steered.input_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        apply_input_receipt(&pool, command, 0, InputReceipt::Accepted, Uuid::now_v7())
+            .await
+            .unwrap();
+        assert_eq!(bound(&pool, carried).await, Some(steered.input_id));
+        assert_eq!(bound(&pool, late).await, None, "not in the steered text");
+
+        let rejected = text_input(&pool, &seed, "и это").await;
+        let command = steer(&pool, &seed, rejected.input_id).await;
+        assert_eq!(bound(&pool, late).await, Some(rejected.input_id));
+        apply_input_receipt(
+            &pool,
+            command,
+            0,
+            InputReceipt::ExplicitRejection {
+                reason: "input_too_long".into(),
+            },
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bound(&pool, late).await, None, "a refused steer lets it go");
+    }
+}

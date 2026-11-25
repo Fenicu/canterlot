@@ -1262,15 +1262,15 @@ pub(crate) async fn request_send_now_in_tx(
                 reason: "conversation_closed",
             });
         }
-        let input: Option<(String, Uuid, Value)> = sqlx::query_as(
-            "select i.state, i.command_id, i.content from inputs i
+        let input: Option<(String, Uuid)> = sqlx::query_as(
+            "select i.state, i.command_id from inputs i
                  where i.id = $1 and i.conversation_id = $2",
         )
         .bind(input_id)
         .bind(conversation_id)
         .fetch_optional(&mut *conn)
         .await?;
-        let (state, deliver_command_id, content) = input.ok_or(ControlError::NotFound)?;
+        let (state, deliver_command_id) = input.ok_or(ControlError::NotFound)?;
         if state != InputState::Queued.as_str() {
             return Err(ControlError::InvalidRequest {
                 reason: "input_not_queued",
@@ -1382,6 +1382,12 @@ pub(crate) async fn request_send_now_in_tx(
                 .fetch_optional(&mut *conn)
                 .await?
                 .unwrap_or(Value::Array(Vec::new()));
+            // Текст и заметки собираются той же операцией, что при обычной выдаче: иначе
+            // свободная заметка пропустила бы влитый ввод, а привязанная прошлой выдачей
+            // осталась бы у принятого ввода, не побывав в тексте. `note_ids` говорит
+            // квитанции, какие заметки в этом тексте были.
+            let noted =
+                super::dispatch::with_service_notes(&mut *conn, conversation_id, input_id).await?;
             let steer_command_id = Uuid::now_v7();
             sqlx::query(
                     "insert into commands (id, machine_id, conversation_id, execution_id,
@@ -1397,7 +1403,8 @@ pub(crate) async fn request_send_now_in_tx(
                 .bind(json!({
                     "input_id": input_id,
                     "conversation_id": conversation_id,
-                    "content": content,
+                    "content": noted.content,
+                    "note_ids": noted.notes,
                     "attachment_ids": attachment_ids,
                     "expected_running_command_id": running_command_id.to_string(),
                 }))

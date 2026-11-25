@@ -384,6 +384,9 @@ pub async fn apply_input_receipt_in_tx(
         .bind(matches!(receipt, InputReceipt::Stored | InputReceipt::TransmissionStarted))
         .execute(&mut *conn)
         .await?;
+        if steer {
+            release_steer_notes_in_tx(&mut *conn, command_id, target.input_id, input_state).await?;
+        }
         // Ввод, дошедший до агента вливанием, или отменённый владельцем, больше
         // не ждёт обычной выдачи: его удержанная команда завершается здесь же,
         // иначе она навсегда остаётся «held» и выглядит ждущей доставки.
@@ -446,6 +449,37 @@ pub async fn apply_input_receipt_in_tx(
         .await?;
     }
     Ok(ApplyOutcome::Applied { input_state })
+}
+
+/// Заметки после исхода вливания. Вливание привязывает к вводу заметки своего текста
+/// (`dispatch::with_service_notes`, список в `note_ids`). Ввод вернулся в очередь (отказ,
+/// отсрочка): заметки отпускаются и едут со следующей выдачей, какой бы ввод она ни
+/// несла. Ввод принят или ждёт уточнения: у него остаются только заметки, что были в
+/// тексте вливания; привязанные позже он агенту не нёс, их несёт следующая выдача.
+async fn release_steer_notes_in_tx(
+    conn: &mut PgConnection,
+    steer_command_id: Uuid,
+    input_id: Uuid,
+    input_state: InputState,
+) -> Result<(), sqlx::Error> {
+    let keep_carried = match input_state {
+        InputState::Queued => false,
+        InputState::Accepted | InputState::AcceptanceUnconfirmed => true,
+        _ => return Ok(()),
+    };
+    sqlx::query(
+        "update inputs n set note_attached_to = null
+         where n.note_attached_to = $2 and n.service_note
+           and not ($3 and n.id::text in (
+                 select jsonb_array_elements_text(coalesce(c.payload->'note_ids', '[]'::jsonb))
+                 from commands c where c.id = $1))",
+    )
+    .bind(steer_command_id)
+    .bind(input_id)
+    .bind(keep_carried)
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 /// Терминальный ввод не держит свою выдачу: текст уже дошёл до агента другим
