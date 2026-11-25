@@ -57,6 +57,14 @@ pub enum StoreError {
     MetadataUtf8(#[from] std::str::Utf8Error),
 }
 
+impl StoreError {
+    /// Слово для `<data_dir>/fatal`: запечатанный журнал перезапуск не вылечит.
+    pub fn fatal_reason(&self) -> Option<&'static str> {
+        matches!(self, Self::CjSealed | Self::LocalSealed(_))
+            .then_some(crate::fatal::JOURNAL_SEALED)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct ReceiptEntry {
     command_id: String,
@@ -1016,7 +1024,21 @@ fn receipt_id(raw: &str) -> String {
 pub(crate) fn open_journal(path: &Path) -> Result<Journal, StoreError> {
     let options = JournalOptions::default();
     if path.join("header").try_exists()? {
-        Ok(Journal::open(path, options)?.0)
+        let (journal, report) = Journal::open(path, options)?;
+        if let Some(tail) = report.corrupted_tail {
+            // Оборванный хвост (незавершённый append) журнал пережил и продолжает;
+            // запечатанный журнал вызывающий код откроет ошибкой.
+            tracing::warn!(
+                kind = "journal_tail_corrupted",
+                journal = %path.file_name().unwrap_or_default().to_string_lossy(),
+                journal_id = %journal.id().0,
+                from_seq = tail.from_seq,
+                bytes = tail.bytes,
+                sealed = journal.is_sealed().is_some(),
+                "journal tail was moved to quarantine"
+            );
+        }
+        Ok(journal)
     } else {
         Ok(Journal::create(path, JournalId(Uuid::now_v7()), options)?)
     }

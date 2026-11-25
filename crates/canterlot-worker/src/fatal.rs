@@ -14,6 +14,8 @@ pub const UNAUTHENTICATED: &str = "unauthenticated";
 pub const RESTORE_GENERATION: &str = "restore_generation";
 /// Конфигурация негодна: носитель пишет её заново.
 pub const CONFIG: &str = "config";
+/// Локальный журнал запечатан после порчи: нужен сброс локального состояния.
+pub const JOURNAL_SEALED: &str = "journal_sealed";
 
 /// Записывает слово причины; сбой записи не мешает выходу.
 pub fn write(data_dir: &Path, reason: &str) {

@@ -725,7 +725,11 @@ impl Runner {
                 return Ok(());
             }
             state.gate.requested();
-            let reset = !probe.store || probe.fatal == fatal::RESTORE_GENERATION;
+            // Запечатанный журнал раннера лечится так же, как новое поколение: чистым
+            // состоянием под новый токен.
+            let reset = !probe.store
+                || probe.fatal == fatal::RESTORE_GENERATION
+                || probe.fatal == fatal::JOURNAL_SEALED;
             let credentials = match tokio::time::timeout(
                 Duration::from_secs(30),
                 self.shared

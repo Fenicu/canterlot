@@ -174,11 +174,22 @@ impl Journal {
                 &mut last_seq,
                 opts.max_record_bytes,
             )?;
-            if let Some(offset) = corrupted_at {
+            if let Some(stop) = corrupted_at {
+                let offset = stop.offset;
                 let from_seq = next_seq(last_seq)?;
-                let sealed = sealed_from.map_or(from_seq, |prior| prior.min(from_seq));
-                segment::atomic_replace(dir, "sealed", &format::encode_ack(sealed))?;
-                sealed_from = Some(sealed);
+                // Оборванный хвост — запись последнего сегмента, обрезанная концом
+                // файла: её append не вернулся, номер никому не выдан. Такой хвост
+                // уходит в карантин без печати. Обрыв ниже сохранённого ACK значит,
+                // что получатель запись уже видел, и это порча.
+                let torn = stop.cut
+                    && index + 1 == paths.len()
+                    && sealed_from.is_none()
+                    && acked_seq <= last_seq;
+                if !torn {
+                    let sealed = sealed_from.map_or(from_seq, |prior| prior.min(from_seq));
+                    segment::atomic_replace(dir, "sealed", &format::encode_ack(sealed))?;
+                    sealed_from = Some(sealed);
+                }
                 report.corrupted_tail =
                     Some(segment::quarantine(dir, &paths[index..], offset, from_seq)?);
                 segment.bytes = offset;

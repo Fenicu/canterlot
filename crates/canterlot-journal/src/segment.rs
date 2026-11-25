@@ -4,8 +4,16 @@ use std::io::{self, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::format::{self, RECORD_HEADER_BYTES};
+use crate::format::{self, RECORD_HEADER_BYTES, Scanned};
 use crate::{CorruptedTail, JournalError, Record};
+
+/// Где и почему проверка сегмента остановилась раньше конца файла.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScanStop {
+    pub offset: u64,
+    /// Запись оборвана концом файла (незавершённый append), а не испорчена.
+    pub cut: bool,
+}
 
 #[derive(Debug)]
 pub(crate) struct RecordPosition {
@@ -47,7 +55,7 @@ impl Segment {
         first_seq: u64,
         last_valid_seq: &mut u64,
         max_record_bytes: u32,
-    ) -> io::Result<(Self, Option<u64>)> {
+    ) -> io::Result<(Self, Option<ScanStop>)> {
         let mut file = File::open(&path)?;
         let bytes = file.metadata()?.len();
         let mut segment = Self {
@@ -56,17 +64,19 @@ impl Segment {
             bytes,
             records: Vec::new(),
         };
+        let stop = |offset, cut| Some(ScanStop { offset, cut });
         if last_valid_seq.checked_add(1) != Some(first_seq) {
-            return Ok((segment, Some(0)));
+            return Ok((segment, stop(0, false)));
         }
         let mut offset = 0;
         while offset < bytes {
-            let Some(record) = format::read_record(&mut file, bytes - offset, max_record_bytes)?
-            else {
-                return Ok((segment, Some(offset)));
+            let record = match format::scan_record(&mut file, bytes - offset, max_record_bytes)? {
+                Scanned::Record(record) => record,
+                Scanned::Cut => return Ok((segment, stop(offset, true))),
+                Scanned::Invalid => return Ok((segment, stop(offset, false))),
             };
             if last_valid_seq.checked_add(1) != Some(record.seq) {
-                return Ok((segment, Some(offset)));
+                return Ok((segment, stop(offset, false)));
             }
             let len = record.payload.len() as u32;
             *last_valid_seq = record.seq;

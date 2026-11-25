@@ -118,6 +118,33 @@ async fn invalid_config_exit_leaves_its_word_in_the_data_dir_it_names() {
 }
 
 #[tokio::test]
+async fn sealed_journal_exit_leaves_its_word() {
+    use std::io::Write;
+    let (hub, store) = ProtocolHub::start(Behavior::default()).await;
+    drop(store);
+    let segment = fs::read_dir(hub.config.data_dir.join("cj"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "log"))
+        .unwrap();
+    // Целая по длине запись с неверной контрольной суммой: порча, журнал запечатывается.
+    let mut record = 1u32.to_le_bytes().to_vec();
+    record.extend_from_slice(&[0xff; 4]);
+    record.extend_from_slice(&u64::MAX.to_le_bytes());
+    record.push(b'x');
+    let mut file = fs::OpenOptions::new().append(true).open(segment).unwrap();
+    file.write_all(&record).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("worker.toml");
+    fs::write(&path, toml_of(&hub.config)).unwrap();
+    let status = exit_of(spawn_worker(&path)).await;
+    assert!(!status.success());
+    assert_eq!(fatal_word(&hub.config.data_dir), "journal_sealed");
+}
+
+#[tokio::test]
 async fn a_normal_start_removes_the_fatal_file() {
     let (mut hub, store) = ProtocolHub::start(Behavior::default()).await;
     drop(store);

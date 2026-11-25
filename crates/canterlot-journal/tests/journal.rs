@@ -137,28 +137,97 @@ fn torn_tail_at_every_offset_keeps_valid_prefix() {
                 fs::read(tail.quarantine_path).unwrap(),
                 original_bytes[end_two as usize..length as usize]
             );
-            assert_eq!(journal.is_sealed(), Some(3));
-            assert!(matches!(
-                journal.append(b"replacement"),
-                Err(JournalError::Sealed { from_seq: 3 })
-            ));
+            // Запись, оборванная концом файла, не была дописана: её номер никто
+            // не видел, журнал продолжает с него же.
+            assert_eq!(journal.is_sealed(), None, "length {length}");
+            assert!(!copy.path().join("sealed").exists());
             assert_eq!(fs::metadata(&path).unwrap().len(), end_two);
+            assert_eq!(journal.append(b"replacement").unwrap(), 3);
         }
         drop(journal);
-        let (mut journal, report) = Journal::open(copy.path(), JournalOptions::default()).unwrap();
+        let (journal, report) = Journal::open(copy.path(), JournalOptions::default()).unwrap();
         assert!(report.corrupted_tail.is_none());
-        if length == end_two {
-            assert_eq!(journal.last_seq(), 3);
-            assert_eq!(journal.is_sealed(), None);
-        } else {
-            assert_eq!(journal.last_seq(), 2);
-            assert_eq!(journal.is_sealed(), Some(3));
-            assert!(matches!(
-                journal.append_batch(&[b"replacement"]),
-                Err(JournalError::Sealed { from_seq: 3 })
-            ));
-        }
+        assert_eq!(journal.last_seq(), 3);
+        assert_eq!(journal.is_sealed(), None);
+        assert_records(
+            &journal.read_from(3, usize::MAX).unwrap(),
+            &[(3, b"replacement")],
+        );
     }
+}
+
+#[test]
+fn torn_record_before_a_later_segment_is_sealed() {
+    let dir = TempDir::new().unwrap();
+    let options = JournalOptions {
+        segment_max_bytes: 20,
+        ..JournalOptions::default()
+    };
+    let mut journal = Journal::create(dir.path(), JournalId(Uuid::now_v7()), options).unwrap();
+    journal.append(b"one").unwrap();
+    journal.append(b"two").unwrap();
+    drop(journal);
+    let paths = segments(dir.path());
+    assert_eq!(paths.len(), 2);
+    // Обрыв в непоследнем сегменте: за ним лежат записи, которые уже были выданы.
+    let length = fs::metadata(&paths[0]).unwrap().len();
+    OpenOptions::new()
+        .write(true)
+        .open(&paths[0])
+        .unwrap()
+        .set_len(length - 1)
+        .unwrap();
+    let (mut journal, report) = Journal::open(dir.path(), options).unwrap();
+    assert_eq!(report.corrupted_tail.unwrap().from_seq, 1);
+    assert_eq!(journal.is_sealed(), Some(1));
+    assert!(matches!(
+        journal.append(b"replacement"),
+        Err(JournalError::Sealed { from_seq: 1 })
+    ));
+}
+
+#[test]
+fn torn_tail_below_the_stored_ack_is_sealed() {
+    let dir = TempDir::new().unwrap();
+    let mut journal = create(dir.path());
+    journal.append(b"one").unwrap();
+    journal.append(b"two").unwrap();
+    journal.ack(2).unwrap();
+    drop(journal);
+    let path = segments(dir.path()).remove(0);
+    let length = fs::metadata(&path).unwrap().len();
+    OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(length - 1)
+        .unwrap();
+    // Подтверждённую запись получатель уже видел: её номер занят навсегда.
+    let (mut journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert_eq!(report.corrupted_tail.unwrap().from_seq, 2);
+    assert_eq!(journal.is_sealed(), Some(2));
+    assert!(matches!(
+        journal.append(b"replacement"),
+        Err(JournalError::Sealed { from_seq: 2 })
+    ));
+}
+
+#[test]
+fn oversized_length_at_the_tail_is_sealed() {
+    let dir = TempDir::new().unwrap();
+    let mut journal = create(dir.path());
+    journal.append(b"one").unwrap();
+    drop(journal);
+    let path = segments(dir.path()).remove(0);
+    // Длина больше предела записи: библиотека такую запись не пишет, это порча.
+    let mut header = [0u8; RECORD_HEADER_BYTES];
+    header[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(&header).unwrap();
+    file.sync_all().unwrap();
+    let (journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert_eq!(report.corrupted_tail.unwrap().from_seq, 2);
+    assert_eq!(journal.is_sealed(), Some(2));
 }
 
 #[test]

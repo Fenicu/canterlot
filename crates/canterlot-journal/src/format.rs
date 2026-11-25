@@ -57,28 +57,52 @@ pub(crate) fn write_record(writer: &mut impl Write, seq: u64, payload: &[u8]) ->
     writer.write_all(payload)
 }
 
-pub(crate) fn read_record(
+/// Чем кончилось чтение записи с текущей позиции.
+pub(crate) enum Scanned {
+    Record(Record),
+    /// Запись оборвана концом данных: заголовок неполон либо payload короче
+    /// объявленной допустимой длины. Так выглядит незавершённый append.
+    Cut,
+    /// Запись цела по длине, но негодна: длина сверх предела или неверная CRC32C.
+    Invalid,
+}
+
+pub(crate) fn scan_record(
     reader: &mut impl Read,
     remaining: u64,
     max_record_bytes: u32,
-) -> io::Result<Option<Record>> {
+) -> io::Result<Scanned> {
     if remaining < RECORD_HEADER_BYTES {
-        return Ok(None);
+        return Ok(Scanned::Cut);
     }
     let mut header = [0; RECORD_HEADER_BYTES as usize];
     reader.read_exact(&mut header)?;
     let len = u32::from_le_bytes(header[..4].try_into().unwrap());
-    if len > max_record_bytes || u64::from(len) > remaining - RECORD_HEADER_BYTES {
-        return Ok(None);
+    if len > max_record_bytes {
+        return Ok(Scanned::Invalid);
+    }
+    if u64::from(len) > remaining - RECORD_HEADER_BYTES {
+        return Ok(Scanned::Cut);
     }
     let crc = u32::from_le_bytes(header[4..8].try_into().unwrap());
     let seq = u64::from_le_bytes(header[8..].try_into().unwrap());
     let mut payload = vec![0; len as usize];
     reader.read_exact(&mut payload)?;
     if checksum(seq, &payload) != crc {
-        return Ok(None);
+        return Ok(Scanned::Invalid);
     }
-    Ok(Some(Record { seq, payload }))
+    Ok(Scanned::Record(Record { seq, payload }))
+}
+
+pub(crate) fn read_record(
+    reader: &mut impl Read,
+    remaining: u64,
+    max_record_bytes: u32,
+) -> io::Result<Option<Record>> {
+    Ok(match scan_record(reader, remaining, max_record_bytes)? {
+        Scanned::Record(record) => Some(record),
+        Scanned::Cut | Scanned::Invalid => None,
+    })
 }
 
 fn checksum(seq: u64, payload: &[u8]) -> u32 {

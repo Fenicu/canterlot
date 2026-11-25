@@ -685,6 +685,16 @@ async fn a_fatal_exit_asks_for_a_token_once_per_pause_and_does_not_spin() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_changed_restore_generation_resets_local_state_with_a_new_token() {
+    fatal_word_resets_local_state("restore_generation").await;
+}
+
+/// Запечатанный порчей журнал раннера перезапуск не вылечит: нужно чистое состояние.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sealed_journal_resets_local_state_with_a_new_token() {
+    fatal_word_resets_local_state("journal_sealed").await;
+}
+
+async fn fatal_word_resets_local_state(word: &str) {
     let fixture = Fixture::start(Options::default()).await;
     fixture.wait_hellos(1).await;
     let pid = fixture.worker_pid().unwrap();
@@ -696,7 +706,7 @@ async fn a_changed_restore_generation_resets_local_state_with_a_new_token() {
     // Подкладываем слово воркера и метку в состоянии: после сброса метки быть не должно.
     let sentinel = fixture.root.join("state/sentinel");
     fs::write(&sentinel, "old").unwrap();
-    fs::write(fixture.root.join("state/fatal"), "restore_generation").unwrap();
+    fs::write(fixture.root.join("state/fatal"), word).unwrap();
     let before = fixture.hellos();
     until("the state reset and a new worker", || {
         !sentinel.exists() && fixture.hellos() > before
@@ -704,7 +714,7 @@ async fn a_changed_restore_generation_resets_local_state_with_a_new_token() {
     .await;
     let requests = fixture.control.requests();
     assert_eq!(requests.len(), 2, "{requests:?}");
-    assert!(requests[1].1, "restore_generation resets local state");
+    assert!(requests[1].1, "{word} resets local state");
     assert!(!fixture.root.join("state/fatal").exists());
 }
 

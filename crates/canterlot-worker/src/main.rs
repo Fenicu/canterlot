@@ -505,12 +505,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (config, store) = match loaded {
         Ok(loaded) => loaded,
         Err(error) => {
-            if let (Some(dir), Some(reason)) = (
-                &data_dir_hint,
-                error
-                    .downcast_ref::<config::ConfigError>()
-                    .and_then(config::ConfigError::fatal_reason),
-            ) {
+            let reason = error
+                .downcast_ref::<config::ConfigError>()
+                .and_then(config::ConfigError::fatal_reason)
+                .or_else(|| {
+                    error
+                        .downcast_ref::<canterlot_worker::store::StoreError>()
+                        .and_then(canterlot_worker::store::StoreError::fatal_reason)
+                });
+            if let (Some(dir), Some(reason)) = (&data_dir_hint, reason) {
                 canterlot_worker::fatal::write(dir, reason);
             }
             return Err(error);

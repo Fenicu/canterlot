@@ -293,25 +293,107 @@ fn cursor_and_ack_preserve_unacknowledged_records() {
     assert_eq!(suffix.iter().map(|r| r.seq).collect::<Vec<_>>(), [2, 3]);
 }
 
-#[test]
-fn sealed_cj_refuses_open_even_after_quarantine() {
-    let dir = private_dir();
-    let mut store = WorkerStore::open(dir.path()).unwrap();
-    store.accept_command(&delivery()).unwrap();
-    drop(store);
-    let segment = fs::read_dir(dir.path().join("cj"))
+fn last_segment(data_dir: &Path, journal: &str) -> std::path::PathBuf {
+    let mut segments: Vec<_> = fs::read_dir(data_dir.join(journal))
         .unwrap()
         .map(|e| e.unwrap().path())
-        .find(|p| p.extension().is_some_and(|e| e == "log"))
+        .filter(|p| p.extension().is_some_and(|e| e == "log"))
+        .collect();
+    segments.sort();
+    segments.pop().unwrap()
+}
+
+/// Хранилище с командой и записью принадлежности: во всех четырёх журналах есть записи.
+fn populated_store(data_dir: &Path) -> (Command, Uuid) {
+    let mut store = WorkerStore::open(data_dir).unwrap();
+    let cmd = delivery();
+    store.accept_command(&cmd).unwrap();
+    let execution = Uuid::now_v7();
+    store
+        .ownership_mut()
+        .unwrap()
+        .append(ownership_record(execution))
         .unwrap();
-    let mut file = OpenOptions::new().append(true).open(segment).unwrap();
-    file.write_all(b"torn tail").unwrap();
-    file.sync_all().unwrap();
-    for _ in 0..2 {
+    (cmd, execution)
+}
+
+/// Незавершённый append: процесс убит или питание пропало посреди записи.
+#[test]
+fn torn_tail_in_any_journal_is_quarantined_and_the_store_reopens() {
+    for journal in ["cj", "inbox", "receipts", "ownership"] {
+        let dir = private_dir();
+        let (cmd, execution) = populated_store(dir.path());
+        let segment = last_segment(dir.path(), journal);
+        let valid = fs::metadata(&segment).unwrap().len();
+        let mut file = OpenOptions::new().append(true).open(&segment).unwrap();
+        file.write_all(b"torn tail").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        for _ in 0..2 {
+            let mut store = WorkerStore::open(dir.path())
+                .unwrap_or_else(|error| panic!("{journal}: store did not reopen: {error}"));
+            assert!(!dir.path().join(journal).join("sealed").exists());
+            assert_eq!(fs::metadata(&segment).unwrap().len(), valid, "{journal}");
+            // Всё, что было записано до обрыва, на месте.
+            assert_eq!(
+                store.stored_commands().unwrap(),
+                std::slice::from_ref(&cmd),
+                "{journal}"
+            );
+            assert_eq!(store.accept_command(&cmd).unwrap(), Accept::Duplicate);
+            assert!(store.ownership().get(execution).is_some(), "{journal}");
+        }
+        let quarantined: Vec<_> = fs::read_dir(dir.path().join(journal).join("quarantine"))
+            .unwrap()
+            .map(|e| fs::read(e.unwrap().path()).unwrap())
+            .collect();
+        assert_eq!(quarantined, [b"torn tail".to_vec()], "{journal}");
+        // Журнал продолжает работать: новая команда принимается и переживает рестарт.
+        let mut store = WorkerStore::open(dir.path()).unwrap();
+        let next = delivery();
         assert!(matches!(
-            WorkerStore::open(dir.path()),
-            Err(StoreError::CjSealed)
+            store.accept_command(&next).unwrap(),
+            Accept::Stored { .. }
         ));
+        store
+            .ownership_mut()
+            .unwrap()
+            .append(ownership_record(Uuid::now_v7()))
+            .unwrap();
+        drop(store);
+        let store = WorkerStore::open(dir.path()).unwrap();
+        assert_eq!(store.stored_commands().unwrap(), [cmd, next], "{journal}");
+    }
+}
+
+/// Целая по длине запись с неверной контрольной суммой — порча, а не обрыв: такой журнал
+/// остаётся запечатанным, и причина выхода названа словом для `fatal`.
+#[test]
+fn corrupted_record_seals_the_journal_and_names_the_fatal_reason() {
+    for journal in ["cj", "inbox", "receipts", "ownership"] {
+        let dir = private_dir();
+        populated_store(dir.path());
+        let segment = last_segment(dir.path(), journal);
+        let mut record = 1u32.to_le_bytes().to_vec();
+        record.extend_from_slice(&[0xff; 4]);
+        record.extend_from_slice(&u64::MAX.to_le_bytes());
+        record.push(b'x');
+        let mut file = OpenOptions::new().append(true).open(segment).unwrap();
+        file.write_all(&record).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        for _ in 0..2 {
+            let error = WorkerStore::open(dir.path())
+                .err()
+                .unwrap_or_else(|| panic!("{journal}: a corrupted journal was opened"));
+            match (journal, &error) {
+                ("cj", StoreError::CjSealed) => {}
+                (name, StoreError::LocalSealed(sealed)) if name == *sealed => {}
+                _ => panic!("{journal}: unexpected error {error}"),
+            }
+            assert_eq!(error.fatal_reason(), Some("journal_sealed"));
+        }
     }
 }
 
