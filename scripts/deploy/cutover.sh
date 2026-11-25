@@ -448,6 +448,14 @@ db_identity_check() {
 # в бинаре нет, неуспешная строка) sqlx не прощает: хаб после flip вышел бы с migration_error при
 # остановленном воркере. Сверка та же, что у путей с пропуском, и тоже до первой записи; токен при
 # расхождении не выдаётся. Манифест не напечатан — сверить нечем, это тоже отказ.
+# Максимальная версия манифеста бинаря цели; не разобран — ненулевой код.
+manifest_max() {
+    python3 -I -c 'import json,sys; print(max(int(m["version"]) for m in json.loads(sys.argv[1])["migrations"]))' "$1" 2>/dev/null
+}
+# migrations_last из RELEASE артефакта без ведущих нулей; пусто, если не читается.
+release_migrations_last() {
+    sed -n 's/^migrations_last=\([0-9]*\).*/\1/p' "${DIST}/RELEASE" 2>/dev/null | sed -n 1p | sed 's/^0*//' || true
+}
 applied_migrations_check() {
     local manifest rows cmp why="" code="" saved_phase="${PHASE}"
     # dry-run до заливки цели: бинаря ещё нет, сверка не выполнена — тот же пропуск NOT RUN, что у
@@ -460,8 +468,17 @@ applied_migrations_check() {
         return 0
     fi
     PHASE="eligibility"
+    local man_max rel_last
+    rel_last="$(release_migrations_last)"
     if ! manifest="$(ssh_hub "runuser -u '${HUB_SERVICE_USER}' -- timeout ${MANIFEST_TIMEOUT} '${HUB_RELEASES}/${SHA}/bin/canterlot-hub' migrations manifest --json")"; then
         why="the target hub binary cannot print its migrations manifest (as ${HUB_SERVICE_USER}, within ${MANIFEST_TIMEOUT} s): the applied migrations cannot be compared with it"
+    elif ! man_max="$(manifest_max "${manifest}")"; then
+        why="the migrations manifest of the target hub binary is not understood"
+    elif [ -z "${rel_last}" ] || [ "${man_max}" != "${rel_last}" ]; then
+        # Та же сверка артефакта, что на путях с пропуском, и тоже до токена: иначе репетиция
+        # проверила бы прежний максимум, а боевой прогон нашёл бы дефект после стопа воркера.
+        code="manifest_release_mismatch"
+        why="invalid artifact: the target hub binary embeds migrations up to ${man_max}, but RELEASE says migrations_last ${rel_last:-unreadable}"
     else
         rows="$(hub_psql "select version::text || ' ' || encode(checksum, 'hex') || ' ' || success::int::text from _sqlx_migrations order by version")"
         if ! cmp="$(python3 -I "${SCRIPT_DIR}/migration-compare.py" "${manifest}" "${rows}" 2>&1)"; then
@@ -522,8 +539,8 @@ skip_eligibility() {
     manifest="$(ssh_hub "runuser -u '${HUB_SERVICE_USER}' -- timeout ${MANIFEST_TIMEOUT} '${HUB_RELEASES}/${SHA}/bin/canterlot-hub' migrations manifest --json")" \
         || fast_refuse "the target hub binary cannot print its migrations manifest (as ${HUB_SERVICE_USER}, within ${MANIFEST_TIMEOUT} s)"
     # Манифест обязан сходиться с RELEASE артефакта ДО любой записи: расхождение — негодный артефакт.
-    rel_last="$(sed -n 's/^migrations_last=\([0-9]*\).*/\1/p' "${DIST}/RELEASE" 2>/dev/null | sed -n 1p | sed 's/^0*//')" || rel_last=""
-    man_max="$(python3 -I -c 'import json,sys; print(max(int(m["version"]) for m in json.loads(sys.argv[1])["migrations"]))' "${manifest}" 2>/dev/null)" \
+    rel_last="$(release_migrations_last)"
+    man_max="$(manifest_max "${manifest}")" \
         || fast_refuse "the migrations manifest of the target hub binary is not understood"
     if [ -z "${rel_last}" ] || [ "${man_max}" != "${rel_last}" ]; then
         PHASE="eligibility"

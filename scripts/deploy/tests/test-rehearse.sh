@@ -237,6 +237,9 @@ setup_cutover shadow
 # dist развёрнутого релиза (как в проде: dist/255ccb1bbe37 лежит в сборочном worktree).
 cp "${DIST_DIR}/web/200.html" "${WEB_RELEASES}/${SHA_PREV}/"
 make_dist_from_staged "${SHA_PREV}"
+# Развёрнутый бинарь вшивает миграции до 40, как обещает его RELEASE (migrations_last 0040) и как
+# стоит база стенда: полный путь сверяет максимум манифеста с RELEASE до токена.
+printf '40\n' >"${FAKE_ROOT}/state/manifest-max"
 SHADOW_CSP="$(cat "${FAKE_ROOT}/dist/${SHA_PREV}/csp.txt")"
 printf 'CANTERLOT_CSP="%s"\n' "${SHADOW_CSP}" | tee "${WEB_ENV}" >"${WEB_ENV}.${SHA_PREV}"
 chmod 0600 "${WEB_ENV}.${SHA_PREV}"
@@ -246,6 +249,21 @@ if run_rehearse "${SHA_PREV}" --shadow; then case_ok "shadow rehearsal exit 0"; 
 assert_contains "${FAKE_ROOT}/rehearse.log" "shadow mode" "shadow noted"
 assert_contains "${FAKE_ROOT}/rehearse.log" "rehearsal PASS" "rehearsal PASS"
 assert_eq "$(mutations)" "" "no mutating command"
+teardown_case
+case_end
+
+# Полный путь: максимум манифеста бинаря цели обязан совпасть с migrations_last из RELEASE до
+# выдачи токена. Прежде сверка шла только на путях с пропуском: RELEASE, обещающий 42 при бинаре
+# до 41, проходил репетицию, а боевой прогон находил дефект уже после остановки воркера.
+case_begin "full path: a manifest that contradicts RELEASE migrations_last gets no rehearsal token"
+setup_cutover manifestrelfull
+sed -i 's/^migrations_last=.*/migrations_last=0042_contradiction.sql/' "${DIST_DIR}/RELEASE"
+dist_resync
+stage_cutover_dist
+if run_rehearse "${SHA_NEW}" --result "${FAKE_ROOT}/x.result"; then case_fail "the rehearsal passed"; else case_ok "the rehearsal is refused"; fi
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "manifest_release_mismatch" "invalid artifact code"
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" token)" "" "no rehearsal token"
+assert_contains "${FAKE_ROOT}/rehearse.log" "migrations_last 42" "the RELEASE value is named"
 teardown_case
 case_end
 
