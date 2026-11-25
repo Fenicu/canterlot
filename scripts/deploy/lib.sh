@@ -10,12 +10,32 @@ DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${DEPLOY_DIR}/deploy.conf"
 
 # Журнал и ошибки — по-английски; комментарии — по-русски.
-log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+# Строка лога не валит прогон: закрытый канал (ушёл tee ручной команды) даёт EPIPE, а не выход
+# (SIGPIPE cutover глушит с первой остановки). CONTROL_LOG — отдельный файл, куда с той же точки
+# каждая строка пишется напрямую, мимо канала: так восстановление и его итог видны и без читателя.
+# $1 — поток (1 или 2), остальное — строка с меткой времени.
+log_to() {
+    local fd="$1" line
+    shift
+    line="[$(date -u +%H:%M:%S)] $*"
+    if [ "${fd}" = "2" ]; then
+        printf '%s\n' "${line}" >&2 2>/dev/null || true
+    else
+        printf '%s\n' "${line}" 2>/dev/null || true
+    fi
+    if [ -n "${CONTROL_LOG:-}" ]; then printf '%s\n' "${line}" >>"${CONTROL_LOG}" 2>/dev/null || true; fi
+}
+log() { log_to 1 "$*"; }
 # FAIL_EXPLAINED=1 — выход объяснён (die, die_after, cutover_hard): выход с ошибкой без
 # него (set -e, необработанный сбой) файл результата записывает как unknown.
 # shellcheck disable=SC2034 # читает cutover.sh (ловушки выхода)
 FAIL_EXPLAINED=0
-die() { FAIL_EXPLAINED=1; fail_code unknown; printf '[%s] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; handled_exit 1; }
+die() {
+    FAIL_EXPLAINED=1
+    fail_code unknown
+    log_to 2 "FATAL: $*"
+    handled_exit 1
+}
 
 # Коды отказов прогона (fail_codes в файле результата cutover): строка на отказ в
 # файле DEPLOY_FAIL_LOG, его наследуют дочерние preflight.sh, target-check.sh,
@@ -948,7 +968,7 @@ hard_record() {
     if [ -n "${DEPLOY_HARD_LOG:-}" ]; then printf 'hard\n' >>"${DEPLOY_HARD_LOG}" 2>/dev/null || true; fi
 }
 hard() {
-    printf '[%s] HARD-FAIL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
+    log_to 2 "HARD-FAIL: $*"
     HARD_FAILURES=$((HARD_FAILURES + 1))
     hard_record
     fail_code "${HARD_CODE:-unknown}"
@@ -960,7 +980,7 @@ hard_code() { HARD_CODE="$1"; shift; hard "$@"; }
 SOFT_CODE=""
 soft_code() { SOFT_CODE="$1"; shift; soft "$@"; }
 soft() {
-    printf '[%s] SOFT-FAIL: %s (recorded, continuing)\n' "$(date -u +%H:%M:%S)" "$*" >&2
+    log_to 2 "SOFT-FAIL: $* (recorded, continuing)"
     SOFT_FAILURES=$((SOFT_FAILURES + 1))
     soft_record "${PHASE:-${DEPLOY_SOFT_KIND:-other}}"
     fail_code "${SOFT_CODE:-unknown}"
@@ -1033,7 +1053,7 @@ SPEECH_ISSUES=0
 # shellcheck disable=SC2034 # итог читают cutover, verify и rollback-db
 SPEECH_SUMMARY="not checked"
 speech_soft() {
-    printf '[%s] SPEECH-SOFT: %s (dictation only, the release goes on)\n' "$(date -u +%H:%M:%S)" "$*" >&2
+    log_to 2 "SPEECH-SOFT: $* (dictation only, the release goes on)"
     SPEECH_ISSUES=$((SPEECH_ISSUES + 1))
     soft_record speech
 }

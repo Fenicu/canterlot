@@ -366,7 +366,8 @@ fi
 # кроме check-proxy: его положительная проверка входит сама по одноразовой ссылке.
 # Печатается в конце каждого режима.
 owner_checklist() {
-    cat <<EOF
+    # Печать в закрытый канал лога (EPIPE) не валит прогон.
+    cat <<EOF || true
 === owner checklist: authenticated checks (the toolkit does not do these) ===
   [ ] scripts/check-proxy.sh ${SITE_ORIGIN} --positive (operator, with EXPECTED_LOGIN set): hub 401 without
       a session, forged Remote-User/X-Canterlot-* stripped, sign-in by a one-off recovery link into a temp jar,
@@ -988,7 +989,12 @@ inventory_recheck() {
 report_and_stop() {
     result_path
     RESULT_STOP_BLOCK="${RESULT_FILE%.result}.stop.txt"
-    report_block | tee "${RESULT_STOP_BLOCK}" || RESULT_STOP_BLOCK=""
+    # Сначала файл, потом вывод: закрытый канал лога не должен лишить блок его файла.
+    report_block >"${RESULT_STOP_BLOCK}" || RESULT_STOP_BLOCK=""
+    if [ -n "${RESULT_STOP_BLOCK}" ]; then
+        cat "${RESULT_STOP_BLOCK}" 2>/dev/null || true
+        if [ -n "${CONTROL_LOG:-}" ]; then cat "${RESULT_STOP_BLOCK}" >>"${CONTROL_LOG}" 2>/dev/null || true; fi
+    fi
 }
 report_block() {
     # Точное состояние на момент остановки + ручные команды (таблица Task 12).
@@ -1436,6 +1442,18 @@ baseline_recheck
 fail_mark
 inventory_recheck "${REGATE_LABEL}" || cutover_hard_after "the session inventory changed ${REGATE_LABEL}: refusing before the worker stop"
 control_worker_exact "before the worker stop" || cutover_hard "control-worker scan before the worker stop"
+
+# С первой остановки управляющая оболочка не умирает от SIGPIPE: ручная команда §11.7 пишет лог
+# через tee, и пропавший читатель канала иначе убивал прогон на ближайшей строке, до восстановления
+# и без файла результата, с остановленными хабом и воркером. Строки лога с этой точки пишутся и
+# напрямую в свой файл рядом с результатом (CONTROL_LOG), так что итог восстановления виден и без
+# канала. Дочерние процессы наследуют игнор: ранний выход читателя для них — EPIPE, а не сигнал,
+# под pipefail это тот же отказ.
+trap '' PIPE
+result_path
+CONTROL_LOG="${RESULT_FILE%.result}.recovery.log"
+: >"${CONTROL_LOG}" 2>/dev/null || CONTROL_LOG=""
+log "control log: every line from the first stop on also goes to ${CONTROL_LOG:-nowhere (the file cannot be created)}; a closed log reader no longer stops the run or its recovery"
 
 # 3. Стоп воркера: писатели базы затихают для pg_dump.
 log "stopping worker ${WORKER_UNIT} (sessions survive in supervisors)"
@@ -1972,7 +1990,8 @@ else
     FINAL_VZ_NOTE=", vzdump ${VZ_ARCHIVE:-archive} notes pre-${SHA}-${RUN_TS} (earlier, taken while the worker ran)."
     FINAL_VZ_STEP="vzdump ${VZ_ARCHIVE:-<archive>} ->"
 fi
-cat <<EOF
+# Закрытый канал лога (EPIPE) не превращает выкаченный релиз в провал: шаблон — только справка.
+cat <<EOF || true
 update note: the worker has connected to the new hub: forward-only. Its journals may already be past this run's
 dump, and an older hub stops on VersionMissing.
 PWA alone: restore the previous web build: build to releases/${PREV_WEB_SHA}, ${WEB_ENV}.${PREV_WEB_SHA}, one recreate.

@@ -393,5 +393,67 @@ assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
 
+# --- Читатель лога (tee в ручной команде §11.7) пропал после остановки хаба ---
+# По умолчанию SIGPIPE убивал управляющую оболочку на первой же строке лога: ни восстановления,
+# ни файла результата, хаб и воркер оставались остановленными. Лог идёт в FIFO, читатель которого
+# крючок убивает сразу после стопа хаба; $1 = 1 — крючок вдобавок шлёт прогону TERM (обработчик
+# пишет в закрытый канал с первой строки).
+run_cutover_reader_gone() {
+    local term="$1"
+    mkfifo "${FAKE_ROOT}/log.fifo"
+    ( exec cat "${FAKE_ROOT}/log.fifo" >"${FAKE_ROOT}/cutover.log" ) &
+    printf '%s\n' "$!" >"${FAKE_ROOT}/state/reader.pid"
+    HARNESS_PIDS+=("$!")
+    cat >"${FAKE_ROOT}/reader-hook.sh" <<EOF
+#!/usr/bin/env bash
+exec >/dev/null 2>&1
+r="\$(cat "${FAKE_ROOT}/state/reader.pid")"
+kill "\${r}" 2>/dev/null || true
+while kill -0 "\${r}" 2>/dev/null; do command sleep 0.05; done
+: >"${FAKE_ROOT}/state/reader-gone"
+if [ "${term}" = "1" ]; then kill -TERM "\$(cat "${FAKE_ROOT}/state/cutover.pid")"; fi
+EOF
+    # shellcheck disable=SC2016 # буквальный текст удалённой команды стопа хаба, а не раскрытие
+    export FAKE_SSH_AFTER_CMD='systemctl stop "$1"' FAKE_SSH_AFTER_NTH=1 FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/reader-hook.sh"
+    bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "$(confirm_for "${SHA_NEW}")" \
+        --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" \
+        --result "${FAKE_ROOT}/cutover.result" >"${FAKE_ROOT}/log.fifo" 2>&1 &
+    CUTOVER_PID=$!
+    printf '%s\n' "${CUTOVER_PID}" >"${FAKE_ROOT}/state/cutover.pid"
+    RC=0; wait "${CUTOVER_PID}" || RC=$?
+    unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_NTH FAKE_SSH_AFTER_HOOK
+}
+
+case_begin "log reader gone after the hub stop: no SIGPIPE death, the run finishes"
+setup_cutover readergone
+run_cutover_reader_gone 0
+[ -e "${FAKE_ROOT}/state/reader-gone" ] && case_ok "the log reader was killed after the hub stop" || case_fail "the hook never ran"
+assert_eq "${RC}" "0" "the run finishes (no SIGPIPE death)"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "done" "result file: done"
+hub_is "${SHA_NEW}" && case_ok "hub on the new release" || case_fail "hub not on the new release"
+FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub \
+    && case_ok "hub active" || case_fail "hub left stopped"
+assert_contains "${FAKE_ROOT}/cutover.recovery.log" "stopping hub canterlot-hub before the dump" "the control log from the first stop on is in its own file"
+assert_contains "${FAKE_ROOT}/cutover.recovery.log" "result file: ${FAKE_ROOT}/cutover.result (status done)" "the end of the run reached its own file"
+teardown_case
+case_end
+
+case_begin "log reader gone and TERM after the hub stop: the handler starts the hub again"
+setup_cutover readergoneterm
+run_cutover_reader_gone 1
+[ -e "${FAKE_ROOT}/state/reader-gone" ] && case_ok "the log reader was killed after the hub stop" || case_fail "the hook never ran"
+assert_eq "${RC}" "1" "the handler exits 1 (not killed by SIGPIPE)"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "failed_before_flip" "result file: failed_before_flip"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" signal)" "TERM" "result file: signal TERM"
+hub_is "${SHA_PREV}" && case_ok "hub still on prev" || case_fail "hub moved"
+FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub \
+    && case_ok "hub started again by the handler" || case_fail "hub left stopped"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
+    && case_ok "worker restarted by the handler" || case_fail "worker left stopped"
+assert_contains "${FAKE_ROOT}/cutover.recovery.log" "STOP before hub flip" "the recovery is in its own file"
+[ -s "$(result_of "${FAKE_ROOT}/cutover.result" stop_block)" ] && case_ok "the stop block file is written" || case_fail "no stop block file"
+teardown_case
+case_end
+
 printf 'cutover-signals harness: %s passed, %s failed (cumulative)\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]
