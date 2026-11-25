@@ -15,6 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.ipc.v1.Ownership",
             ".canterlot.worker.ipc.v1.AgentCall",
             ".canterlot.worker.ipc.v1.AgentCallResult",
+            ".canterlot.worker.ipc.v1.GoalRequest",
         ])
         .compile_protos(&["proto/canterlot/worker/v1/ipc.proto"], &["proto"])?;
     tonic_prost_build::configure()

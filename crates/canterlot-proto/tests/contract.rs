@@ -507,6 +507,42 @@ fn exec_records_roundtrip() {
     }
 }
 
+/// Поле `goal` управляющего сообщения сменило тип с `GoalCommand` на `GoalRequest`.
+/// Сопровождение и воркер разных выпусков читают друг друга: общие поля совпадают
+/// по проводу, ключ команды старое сопровождение пропускает.
+#[test]
+fn goal_request_is_wire_compatible_with_goal_command() {
+    use canterlot_proto::worker::{ipc, v1::GoalCommand};
+    let request = ipc::GoalRequest {
+        action: "set".into(),
+        objective: "ship it".into(),
+        token_budget: Some(500),
+        command_id: "0190abcd-0000-7000-8000-000000000000".into(),
+        dispatch_attempt: 3,
+    };
+    let old = GoalCommand::decode(request.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(
+        (
+            old.action.as_str(),
+            old.objective.as_str(),
+            old.token_budget
+        ),
+        ("set", "ship it", Some(500))
+    );
+    let new = ipc::GoalRequest::decode(old.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(
+        (
+            new.action.as_str(),
+            new.objective.as_str(),
+            new.token_budget
+        ),
+        ("set", "ship it", Some(500))
+    );
+    assert!(new.command_id.is_empty());
+    assert_eq!(new.dispatch_attempt, 0);
+    assert!(!format!("{request:?}").contains("ship it"));
+}
+
 #[test]
 fn ipc_messages_roundtrip_and_limit() {
     use canterlot_proto::limits::{IPC_MAX_MESSAGE_BYTES, IPC_PROTOCOL_VERSION, check_ipc_message};

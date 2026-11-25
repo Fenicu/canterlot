@@ -136,6 +136,17 @@ impl fmt::Debug for crate::worker::v1::GoalCommand {
     }
 }
 
+impl fmt::Debug for crate::worker::ipc::GoalRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GoalRequest")
+            .field("action", &self.action)
+            .field("objective_bytes", &self.objective.len())
+            .field("command_id", &self.command_id)
+            .field("dispatch_attempt", &self.dispatch_attempt)
+            .finish_non_exhaustive()
+    }
+}
+
 impl fmt::Debug for crate::worker::v1::GoalChanged {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GoalChanged")

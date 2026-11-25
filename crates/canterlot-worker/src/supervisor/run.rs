@@ -252,6 +252,7 @@ struct Supervisor {
     last_phase: Option<PhaseChanged>,
     last_progress_record: Option<Instant>,
     known_interrupts: HashSet<(String, u32)>,
+    known_goals: HashSet<(String, u32)>,
     pending_interrupts: Vec<(String, u32)>,
     known_compactions: HashSet<(String, u32)>,
     /// Сжатие принято адаптером, итог придёт событием.
@@ -475,6 +476,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         last_phase: None,
         last_progress_record: None,
         known_interrupts: HashSet::new(),
+        known_goals: HashSet::new(),
         pending_interrupts: Vec::new(),
         known_compactions: HashSet::new(),
         pending_compaction: None,
@@ -3442,8 +3444,17 @@ impl Supervisor {
     /// Команда владельца уходит адаптеру; состояние вернётся событием `Goal`.
     async fn on_goal_command(
         &mut self,
-        command: canterlot_proto::worker::v1::GoalCommand,
+        command: canterlot_proto::worker::ipc::GoalRequest,
     ) -> Result<(), SupervisorError> {
+        // Смена актора исполнения может прислать ту же команду дважды: ключ живёт столько
+        // же, сколько сопровождение, и адаптер получает её один раз.
+        if !command.command_id.is_empty()
+            && !self
+                .known_goals
+                .insert((command.command_id.clone(), command.dispatch_attempt))
+        {
+            return Ok(());
+        }
         if matches!(
             self.lifecycle,
             Lifecycle::Stopping(_) | Lifecycle::Draining { .. }
@@ -3937,6 +3948,7 @@ mod tests {
         compact_calls: usize,
         /// События, которые адаптер уже отдал бы без ожидания.
         ready_events: std::collections::VecDeque<AdapterEvent>,
+        goal_calls: u32,
     }
 
     struct StubAdapter {
@@ -4011,6 +4023,16 @@ mod tests {
         async fn compact(&mut self, _command: Uuid) -> crate::adapter::CompactOutcome {
             self.state.lock().unwrap().compact_calls += 1;
             crate::adapter::CompactOutcome::Accepted
+        }
+
+        async fn goal_command(
+            &mut self,
+            _action: canterlot_proto::goals::GoalAction,
+            _objective: Option<&str>,
+            _token_budget: Option<i64>,
+        ) -> crate::adapter::GoalCommandOutcome {
+            self.state.lock().unwrap().goal_calls += 1;
+            crate::adapter::GoalCommandOutcome::Applied
         }
 
         async fn refuse_request(&mut self, request_id: &str, _message: &str) {
@@ -4147,6 +4169,7 @@ mod tests {
             last_phase: None,
             last_progress_record: None,
             known_interrupts: HashSet::new(),
+            known_goals: HashSet::new(),
             pending_interrupts: Vec::new(),
             known_compactions: HashSet::new(),
             pending_compaction: None,
@@ -4905,6 +4928,39 @@ mod tests {
                 "guarded {guarded}: {states:?}"
             );
         }
+    }
+
+    /// Актор исполнения сменился, и команда цели пришла сопровождению второй раз (штатным
+    /// путём и из снимка хранилища). Адаптер получает её один раз: ключ команды едет в IPC.
+    /// Запрос без ключа (воркер прежней версии) идёт как раньше.
+    #[tokio::test]
+    async fn a_goal_command_redelivered_by_a_new_actor_reaches_the_adapter_once() {
+        use canterlot_proto::worker::ipc::GoalRequest;
+        let (_dir, mut supervisor, state) = test_supervisor();
+        let request = GoalRequest {
+            action: "set".into(),
+            objective: "ship".into(),
+            token_budget: None,
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+        };
+        for _ in 0..2 {
+            supervisor.on_goal_command(request.clone()).await.unwrap();
+        }
+        assert_eq!(state.lock().unwrap().goal_calls, 1);
+        let mut retry = request.clone();
+        retry.dispatch_attempt = 2;
+        supervisor.on_goal_command(retry).await.unwrap();
+        assert_eq!(state.lock().unwrap().goal_calls, 2, "a new attempt is new");
+        let legacy = GoalRequest {
+            command_id: String::new(),
+            dispatch_attempt: 0,
+            ..request
+        };
+        for _ in 0..2 {
+            supervisor.on_goal_command(legacy.clone()).await.unwrap();
+        }
+        assert_eq!(state.lock().unwrap().goal_calls, 4);
     }
 
     #[tokio::test]

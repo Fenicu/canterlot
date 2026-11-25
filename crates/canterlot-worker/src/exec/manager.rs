@@ -2726,7 +2726,16 @@ impl Actor {
                     if !self.ipc_caps.contains(IPC_CAP_GOALS) {
                         return reject(&self.shared, &command, CAPABILITY_MISSING).await;
                     }
-                    if !self.send(down::Msg::Goal(goal)).await {
+                    // Ключ команды едет в IPC: новое сопровождение передаст её адаптеру
+                    // один раз, даже если сменившийся актор пришлёт её снова.
+                    let request = canterlot_proto::worker::ipc::GoalRequest {
+                        action: goal.action,
+                        objective: goal.objective,
+                        token_budget: goal.token_budget,
+                        command_id: cid_text,
+                        dispatch_attempt: attempt,
+                    };
+                    if !self.send(down::Msg::Goal(request)).await {
                         self.waiting.push_back(command);
                         return Ok(());
                     }
