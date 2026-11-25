@@ -444,10 +444,29 @@ async fn event_dropped_after_target_domain_change(pool: PgPool, domain: Option<&
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query("update conversations set title='Секретный делегат' where id=$1")
+        .bind(p.target)
+        .execute(&pool)
+        .await
+        .unwrap();
     scheduler(&pool).tick(Utc::now()).await.unwrap();
-    assert!(
-        delivered(&pool, p.subscriber).await.is_empty(),
-        "итог чужого домена не доставлен ({domain:?})"
+    // Итог чужого домена не доставлен: ни названия, ни состояния, ни ответа. Подписчик
+    // узнаёт только то, что ждать нечего.
+    let inputs: Vec<String> = sqlx::query_scalar(
+        "select content->0->>'text' from inputs where conversation_id=$1 order by input_seq",
+    )
+    .bind(p.subscriber)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(inputs.len(), 1, "одна заметка ({domain:?}): {inputs:#?}");
+    assert_eq!(
+        inputs[0],
+        format!(
+            "[canterlot] Session {} is no longer available to this session: no result will \
+             arrive from it.",
+            p.target
+        )
     );
 }
 

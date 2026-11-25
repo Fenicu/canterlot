@@ -1245,13 +1245,13 @@ async fn apply_settled_in_tx(
         return Ok(Applied::Skipped);
     };
     // Будильник взведён при совпавших доменах, но домен цели мог измениться: итог чужого
-    // домена не засчитывается.
-    if !access::hidden_from_in_tx(conn, row.conversation_id, &[target_id])
-        .await?
-        .is_empty()
-    {
+    // домена не засчитывается. Условие с такой целью уже не исполнится, поэтому будильник
+    // закрывается сразу, с заметкой получателю: иначе он остался бы взведённым без срока.
+    let hidden = access::hidden_from_in_tx(conn, row.conversation_id, &sessions_of(row)).await?;
+    if !hidden.is_empty() {
         tracing::debug!(alarm = %row.id, target = %target_id, "alarm target left the domain");
-        return Ok(Applied::Skipped);
+        cancel_domain_changed_in_tx(conn, row.id, &hidden, true, now, correlation_id).await?;
+        return Ok(Applied::Cancelled);
     }
     // Срок уже наступил: задание срока — единственный хозяин исхода. Устоявшаяся цель
     // после отсечки не отменяет сторож и не заменяет `timed_out` обычным срабатыванием.
@@ -2795,6 +2795,64 @@ async fn release_collected_in_tx(
     Ok(())
 }
 
+/// Цель будильника ушла из домена получателя (проверка запуска обнулила ей домен): условие
+/// уже не исполнится и итог не покажется. Будильник закрывается, но не молча: удержанные
+/// пачкой итоги остальных целей возвращаются подписке, владелец видит `alarm_changed`, а
+/// получатель получает заметку без названий, только с идентификаторами, которые сам назвал.
+/// Иначе оркестратор ждал бы будильник, которого уже нет.
+async fn cancel_domain_changed_in_tx(
+    conn: &mut PgConnection,
+    id: Uuid,
+    hidden: &[Uuid],
+    cancel_jobs: bool,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let row: Option<AlarmRow> = sqlx::query_as(
+        "update alarms set state='cancelled',failure_reason='domain_changed',updated_at=$2
+         where id=$1 and state in ('armed','fired') and delivered_input_id is null
+         returning *",
+    )
+    .bind(id)
+    .bind(now)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    if cancel_jobs {
+        cancel_jobs_in_tx(conn, id, "alarm_cancelled").await?;
+    }
+    release_collected_in_tx(conn, &row, now).await?;
+    changed_in_tx(conn, &row, correlation_id).await?;
+    let name = row
+        .key
+        .as_deref()
+        .map(|key| format!("\"{key}\""))
+        .unwrap_or_else(|| row.id.to_string());
+    let sessions: Vec<String> = hidden.iter().map(Uuid::to_string).collect();
+    let text = format!(
+        "[canterlot] Alarm {name} was cancelled: session {} is no longer available to this \
+         session, so its condition cannot be met. Results the alarm was holding arrive as \
+         separate messages.",
+        sessions.join(", ")
+    );
+    subs::insert_job(
+        conn,
+        row.owner_id,
+        row.conversation_id,
+        now,
+        &json!({
+            "action": "note",
+            "text": text,
+            "origin": origin::note_origin(0),
+            "dedupe_key": format!("alarm_domain:{}", row.id),
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn cancel_in_tx(
     conn: &mut PgConnection,
     id: Uuid,
@@ -3289,23 +3347,21 @@ pub async fn deliver_job_in_tx(
         });
     }
     // Будильник на сессии, чей домен с тех пор разошёлся с доменом получателя, не доставляется:
-    // ни названий, ни состояний чужого домена. Он закрывается без ввода.
+    // ни названий, ни состояний чужого домена. Он закрывается заметкой без названий, а
+    // удержанные пачкой итоги видимых целей возвращаются подписке.
     let mut visible = Vec::with_capacity(rows.len());
     for row in rows {
         let targets = sessions_of(&row);
-        if !targets.is_empty()
-            && !access::hidden_from_in_tx(conn, conversation, &targets)
-                .await?
-                .is_empty()
-        {
+        let hidden = if targets.is_empty() {
+            Vec::new()
+        } else {
+            access::hidden_from_in_tx(conn, conversation, &targets).await?
+        };
+        if !hidden.is_empty() {
             tracing::debug!(alarm = %row.id, "alarm names a session outside the domain");
-            sqlx::query(
-                "update alarms set state='cancelled',failure_reason='domain_changed',
-                        updated_at=clock_timestamp() where id=$1",
-            )
-            .bind(row.id)
-            .execute(&mut *conn)
-            .await?;
+            // Задание в работе — это оно само: остальные задания будильника найдут его
+            // закрытым и закончатся сами.
+            cancel_domain_changed_in_tx(conn, row.id, &hidden, false, now, correlation_id).await?;
             continue;
         }
         visible.push(row);

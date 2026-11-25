@@ -2090,6 +2090,85 @@ async fn abandoned_batch_releases_held_summaries_to_the_subscription() {
     assert!(inputs[0].0.contains("is now idle"), "{}", inputs[0].0);
 }
 
+/// Цель пачки ушла из домена получателя (проверка запуска обнулила ей домен). Будильник не
+/// доставляется, но и не пропадает молча: уже удержанный итог видимой цели возвращается
+/// подписке, а получатель получает заметку без названий и не ждёт вечно.
+#[tokio::test]
+async fn a_batch_whose_target_left_the_domain_releases_its_summaries_and_says_so() {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    sqlx::query("update conversations set title='Секретный делегат' where id=$1")
+        .bind(f.child2)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    assert_eq!(f.event_jobs().await, 0, "the batch holds the idle result");
+
+    sqlx::query("update conversations set memory_domain=null where id=$1")
+        .bind(f.child2)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.refresh_id(f.child2, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child2, now + TimeDelta::seconds(1)).await;
+    let sch = scheduler(&f.pool, Default::default());
+    sch.tick(now + TimeDelta::seconds(10)).await.unwrap();
+
+    let (state, _, _) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "cancelled");
+    let changed: i64 = sqlx::query_scalar(
+        "select count(*) from events where kind='alarm_changed'
+           and payload->>'alarm_id'=$1 and payload->>'state'='cancelled'",
+    )
+    .bind(id.to_string())
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        changed, 1,
+        "the owner's screen learns about the cancellation"
+    );
+
+    // Следующий проход доставляет и возвращённый итог, и заметку.
+    sch.tick(now + TimeDelta::seconds(20)).await.unwrap();
+    let texts: Vec<String> = f
+        .alarm_inputs()
+        .await
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains(&f.child.to_string()) && text.contains("is now idle")),
+        "the held summary came back: {texts:#?}"
+    );
+    let note = texts
+        .iter()
+        .find(|text| text.contains("Alarm") && text.contains("no longer available"))
+        .unwrap_or_else(|| panic!("no note about the cancelled alarm: {texts:#?}"));
+    assert!(note.contains(&f.child2.to_string()), "{note}");
+    assert!(note.contains("wave"), "{note}");
+    for text in &texts {
+        assert!(!text.contains("Секретный"), "{text}");
+    }
+}
+
 #[tokio::test]
 async fn settle_after_deadline_keeps_the_timeout() {
     let pool = canterlot_hub::testkit::db().await;
@@ -3970,17 +4049,26 @@ async fn alarm_dropped_at_deadline(pool: PgPool, domain: Option<&str>) {
         .execute(&f.pool)
         .await
         .unwrap();
-    let now = Utc::now();
-    scheduler(&f.pool, Default::default())
-        .tick(now + TimeDelta::seconds(126))
+    sqlx::query("update conversations set title='Секретный делегат' where id=$1")
+        .bind(f.child)
+        .execute(&f.pool)
         .await
         .unwrap();
-    assert!(
-        f.alarm_inputs().await.is_empty(),
-        "ничего не доставлено при домене {domain:?}"
-    );
+    let now = Utc::now();
+    let sch = scheduler(&f.pool, Default::default());
+    sch.tick(now + TimeDelta::seconds(126)).await.unwrap();
     let (state, _, _) = alarm_state(&f.pool, alarm_id(&armed)).await;
     assert_eq!(state, "cancelled");
+    // Сам будильник не доставлен: ни названия, ни состояния чужого домена. Получатель узнаёт
+    // только то, что будильника больше нет.
+    sch.tick(now + TimeDelta::seconds(130)).await.unwrap();
+    let inputs = f.alarm_inputs().await;
+    assert_eq!(inputs.len(), 1, "одна заметка при домене {domain:?}");
+    let text = &inputs[0].0;
+    assert!(text.contains("no longer available"), "{text}");
+    assert!(text.contains("\"watch\""), "{text}");
+    assert!(!text.contains("Секретный"), "{text}");
+    assert_ne!(inputs[0].1["kind"], "alarm", "не срабатывание будильника");
 }
 
 #[tokio::test]
@@ -4008,7 +4096,10 @@ async fn alarm_ignores_a_settled_target_that_left_the_domain() {
         .unwrap();
     f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
     f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
-    let (state, _, _) = alarm_state(&f.pool, alarm_id(&armed)).await;
-    assert_eq!(state, "armed", "итог чужого домена не засчитан");
+    // Итог чужого домена не засчитан: будильник не сработал, а закрыт. Оставаться взведённым
+    // ему незачем: условие с невидимой целью уже не исполнится.
+    let (state, fired_reason, _) = alarm_state(&f.pool, alarm_id(&armed)).await;
+    assert_eq!(state, "cancelled");
+    assert_eq!(fired_reason, None);
     assert_eq!(f.event_jobs().await, 0);
 }

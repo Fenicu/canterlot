@@ -207,7 +207,9 @@ pub async fn run_in_tx_with_cloud(
                 return Ok(JobOutcome::Cancelled("invalid_payload"));
             };
             // Подписка создана при совпавших доменах, но домен цели или подписчика мог
-            // измениться: итог чужого домена не доставляется, подписчик ничего не узнаёт.
+            // измениться: итог чужого домена не доставляется. Подписчик узнаёт только то, что
+            // ждать нечего: одна заметка на пару без названия и состояния, иначе оркестратор
+            // ждал бы итог вечно. Повторное событие той же цели вторую заметку не ставит.
             if !crate::session_tools::access::hidden_from_in_tx(
                 conn,
                 subscriber,
@@ -221,7 +223,21 @@ pub async fn run_in_tx_with_cloud(
                     target = %event.target_id,
                     "subscription event dropped: the target left the domain"
                 );
-                return Ok(JobOutcome::Cancelled("domain_mismatch"));
+                return deliver(
+                    conn,
+                    job,
+                    subscriber,
+                    format!(
+                        "[canterlot] Session {} is no longer available to this session: no \
+                         result will arrive from it.",
+                        event.target_id
+                    ),
+                    Some(super::origin::note_origin(event.chain_depth)),
+                    Some(format!("sub_unavailable:{subscriber}:{}", event.target_id)),
+                    now,
+                    correlation_id,
+                )
+                .await;
             }
             // Удаление не ждёт лимита: подписки уже нет, второго такого события не будет.
             if event.state != "deleted"
