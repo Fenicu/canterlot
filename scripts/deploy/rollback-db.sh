@@ -395,13 +395,20 @@ if [ "${FLIP_REQUESTED}" = "1" ]; then
         [ "$(ssh_hub "readlink -m '${HUB_CURRENT}'")" = "${HUB_RELEASES}/${TO_RELEASE}" ] || HUB_FLIP_FAILED=1
     fi
     if [ "${HUB_FLIP_FAILED}" = "1" ]; then
-        HUB_NOW="$(ssh_hub "readlink '${HUB_CURRENT}'" 2>/dev/null || echo UNKNOWN)"
-        log "hub flip to ${TO_RELEASE} FAILED (current is ${HUB_NOW}): starting the hub again on its current release; database is untouched"
+        # Хаб снова поднимается только там, где он был: базу не трогал никто (фазы нет), а ссылка
+        # прочитана и равна прежней. Потерянный ответ после удавшегося mv, неизвестная ссылка или
+        # повтор после частичного восстановления запустили бы старый бинарь на мигрированной либо
+        # частично залитой базе.
+        HUB_NOW_RC=0
+        HUB_NOW="$(ssh_hub "readlink '${HUB_CURRENT}'" 2>/dev/null)" || HUB_NOW_RC=$?
         run_write "remove leftover current.new" hub_locked 'rm -f "$1"' "${HUB_BASE}/current.new" || log "could not remove leftover current.new: needs the owner loudly"
-        run_write "start hub" hub_locked 'systemctl start "$1"' "${HUB_UNIT}" || log "could not start the hub after the failed flip: needs the owner loudly"
-        HUB_NOW="$(ssh_hub "readlink '${HUB_CURRENT}'" 2>/dev/null || echo UNKNOWN)"
-        log "hub restarted on ${HUB_NOW}; no database restore was attempted. Needs the owner loudly"
-        exit 1
+        if [ -z "${RESTORE_PHASE}" ] && [ "${HUB_NOW_RC}" = "0" ] && [ "${HUB_NOW}" = "${HUB_LINK_BEFORE}" ]; then
+            log "hub flip to ${TO_RELEASE} FAILED (current is still ${HUB_NOW}): starting the hub again on its current release; database is untouched"
+            run_write "start hub" hub_locked 'systemctl start "$1"' "${HUB_UNIT}" || log "could not start the hub after the failed flip: needs the owner loudly"
+            log "hub restarted on ${HUB_NOW}; no database restore was attempted. Needs the owner loudly"
+            exit 1
+        fi
+        rollback_stop "hub flip to ${TO_RELEASE} FAILED or is unconfirmed (link before the flip ${HUB_LINK_BEFORE}, now ${HUB_NOW:-unreadable}): the hub is not started on a link this run cannot prove" "left stopped by this rollback"
     fi
     log "hub current -> releases/${TO_RELEASE}"
 fi

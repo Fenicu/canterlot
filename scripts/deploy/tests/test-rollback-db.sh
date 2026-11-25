@@ -781,6 +781,45 @@ no_db_changes "the rerun"
 teardown_case
 case_end
 
+# R31: mv прошёл, а ответ flip потерялся. Ссылка уже на старом релизе, база ещё новая: старый хаб
+# на мигрированной базе не поднимается, хаб остаётся остановленным, STOP называет ссылку.
+case_begin "rollback leaves the hub stopped when the flip answer is lost"
+setup_rollback flipanswerlost
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" stop canterlot-worker >/dev/null
+export FAKE_SSH_DETACH_MATCH="mv -T current.new current"
+: >"${FAKE_ROOT}/state/calls.log"
+rollback_expect
+unset FAKE_SSH_DETACH_MATCH
+assert_eq "${RC}" "1" "exit nonzero"
+assert_contains "${FAKE_ROOT}/rb.log" "=== STOP: rollback-db needs the owner ===" "a STOP block is printed"
+assert_contains "${FAKE_ROOT}/rb.log" "-> releases/${SHA_PREV}" "the STOP names the actual link"
+assert_contains "${FAKE_ROOT}/rb.log" "left stopped by this rollback" "the STOP says the hub is stopped"
+grep -q 'start canterlot-hub' "${FAKE_ROOT}/state/calls.log" && case_fail "hub started on an unproven link" || case_ok "hub not started"
+no_db_changes "after the lost flip answer"
+teardown_case
+case_end
+
+# R32: повтор с --to в фазе created (pg_restore упал), и flip падает. Прежде ветка отказа поднимала
+# хаб на текущей ссылке; теперь хаб остаётся остановленным, STOP называет фазу.
+case_begin "rollback resume with a failed flip does not start the hub over a partial restore"
+setup_rollback resumeflipfail
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" stop canterlot-worker >/dev/null
+export FAKE_FAIL_PG_RESTORE=1
+rollback_expect
+unset FAKE_FAIL_PG_RESTORE
+assert_eq "${RC}/$(phase_now)" "1/created" "run 1 fails at pg_restore, phase created"
+export FAKE_FAIL_CMD="mv -T"
+: >"${FAKE_ROOT}/state/calls.log"
+rollback_expect
+unset FAKE_FAIL_CMD
+assert_eq "${RC}" "1" "run 2 exits nonzero"
+assert_contains "${FAKE_ROOT}/rb.log" "phase:    created canterlot_rb_" "the STOP names the phase"
+grep -q 'start canterlot-hub' "${FAKE_ROOT}/state/calls.log" && case_fail "hub started over a partial restore" || case_ok "hub not started"
+FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub \
+    && case_fail "hub active" || case_ok "hub stays stopped"
+teardown_case
+case_end
+
 # R33: без --expect-* чтение .identity или файла фазы оборвалось. Это не «записи нет»: отказ до
 # остановки хаба (прежде сбой ssh молча отключал всю сверку, включая записанный oid фазы).
 for rec in identity restore-phase; do
