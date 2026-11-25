@@ -267,6 +267,7 @@ struct Supervisor {
     attached: Option<u64>,
     /// Неизвестное сообщение IPC уже названо в журнале: дальше молча.
     unknown_ipc_logged: bool,
+    backlog_logged: bool,
     next_conn: u64,
     attach_deadline: Option<Instant>,
     workdir: Option<PathBuf>,
@@ -484,6 +485,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         conns: HashMap::new(),
         attached: None,
         unknown_ipc_logged: false,
+        backlog_logged: false,
         next_conn: 0,
         workdir: None,
         source_workdir: None,
@@ -1073,6 +1075,18 @@ impl Supervisor {
                 _ => return Ok(()),
             }
         }
+        if self.sj.backlog_full() {
+            match message {
+                down::Msg::Attach(_)
+                | down::Msg::Stop(_)
+                | down::Msg::ShipFrom(_)
+                | down::Msg::SjAck(_) => {}
+                message => {
+                    self.refuse_backlogged(message);
+                    return Ok(());
+                }
+            }
+        }
         match message {
             down::Msg::Attach(_) => self.drop_connection(id),
             down::Msg::StartCli(start) => self.start_cli(start).await?,
@@ -1120,6 +1134,38 @@ impl Supervisor {
             down::Msg::AgentCallResult(result) => self.on_agent_call_result(result).await,
         }
         Ok(())
+    }
+
+    /// Очередь записи SJ полна (журнал долго не пишется): команда не принимается и в
+    /// очередь ничего не добавляет. Ввод и решение получают ответ закрытого исполнения,
+    /// и их итог фиксирует воркер в CJ; прерывания, сжатия и прочие команды хаб закроет
+    /// по итогу исполнения.
+    fn refuse_backlogged(&mut self, message: down::Msg) {
+        if !std::mem::replace(&mut self.backlog_logged, true) {
+            tracing::warn!(
+                kind = "sj_backlog_full",
+                "execution journal backlog is full; commands are refused"
+            );
+        }
+        match message {
+            down::Msg::Deliver(deliver) => {
+                if let Some(command) = deliver.command {
+                    self.send(up::Msg::DeliverAck(DeliverAck {
+                        command_id: command.command_id,
+                        dispatch_attempt: command.dispatch_attempt,
+                        result: "execution_stopped".into(),
+                    }));
+                }
+            }
+            down::Msg::DeliverDecision(decision) => {
+                self.send(up::Msg::DecisionAck(DecisionAck {
+                    request_id: decision.request_id,
+                    decision_id: decision.decision_id,
+                    result: "execution_closed".into(),
+                }));
+            }
+            _ => {}
+        }
     }
 
     async fn on_agent_call_result(
@@ -4092,6 +4138,7 @@ mod tests {
             conns: HashMap::new(),
             attached: None,
             unknown_ipc_logged: false,
+            backlog_logged: false,
             next_conn: 0,
             workdir: None,
             source_workdir: None,
@@ -4685,6 +4732,83 @@ mod tests {
                     && ack.dispatch_attempt == key.1
                     && ack.result == "execution_closed"
         ));
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(bodies.iter().any(|body| matches!(
+            body,
+            Body::ExecutionState(fact) if fact.outcome == "storage_failure"
+        )));
+        assert!(matches!(bodies.last(), Some(Body::JournalClosed(_))));
+    }
+
+    /// Журнал не пишется, а группа не опустела: сопровождение долго стоит в остановке.
+    /// Очередь записи в памяти не растёт от новых команд сверх предела: сжатия,
+    /// прерывания и решения не принимаются (решение и вливание получают ответ закрытого
+    /// исполнения, итог фиксирует воркер в CJ), а обязательные итоги остановки
+    /// по-прежнему встают в очередь.
+    #[tokio::test]
+    async fn a_full_sj_backlog_stops_accepting_commands_but_keeps_terminal_records() {
+        use canterlot_proto::worker::ipc::{
+            CompactRequest, InterruptRequest, control_to_supervisor::Msg as Down,
+        };
+        let (_dir, mut supervisor, _state) = test_supervisor();
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        supervisor
+            .begin_stop(StopCause::StorageFailure, false)
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        supervisor.conns.insert(0, Conn { tx, attached: true });
+        supervisor.attached = Some(0);
+        supervisor.sj.set_backlog_limit(1);
+        assert!(supervisor.sj.backlog_full());
+        let next = supervisor.sj.next_seq();
+        let steer = steer_deliver(&supervisor, first.0, "late");
+        let steer_key = steer_key(&steer);
+        let messages = vec![
+            Down::Compact(CompactRequest {
+                command_id: Uuid::now_v7().to_string(),
+                dispatch_attempt: 1,
+            }),
+            Down::Interrupt(InterruptRequest {
+                command_id: Uuid::now_v7().to_string(),
+                dispatch_attempt: 1,
+                ..Default::default()
+            }),
+            Down::DeliverDecision(DeliverDecision {
+                request_id: "r1".into(),
+                decision_id: "d1".into(),
+                generation: supervisor.spec.generation,
+                ..Default::default()
+            }),
+            Down::Deliver(steer),
+        ];
+        for message in messages {
+            supervisor
+                .on_control(Control::Message(
+                    0,
+                    ControlToSupervisor { msg: Some(message) },
+                ))
+                .await
+                .unwrap();
+        }
+        assert_eq!(supervisor.sj.next_seq(), next, "no command adds records");
+        let mut replies = Vec::new();
+        while let Ok(reply) = rx.try_recv() {
+            replies.push(reply.msg);
+        }
+        assert!(replies.iter().any(|reply| matches!(
+            reply,
+            Some(up::Msg::DecisionAck(ack))
+                if ack.decision_id == "d1" && ack.result == "execution_closed"
+        )));
+        assert!(replies.iter().any(|reply| matches!(
+            reply,
+            Some(up::Msg::DeliverAck(ack))
+                if ack.command_id == steer_key.0.to_string()
+                    && ack.result == "execution_stopped"
+        )));
+        supervisor.adapter_exited = true;
+        supervisor.finish_stop().unwrap();
         let bodies = shipped_bodies(&mut supervisor);
         assert!(bodies.iter().any(|body| matches!(
             body,

@@ -18,6 +18,12 @@ use super::SupervisorError;
 
 const WINDOW: usize = 4;
 
+/// Сколько байт очереди записи сопровождение копит, пока журнал не пишется, прежде чем
+/// перестать принимать новые команды. Обязательные итоги остановки (закрытие блоков,
+/// исходы вводов, итог исполнения, `journal_closed`) пишутся и сверх этого: их число
+/// ограничено, потому что новых вводов в остановке нет.
+const BACKLOG_LIMIT: usize = 8 * 1024 * 1024;
+
 pub(super) struct RequestState {
     pub opened: RequestOpened,
     pub opened_seq: u64,
@@ -35,6 +41,8 @@ pub(super) struct Sj {
     journal_id: Uuid,
     ship: Option<Ship>,
     pending: Vec<Vec<u8>>,
+    pending_bytes: usize,
+    backlog_limit: usize,
     requests: BTreeMap<String, RequestState>,
     closed_reason: Option<String>,
     /// Наибольшее подтверждение хаба, которое ещё не легло в файл ack: запись ack могла
@@ -63,6 +71,8 @@ impl Sj {
             journal_id,
             ship: None,
             pending: Vec::new(),
+            pending_bytes: 0,
+            backlog_limit: BACKLOG_LIMIT,
             requests: BTreeMap::new(),
             closed_reason: None,
             owed_ack: 0,
@@ -191,8 +201,20 @@ impl Sj {
         let seq = self.next_seq();
         self.observe(seq, &body);
         let payload = RecordBody { body: Some(body) }.encode_to_vec();
+        self.pending_bytes += payload.len();
         self.pending.push(payload);
         Ok(seq)
+    }
+
+    /// Очередь записи достигла предела: новые команды не принимаются, пока журнал не
+    /// начнёт писать снова.
+    pub fn backlog_full(&self) -> bool {
+        self.pending_bytes >= self.backlog_limit
+    }
+
+    #[cfg(test)]
+    pub fn set_backlog_limit(&mut self, limit: usize) {
+        self.backlog_limit = limit;
     }
 
     /// Пишет накопленные записи на диск и недописанное подтверждение. При отказе записи
@@ -211,6 +233,7 @@ impl Sj {
             let payloads: Vec<&[u8]> = self.pending.iter().map(Vec::as_slice).collect();
             self.journal.append_batch(&payloads)?;
             self.pending.clear();
+            self.pending_bytes = 0;
             #[cfg(test)]
             {
                 self.commits += 1;
@@ -258,7 +281,12 @@ impl Sj {
         let written = usize::try_from(after - before)
             .unwrap_or(usize::MAX)
             .min(self.pending.len());
-        self.pending.drain(..written);
+        let drained: usize = self
+            .pending
+            .drain(..written)
+            .map(|payload| payload.len())
+            .sum();
+        self.pending_bytes -= drained;
         Ok(())
     }
 
