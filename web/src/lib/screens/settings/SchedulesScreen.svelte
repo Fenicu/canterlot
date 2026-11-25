@@ -55,8 +55,10 @@
     void loadLast();
   });
 
-  async function toggle(item: Schedule) {
-    if (busy) return;
+  // Флажок в документе переворачивается от нажатия сам, а `checked` следит только за списком: если запрос
+  // не ушёл или не удался, значение в списке не менялось, и вернуть флажок на место может только код.
+  async function toggle(item: Schedule, input: HTMLInputElement) {
+    if (busy) { input.checked = item.enabled; return; }
     busy = item.id; notice = '';
     try {
       const next = item.enabled
@@ -65,6 +67,7 @@
       await store.load();
       if (!next.enabled && view === item.id) notice = 'Расписание поставлено на паузу';
     } catch {
+      input.checked = item.enabled;
       notice = 'Не удалось изменить расписание. Повторите при восстановлении связи';
     } finally { busy = ''; }
   }
@@ -124,8 +127,8 @@
           <div class="row-side">
             <label class="switch">
               <input type="checkbox" role="switch" checked={item.enabled}
-                aria-label={`Включено: ${item.name}`} disabled={busy === item.id}
-                onchange={() => void toggle(item)} />
+                aria-label={`Включено: ${item.name}`} disabled={busy !== ''}
+                onchange={(event) => void toggle(item, event.currentTarget)} />
               <span class="track"></span>
             </label>
             <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
