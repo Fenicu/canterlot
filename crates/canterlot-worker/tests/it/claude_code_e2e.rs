@@ -1982,6 +1982,19 @@ async fn smoke_turn_raw(
         {
             panic!("live diagnostic: {kind}");
         }
+        // canterlot_limits ждёт ответа хаба на limits.report. Хаба у smoke нет:
+        // отказ, как у старого хаба, и адаптер отвечает местным снимком окон.
+        if let AdapterEvent::Limits { call_id } = &event {
+            adapter
+                .agent_call_result(
+                    *call_id,
+                    adapter::AgentCallResult::Err {
+                        code: "unknown_tool".into(),
+                        message: "smoke has no hub".into(),
+                    },
+                )
+                .await;
+        }
         if let AdapterEvent::RequestOpened {
             request_id,
             kind,
