@@ -8,12 +8,16 @@ export class FakeComposerModel {
 	sending = $state(false);
 	draftApplied = $state(0);
 	calls: string[] = [];
+	/** Текст поля на каждый вызов `typed()`: по нему видно, что в общий черновик ушла очистка. */
+	typedTexts: string[] = [];
 
 	get gate(): { ok: boolean; reason: string } {
 		return this.text.trim() ? { ok: true, reason: '' } : { ok: false, reason: 'Пустое сообщение' };
 	}
 
-	typed(): void {}
+	typed(): void {
+		this.typedTexts.push(this.text);
+	}
 	attachmentsChanged(): void {}
 	takeBack(): void {}
 	remoteDraft(): void {}

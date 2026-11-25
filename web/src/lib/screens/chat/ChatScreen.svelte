@@ -395,7 +395,7 @@
 	{#if systemChat}
 		<p class="system-note" data-role="cloud-composer-note">Здесь только карточки облачных окон</p>
 	{:else}
-		<Composer {chat} onside={(question) => openSide(question)} />
+		<Composer {chat} onside={(question) => { if (sideHidden) return false; openSide(question); return true; }} />
 	{/if}
 
 	{#if showSide && SideChat && !sideHidden}

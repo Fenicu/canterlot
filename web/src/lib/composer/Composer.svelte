@@ -38,7 +38,7 @@
   import type { Component } from 'svelte';
 
   // `hint` — подсказка пустого поля, когда у ленты свой адресат (вопрос в стороне).
-  let { chat, onside, hint }: { chat: ChatStore; onside?: (question: string) => void; hint?: string } = $props();
+  let { chat, onside, hint }: { chat: ChatStore; onside?: (question: string) => boolean | void; hint?: string } = $props();
   const runtime = getRuntime();
   const uploads = sessionUploads();
   let limits = $state<Limits>({
@@ -522,15 +522,21 @@
 
   /**
    * `/side` и `/side вопрос` — вход в боковой чат: текст не уходит в родителя.
-   * Возвращает true, когда команда перехвачена.
+   * Возвращает true, когда команда перехвачена. Хозяин отвечает `false`, если бокового чата здесь нет:
+   * тогда текст остаётся в поле, а не пропадает молча.
    */
   function sideCommand(): boolean {
     if (!onside) return false;
     const match = /^\/side(?:\s+([\s\S]*))?\s*$/.exec(model.text);
     if (!match) return false;
     const question = (match[1] ?? '').trim();
+    if (onside(question) === false) {
+      model.errorMessage = 'Боковой чат здесь недоступен';
+      return true;
+    }
     model.text = '';
-    onside(question);
+    // Очистка уходит и в общий черновик: иначе сохранённое «/side …» вернулось бы при следующем открытии чата.
+    model.typed();
     return true;
   }
 
