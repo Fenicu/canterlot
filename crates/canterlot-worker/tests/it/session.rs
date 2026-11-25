@@ -1142,7 +1142,13 @@ async fn sealed_or_corrupt_store_is_fatal_when_the_restarted_worker_reopens_it()
                 .append(true)
                 .open(segment(&path.join(kind)))
                 .unwrap();
-            file.write_all(b"torn tail").unwrap();
+            // Целая по длине запись с неверной контрольной суммой: порча, журнал
+            // запечатывается. Оборванный хвост печати не даёт.
+            let mut record = 1u32.to_le_bytes().to_vec();
+            record.extend_from_slice(&[0xff; 4]);
+            record.extend_from_slice(&u64::MAX.to_le_bytes());
+            record.push(b'x');
+            file.write_all(&record).unwrap();
             file.sync_all().unwrap();
             if kind == "cj" {
                 StoreErrorKind::CjSealed
