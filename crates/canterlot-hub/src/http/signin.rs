@@ -220,7 +220,8 @@ pub(super) async fn signed_in(
 
 /// Сеанс создан и записан: уходит пуш о входе. Возвращает вид сеанса и `Set-Cookie`
 /// сеанса. Ошибка после записи сеанса отзывает его (`server`): ответ без cookie не
-/// оставляет живого сеанса, которым никто не владеет.
+/// оставляет живого сеанса, которым никто не владеет. Известное устройство при этом
+/// не забывается (`sessions::undo_sign_in`).
 pub(super) async fn issue(
     state: &AppState,
     created: &sessions::Created,
@@ -233,9 +234,7 @@ pub(super) async fn issue(
             vec![session_cookie(&created.token, created.max_age_secs)],
         )),
         Err(error) => {
-            if let Err(revoke) =
-                sessions::revoke(&state.pool, created.id, RevokeReason::Server, None).await
-            {
+            if let Err(revoke) = sessions::undo_sign_in(&state.pool, created).await {
                 tracing::warn!(kind = "sign_in_orphan", session_id = %created.id, error = %crate::dberr::describe(&revoke), "new session not revoked after a failure");
             }
             Err(error)

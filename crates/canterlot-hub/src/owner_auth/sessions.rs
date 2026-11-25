@@ -95,6 +95,15 @@ pub struct Created {
     pub max_age_secs: i64,
     /// Сеансы, вытесненные пределом.
     pub limited: Vec<Uuid>,
+    /// Известное устройство, чью строку этот вход перенёс на новый сеанс.
+    pub moved_device: Option<MovedDevice>,
+}
+
+/// Строка известного устройства до входа: откат неудавшегося входа возвращает её назад.
+#[derive(Debug, Clone)]
+pub struct MovedDevice {
+    token_sha256: Vec<u8>,
+    previous_session: Option<Uuid>,
 }
 
 /// Новый сеанс. Вход по QR рождается несвежим (`authenticated_at` пуст).
@@ -126,8 +135,9 @@ pub async fn sign_in(
     existing: Option<&str>,
 ) -> Result<(Created, String), sqlx::Error> {
     let mut tx = crate::db::begin(pool).await?;
-    let created = create_in_tx(&mut tx, owner_id, method, None, client).await?;
-    let device = remember_device(&mut tx, owner_id, existing, created.id).await?;
+    let mut created = create_in_tx(&mut tx, owner_id, method, None, client).await?;
+    let (device, moved) = remember_device(&mut tx, owner_id, existing, created.id).await?;
+    created.moved_device = moved;
     tx.commit().await?;
     if !created.limited.is_empty() {
         super::notify_changed(pool, "session_revoked").await;
@@ -192,6 +202,7 @@ pub async fn create_in_tx(
         token,
         max_age_secs: i64::from(days) * 86400,
         limited,
+        moved_device: None,
     })
 }
 
@@ -701,21 +712,30 @@ async fn remember_device(
     owner_id: Uuid,
     existing: Option<&str>,
     session: Uuid,
-) -> Result<String, sqlx::Error> {
+) -> Result<(String, Option<MovedDevice>), sqlx::Error> {
     if let Some(token) = existing.filter(|token| token_shape_ok(token)) {
-        let kept = sqlx::query(
-            "update owner_devices set last_used_at=now(),session_id=$3
-             where token_sha256=$1 and owner_id=$2",
+        let token_sha256 = digest(Secret::Device, token);
+        // Прежний сеанс строки читается тем же оператором, что её переносит.
+        let previous: Option<(Option<Uuid>,)> = sqlx::query_as(
+            "with old as (select token_sha256,session_id from owner_devices
+                          where token_sha256=$1 and owner_id=$2 for update)
+             update owner_devices d set last_used_at=now(),session_id=$3
+             from old where d.token_sha256=old.token_sha256
+             returning old.session_id",
         )
-        .bind(digest(Secret::Device, token))
+        .bind(&token_sha256)
         .bind(owner_id)
         .bind(session)
-        .execute(&mut *conn)
-        .await?
-        .rows_affected()
-            > 0;
-        if kept {
-            return Ok(token.to_owned());
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some((previous_session,)) = previous {
+            return Ok((
+                token.to_owned(),
+                Some(MovedDevice {
+                    token_sha256,
+                    previous_session,
+                }),
+            ));
         }
     }
     let token = generate_token();
@@ -725,7 +745,25 @@ async fn remember_device(
         .bind(session)
         .execute(&mut *conn)
         .await?;
-    Ok(token)
+    Ok((token, None))
+}
+
+/// Откат входа, ответ на который не ушёл: сеанс отзывается (`server`). Строка нового
+/// устройства уходит вместе с ним — его cookie клиент не получил. Известное устройство
+/// сначала возвращается к прежнему сеансу: иначе отзыв забыл бы его, и сбой хаба
+/// отправил бы владельца в общую корзину перебора.
+pub async fn undo_sign_in(pool: &PgPool, created: &Created) -> Result<Vec<Uuid>, sqlx::Error> {
+    if let Some(moved) = &created.moved_device {
+        sqlx::query(
+            "update owner_devices set session_id=$2 where token_sha256=$1 and session_id=$3",
+        )
+        .bind(&moved.token_sha256)
+        .bind(moved.previous_session)
+        .bind(created.id)
+        .execute(pool)
+        .await?;
+    }
+    revoke(pool, created.id, RevokeReason::Server, None).await
 }
 
 /// Уборка: полные отозванные строки старше 30 дней уходят в надгробия, надгробия живут

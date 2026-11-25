@@ -234,3 +234,60 @@ async fn auth_devices_a_failure_after_the_session_commit_revokes_it() {
         .await;
     assert_eq!(ok.status, 200);
 }
+
+/// Вход с известного устройства переносит его строку на новый сеанс. Если ответ на вход
+/// не ушёл, сеанс отзывается, а устройство остаётся известным и привязанным к прежнему
+/// сеансу: сбой хаба не отправляет владельца в общую корзину перебора.
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn auth_devices_a_failed_sign_in_does_not_forget_a_known_device() {
+    let pool = canterlot_hub::testkit::db().await;
+    use canterlot_hub::fault_injection::Point;
+    let hub = AuthHub::new(pool).await;
+    hub.set_password(PASSWORD).await;
+    let first = sign_in(&hub, &hub.anonymous(Some("203.0.113.89"))).await;
+    assert!(known(&hub, &first.device).await);
+    let bound = |hub: &AuthHub| {
+        let pool = hub.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<Uuid>>("select session_id from owner_devices")
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(bound(&hub).await, [Some(first.id)]);
+
+    hub.state
+        .auth_faults
+        .drop_next_at(Point::SignInAfterSession, "");
+    let returning = with_device(hub.anonymous(Some("203.0.113.89")), &first.device);
+    let failed = hub.sign_in_owner(&returning).await;
+    assert_eq!(failed.status, 503, "{:?}", failed.body);
+    assert!(set_cookie(&failed, SESSION_COOKIE).is_none());
+    let live: i64 = sqlx::query_scalar(
+        "select count(*) from owner_sessions
+         where created_ip='203.0.113.89' and revoked_at is null",
+    )
+    .fetch_one(&hub.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        live, 1,
+        "only the first session lives; the failed one is revoked"
+    );
+    assert!(
+        known(&hub, &first.device).await,
+        "the device is still known after the failed sign-in"
+    );
+    assert_eq!(
+        bound(&hub).await,
+        [Some(first.id)],
+        "and it is bound to the session it had before"
+    );
+    assert_eq!(hub.revoke_reason(first.id).await, None);
+    // Следующий вход с того же устройства проходит и оставляет ту же cookie устройства.
+    let again = sign_in(&hub, &returning).await;
+    assert_eq!(again.device, first.device);
+    assert_eq!(bound(&hub).await, [Some(again.id)]);
+}
