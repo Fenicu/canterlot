@@ -27,6 +27,9 @@ use super::{
 /// Карточка живёт сутки; просроченное предложение закрывается без применения.
 pub const EXPIRY: TimeDelta = TimeDelta::hours(24);
 const HINT_PENDING: &str = "The owner decides in the app; wait for the outcome message.";
+/// Предел карточек настроек одного разговора за окно, решённые тоже в счёте.
+const PROPOSALS_PER_WINDOW: i64 = 5;
+const PROPOSAL_WINDOW: TimeDelta = TimeDelta::hours(1);
 
 /// Всё, что нужно карточке «до → после»: вид настройки, причина и base revision.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -149,6 +152,38 @@ async fn open_proposal(
     let deadline = Utc::now() + EXPIRY;
     let payload =
         serde_json::to_value(&proposal).map_err(|_| ToolError::new(ToolErrorCode::Internal))?;
+    // Каждая карточка — запрос, суточное задание и пуш владельцу на телефон. Агент, который
+    // зациклился и слегка меняет значение, не должен заводить их без счёта: по одной открытой
+    // карточке на настройку и разговор и общий часовой предел, как у карточек запуска.
+    // Очередь разговора уже под замком, поэтому два вызова проверку вместе не пройдут.
+    let (recent, open): (i64, Option<Uuid>) = sqlx::query_as(
+        "select count(*) filter (where created_at > clock_timestamp() - $2::interval),
+                (array_agg(id) filter (where state in ('open','decision_saved')
+                    and request_payload->>'setting' = $3
+                    and request_payload->>'preset_id' is not distinct from $4))[1]
+           from requests where conversation_id=$1 and kind='settings_change'",
+    )
+    .bind(caller.conversation_id)
+    .bind(format!("{} seconds", PROPOSAL_WINDOW.num_seconds()))
+    .bind(payload["setting"].as_str())
+    .bind(payload["preset_id"].as_str())
+    .fetch_one(&mut *tx)
+    .await?;
+    if let Some(open) = open {
+        return Err(ToolError::with_message(
+            ToolErrorCode::RateLimited,
+            format!(
+                "a proposal for this setting is already waiting for the owner (request {open}); \
+                 wait for the outcome message"
+            ),
+        ));
+    }
+    if recent >= PROPOSALS_PER_WINDOW {
+        return Err(ToolError::with_message(
+            ToolErrorCode::RateLimited,
+            format!("{recent} settings proposals in the last hour; try again later"),
+        ));
+    }
     requests::create_request_in_tx(
         &mut tx,
         &requests::NewRequest {

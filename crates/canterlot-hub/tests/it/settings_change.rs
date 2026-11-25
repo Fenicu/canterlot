@@ -715,6 +715,91 @@ async fn identical_value_is_refused_at_proposal_time() {
     assert_eq!(requests, 0);
 }
 
+async fn settings_requests(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("select count(*) from requests where kind='settings_change'")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+fn whitelist_args(model: &str) -> Value {
+    json!({"entries": [{"harness":"claude_code","model":model}], "reason": "x", "base_revision": 0})
+}
+
+/// Зациклившийся агент предлагает одну и ту же настройку раз за разом, слегка меняя значение.
+/// Пока владелец не решил первую карточку, вторая по той же настройке не заводится: ни
+/// запроса, ни пуша.
+#[tokio::test]
+async fn a_setting_has_one_open_proposal_per_conversation() {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fx::new(pool).await;
+    let (first, _) = f
+        .proposal("settings.propose_whitelist", whitelist_args("haiku"))
+        .await;
+    let error = f
+        .call("settings.propose_whitelist", whitelist_args("sonnet"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code.as_str(), "rate_limited", "{error:?}");
+    assert!(
+        error.message.contains(&first.to_string()),
+        "{}",
+        error.message
+    );
+    assert_eq!(settings_requests(&f.pool).await, 1);
+
+    // Другая настройка не занята.
+    f.proposal(
+        "settings.propose_routing",
+        json!({"policy": routing(), "reason": "x", "base_revision": 0}),
+    )
+    .await;
+    // Владелец решил: место свободно.
+    assert_eq!(f.decide(first, "deny").await, 200);
+    f.run_job_by_action("settings_change", Utc::now()).await;
+    f.proposal("settings.propose_whitelist", whitelist_args("sonnet"))
+        .await;
+    assert_eq!(settings_requests(&f.pool).await, 3);
+}
+
+/// Часовой предел карточек настроек на разговор: решённые карточки тоже в счёте.
+#[tokio::test]
+async fn settings_proposals_are_capped_per_hour() {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fx::new(pool).await;
+    for n in 0..5 {
+        let (request, _) = f
+            .proposal(
+                "settings.propose_whitelist",
+                whitelist_args(&format!("model-{n}")),
+            )
+            .await;
+        assert_eq!(f.decide(request, "deny").await, 200);
+        f.run_job_by_action("settings_change", Utc::now()).await;
+        assert_eq!(f.request_state(request).await, "declined");
+        // Помощник задание не закрывает: убираем его, чтобы следующий круг взял своё.
+        sqlx::query("delete from scheduled_jobs where payload->>'action'='settings_change'")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+    }
+    let error = f
+        .call("settings.propose_whitelist", whitelist_args("one-more"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code.as_str(), "rate_limited", "{error:?}");
+    assert!(error.message.contains("hour"), "{}", error.message);
+    assert_eq!(settings_requests(&f.pool).await, 5);
+
+    // Час прошёл: счётчик пуст.
+    sqlx::query("update requests set created_at=created_at - interval '61 minutes'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.proposal("settings.propose_whitelist", whitelist_args("one-more"))
+        .await;
+}
+
 #[tokio::test]
 async fn outcome_note_is_delivered_once_when_the_job_is_replayed() {
     let pool = canterlot_hub::testkit::db().await;
