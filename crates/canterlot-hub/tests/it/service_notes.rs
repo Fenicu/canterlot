@@ -303,6 +303,159 @@ async fn a_note_that_arrives_while_the_input_waits_rides_with_it() {
     assert_eq!(attached, Some(owner.input_id));
 }
 
+async fn command_content(pool: &PgPool, command_id: Uuid) -> Value {
+    sqlx::query_scalar("select payload->'content' from commands where id=$1")
+        .bind(command_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Выдача не состоялась: машина сохранила команду и вернула ввод в очередь.
+async fn dispatch_and_withdraw(pool: &PgPool, seed: &Seed) -> (Uuid, Uuid) {
+    use canterlot_hub::delivery::receipts::{InputReceipt, apply_input_receipt};
+    let outcome = dispatch(pool, seed).await;
+    let DispatchOutcome::Dispatched {
+        input_id,
+        command_id,
+        attempt,
+        ..
+    } = outcome
+    else {
+        panic!("queued input did not dispatch: {outcome:?}");
+    };
+    for receipt in [InputReceipt::Stored, InputReceipt::Withdrawn] {
+        apply_input_receipt(pool, command_id, attempt, receipt, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    (input_id, command_id)
+}
+
+const ACCEPTED: &str = "[canterlot] Session \"Делегат\" was accepted.";
+
+/// Заметка приложена к вводу, выдача не состоялась, владелец поправил текст. Вторая
+/// выдача несёт и заметку, и новый текст: правка не стирает приставку, а повтор без
+/// правки её не удваивает.
+#[tokio::test]
+async fn a_note_survives_a_withdrawn_dispatch_and_an_edit_of_its_input() {
+    use canterlot_hub::delivery::control::{EditInput, request_edit_input};
+    let pool = canterlot_hub::testkit::db().await;
+    let seed = seed(&pool).await;
+    start(&pool, &seed).await;
+    let note = note(&pool, &seed, accepted_origin(Uuid::now_v7()), ACCEPTED).await;
+    let owner = owner_input(&pool, &seed).await;
+    let (input, command) = dispatch_and_withdraw(&pool, &seed).await;
+    assert_eq!(input, owner.input_id);
+    assert_eq!(
+        command_content(&pool, command).await,
+        json!([{"type":"text","text":ACCEPTED},{"type":"text","text":"собери релиз"}])
+    );
+    // Повторная выдача того же ввода без правки.
+    let (again, _) = dispatch_and_withdraw(&pool, &seed).await;
+    assert_eq!(again, input);
+    assert_eq!(
+        command_content(&pool, command).await,
+        json!([{"type":"text","text":ACCEPTED},{"type":"text","text":"собери релиз"}]),
+        "the prefix is not doubled"
+    );
+    let revision: i64 = sqlx::query_scalar("select revision from inputs where id=$1")
+        .bind(input)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    request_edit_input(
+        &pool,
+        EditInput {
+            owner_id: seed.owner_id,
+            conversation_id: seed.conversation_id,
+            input_id: input,
+            text: "новый текст".into(),
+            attachment_ids: Vec::new(),
+            expected_revision: revision,
+            idempotency_key: Uuid::now_v7().to_string(),
+            correlation_id: Uuid::now_v7(),
+        },
+    )
+    .await
+    .unwrap();
+    let outcome = dispatch(&pool, &seed).await;
+    assert!(
+        matches!(outcome, DispatchOutcome::Dispatched { input_id, .. } if input_id == input),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        command_content(&pool, command).await,
+        json!([{"type":"text","text":ACCEPTED},{"type":"text","text":"новый текст"}]),
+        "the note rides with the edited input"
+    );
+    let attached: Option<Uuid> =
+        sqlx::query_scalar("select note_attached_to from inputs where id=$1")
+            .bind(note)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(attached, Some(input));
+}
+
+/// Ввод с приложенной заметкой вернулся в очередь, и владелец его отменил. Заметка не
+/// остаётся привязанной к мёртвому вводу: её несёт следующий.
+#[tokio::test]
+async fn a_note_of_a_cancelled_input_rides_with_the_next_one() {
+    let pool = canterlot_hub::testkit::db().await;
+    let seed = seed(&pool).await;
+    start(&pool, &seed).await;
+    let note = note(&pool, &seed, accepted_origin(Uuid::now_v7()), ACCEPTED).await;
+    owner_input(&pool, &seed).await;
+    let (cancelled, _) = dispatch_and_withdraw(&pool, &seed).await;
+    delivery::control::cancel_input(
+        &pool,
+        seed.owner_id,
+        cancelled,
+        &Uuid::now_v7().to_string(),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let next = delivery::submit_input(
+        &pool,
+        SubmitInput {
+            owner_id: seed.owner_id,
+            conversation_id: seed.conversation_id,
+            idempotency_key: "owner:two".to_owned(),
+            content: vec![ContentBlock::Text {
+                text: "другое".to_owned(),
+            }],
+            received_at: Utc::now(),
+            correlation_id: Uuid::now_v7(),
+            origin: None,
+        },
+    )
+    .await
+    .unwrap();
+    let outcome = dispatch(&pool, &seed).await;
+    let DispatchOutcome::Dispatched {
+        input_id,
+        command_id,
+        ..
+    } = outcome
+    else {
+        panic!("the next input did not dispatch: {outcome:?}");
+    };
+    assert_eq!(input_id, next.input_id);
+    assert_eq!(
+        command_content(&pool, command_id).await,
+        json!([{"type":"text","text":ACCEPTED},{"type":"text","text":"другое"}])
+    );
+    let attached: Option<Uuid> =
+        sqlx::query_scalar("select note_attached_to from inputs where id=$1")
+            .bind(note)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(attached, Some(next.input_id));
+}
+
 #[tokio::test]
 async fn a_quiet_note_does_not_block_its_own_dispatch() {
     let pool = canterlot_hub::testkit::db().await;

@@ -380,7 +380,11 @@ pub async fn dispatch_next(
 
 /// Служебные строки, накопившиеся до этого ввода, идут агенту одним коротким блоком
 /// перед текстом владельца или событием. Сами они хода не начинали; приставка
-/// снимается здесь, при выдаче, поэтому правка ожидающего ввода их не теряет.
+/// собирается здесь, при каждой выдаче, заново: из заметок и собственного текста ввода.
+/// Выдача может не состояться (отзыв, отложенная выдача), и ввод вернётся в очередь с уже
+/// привязанными заметками. Поэтому берутся и свободные заметки, и привязанные к этому
+/// вводу (правка между выдачами заменяет текст команды и стёрла бы приставку), и
+/// привязанные к вводу, который до агента так и не дошёл: отменён или отклонён.
 /// Карточка «Ход завис» (`turn_hung_notice`) адресована только владельцу: она остаётся
 /// в ленте и к агенту не идёт никогда.
 async fn prepend_service_notes(
@@ -390,12 +394,17 @@ async fn prepend_service_notes(
     command_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let notes: Vec<(Uuid, Value)> = sqlx::query_as(
-        "select id,content from inputs
-         where conversation_id=$1 and service_note and note_attached_to is null
-           and coalesce(origin#>>'{event,turn_hung_notice}','') <> 'true'
-         order by input_seq for update",
+        "select n.id,n.content from inputs n
+         where n.conversation_id=$1 and n.service_note
+           and (n.note_attached_to is null
+                or n.note_attached_to=$2
+                or exists(select 1 from inputs carrier where carrier.id=n.note_attached_to
+                          and carrier.state in ('cancelled','rejected')))
+           and coalesce(n.origin#>>'{event,turn_hung_notice}','') <> 'true'
+         order by n.input_seq for update of n",
     )
     .bind(conversation_id)
+    .bind(input_id)
     .fetch_all(&mut *conn)
     .await?;
     if notes.is_empty() {
@@ -415,15 +424,13 @@ async fn prepend_service_notes(
     if text.is_empty() {
         return Ok(());
     }
-    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1 for update")
-        .bind(command_id)
+    // Основа — текст самого ввода, а не прежнее содержимое команды: в команде после
+    // несостоявшейся выдачи уже стоит приставка, и вторая легла бы поверх первой.
+    let own: Value = sqlx::query_scalar("select content from inputs where id=$1")
+        .bind(input_id)
         .fetch_one(&mut *conn)
         .await?;
-    let mut content = payload
-        .get("content")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let mut content = own.as_array().cloned().unwrap_or_default();
     content.insert(0, json!({"type":"text","text":text}));
     sqlx::query("update commands set payload=jsonb_set(payload,'{content}',$2::jsonb) where id=$1")
         .bind(command_id)
@@ -432,7 +439,8 @@ async fn prepend_service_notes(
         .await?;
     let ids: Vec<Uuid> = notes.iter().map(|(id, _)| *id).collect();
     sqlx::query(
-        "update inputs set note_attached_to=$2 where id=any($1) and note_attached_to is null",
+        "update inputs set note_attached_to=$2
+         where id=any($1) and note_attached_to is distinct from $2",
     )
     .bind(&ids)
     .bind(input_id)
