@@ -1130,6 +1130,19 @@ impl ExecutionManager {
             let Ok(id) = Uuid::parse_str(&record.execution_id) else {
                 continue;
             };
+            let record = if manager::has_owner_lost_intent(&record) {
+                // Прошлый запуск умер посреди сообщения `owner_lost`: факт дописывается
+                // заново (хаб повтор отклонит), и исполнение идёт как потерянное.
+                tracing::warn!(execution_id = %id, kind = "owner_lost_resumed", "unfinished owner_lost report is completed");
+                manager::report_owner_lost(&self.shared, id, record.generation).await?;
+                self.shared
+                    .store
+                    .call(move |store| Ok(open(store)?.ownership().get(id).cloned()))
+                    .await?
+                    .unwrap_or(record)
+            } else {
+                record
+            };
             let reported = manager::is_reported(&record);
             let lost = reported || manager::is_orphaned(&record);
             let rebooted =

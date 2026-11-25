@@ -50,6 +50,10 @@ use crate::{
 
 const ORPHANED: &str = "owner_lost";
 const REPORTED: &str = "owner_lost_reported";
+/// Намерение сообщить `owner_lost`: запись принадлежности получает его до факта в CJ.
+/// Рестарт, который застал намерение, дописывает факт заново: иначе смерть воркера между
+/// фактом и пометкой оставила бы сессию в `owner_lost` без наблюдателя.
+const OWNER_LOST_INTENT: &str = "owner_lost_intent";
 const RECONNECT_EVERY: Duration = Duration::from_millis(200);
 /// Сколько раз актор одного исполнения поднимается заново после ошибки за жизнь воркера.
 const MAX_ACTOR_RESTARTS: u32 = 3;
@@ -131,6 +135,10 @@ struct Link {
 
 pub(super) fn is_orphaned(record: &Ownership) -> bool {
     record.released_reason == ORPHANED && record.phase != OwnershipPhase::Released as i32
+}
+
+pub(super) fn has_owner_lost_intent(record: &Ownership) -> bool {
+    record.released_reason == OWNER_LOST_INTENT && record.phase != OwnershipPhase::Released as i32
 }
 
 pub(super) fn is_reported(record: &Ownership) -> bool {
@@ -562,6 +570,12 @@ pub(super) async fn report_owner_lost(
     id: Uuid,
     generation: u64,
 ) -> Result<(), ExecError> {
+    ownership_update(shared, id, |record| {
+        if !is_reported(record) && !is_orphaned(record) {
+            record.released_reason = OWNER_LOST_INTENT.into();
+        }
+    })
+    .await?;
     shared
         .cj(
             vec![Body::ExecutionState(ExecutionState {
@@ -578,7 +592,7 @@ pub(super) async fn report_owner_lost(
         )
         .await?;
     ownership_update(shared, id, |record| {
-        if !is_reported(record) {
+        if record.released_reason == OWNER_LOST_INTENT {
             record.released_reason = ORPHANED.into();
         }
     })

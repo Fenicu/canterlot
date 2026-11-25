@@ -1507,6 +1507,98 @@ async fn reported_spawning_record_exits_owner_lost_by_itself() {
     env.assert_released("supervisor_died").await;
 }
 
+/// Последняя запись принадлежности исполнения прямо с диска, мимо потока хранилища.
+#[cfg(feature = "fault-injection")]
+fn ownership_on_disk(root: &Path, id: Uuid) -> Option<Ownership> {
+    let journal =
+        canterlot_journal::Journal::open_read_only(&root.join("store/ownership")).unwrap();
+    journal
+        .read_from(journal.first_seq(), usize::MAX)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .map(|record| Ownership::decode(record.payload.as_slice()).unwrap())
+        .find(|record| record.execution_id == id.to_string())
+}
+
+/// Факт `owner_lost` ложится в CJ только после устойчивого намерения в записи
+/// принадлежности. Смерть воркера между ними не может оставить запись без пометки:
+/// иначе после рестарта отказ старой команды старта погасил бы старт, а наблюдателя,
+/// который довёл бы `owner_lost` до итога, не осталось бы.
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn owner_lost_intent_is_durable_before_the_cj_fact() {
+    use canterlot_worker::fault_injection::{StoreAppendPoint, StoreProbe};
+    use std::pin::pin;
+
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let mut record = env.ownership(env.execution).await.unwrap();
+    env.close_manager().await;
+    let probe = StoreProbe::default();
+    env.reopen_with_probe(probe.clone());
+    // Сверка не узнает сопровождение: исполнение уходит в `owner_lost`.
+    record.supervisor_start_ticks += 1;
+    env.thread()
+        .call(move |store| {
+            store.as_mut().unwrap().ownership_mut()?.append(record)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut hold = probe.hold_after(StoreAppendPoint::Cj);
+    {
+        let mut verify = pin!(env.manager().startup_verify());
+        tokio::select! {
+            () = hold.reached() => {}
+            result = &mut verify => panic!("startup ended before the CJ fact: {result:?}"),
+        }
+        let on_disk = ownership_on_disk(env.root.path(), env.execution).unwrap();
+        assert!(
+            !on_disk.released_reason.is_empty(),
+            "the owner_lost intent is durable before the CJ fact"
+        );
+        hold.release();
+        assert!(verify.await.unwrap().is_empty());
+    }
+    assert_eq!(owner_lost(&env.cj().await, env.execution), 1);
+    assert_eq!(
+        env.ownership(env.execution).await.unwrap().released_reason,
+        "owner_lost"
+    );
+}
+
+/// Воркер умер, когда намерение сообщить `owner_lost` уже на диске, а факта в CJ ещё нет
+/// (запись `Spawning`, старт ждёт ответа). Рестарт доводит намерение до факта и до итога
+/// `failed(supervisor_died)`, а не гасит старт отказом.
+#[tokio::test]
+async fn a_stored_owner_lost_intent_is_reported_on_restart() {
+    let mut env = Env::new().await;
+    env.leave_a_spawning_record().await;
+    let mut record = env.ownership(env.execution).await.unwrap();
+    record.released_reason = "owner_lost_intent".into();
+    env.thread()
+        .call(move |store| {
+            store.as_mut().unwrap().ownership_mut()?.append(record)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(env.manager().startup_verify().await.unwrap().is_empty());
+    let cj = env.cj().await;
+    assert_eq!(owner_lost(&cj, env.execution), 1);
+    assert!(
+        rejected_reasons(&cj).is_empty(),
+        "{:?}",
+        rejected_reasons(&cj)
+    );
+    env.hub_session();
+    env.wait_exit("supervisor_died").await;
+    env.assert_released("supervisor_died").await;
+}
+
 /// Воркер убит после запуска сопровождения, но до записи `Attached`: сопровождение живёт
 /// без владельца. Оно отвечает на сокете из записи, поэтому находится и останавливается.
 #[tokio::test]
