@@ -3470,6 +3470,72 @@ async fn fork_reforks_when_the_side_record_is_gone() {
     fake.permit.take();
 }
 
+/// До первого хода CLI беседу не записывает и `system/init` не шлёт. Перезапуск в
+/// этом окне (первый ввод со сменой инструкций) обязан снова форкнуть родителя:
+/// один `--session-id` поднял бы пустую сессию под идентификатором бокового чата.
+#[tokio::test]
+async fn fork_restarted_before_its_first_turn_stays_a_copy_of_the_parent() {
+    let mut fake = Fake::new(vec![vec![
+        json!({"type":"command_lifecycle","command_uuid":"@input","state":"started"}),
+        json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":["@input"]}),
+    ]]);
+    fake.spec.native_conversation_id = None;
+    fake.spec.fork = Some(ForkSpec {
+        parent_native_id: "parent-native".into(),
+        side_mcp: true,
+    });
+    fake.permit = Some(CLI_GATE.lock().await);
+    let started = tokio::time::timeout(WAIT, fake.adapter.start(&fake.spec, &fake.group))
+        .await
+        .expect("start must finish")
+        .expect("start");
+    assert!(started.fresh_fork);
+    let first = recorded(&fake, "args.json").await;
+    assert!(first.as_array().unwrap().contains(&json!("--fork-session")));
+    std::fs::remove_file(fake.dir.path().join("args.json")).unwrap();
+    let mut t = tx(Uuid::now_v7());
+    t.settings = Some(adapter::SettingsChange {
+        instructions: Some(InstructionSpec {
+            mode: InstructionMode::Clean,
+            text: String::new(),
+            preset_id: None,
+            revision: 0,
+            title: String::new(),
+        }),
+        ..Default::default()
+    });
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(40),
+        fake.adapter.transmit(&t, &fake.group),
+    )
+    .await
+    .expect("transmit in time");
+    assert!(
+        matches!(outcome, TransmitOutcome::Accepted(_)),
+        "{outcome:?}"
+    );
+    let second = recorded(&fake, "args.json").await;
+    let second: Vec<&str> = second
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    fake.adapter
+        .close(CloseMode::Force, &fake.group)
+        .await
+        .unwrap();
+    fake.permit.take();
+    let resume = second
+        .iter()
+        .position(|x| *x == "--resume")
+        .unwrap_or_else(|| panic!("the relaunch must fork the parent again: {second:?}"));
+    assert_eq!(second[resume + 1], "parent-native");
+    assert_eq!(second[resume + 2], "--fork-session");
+    let id = second.iter().position(|x| *x == "--session-id").unwrap();
+    assert_eq!(second[id + 1], started.native_conversation_id);
+}
+
 #[tokio::test]
 async fn goal_command_sends_slash_input_and_publishes_the_reply() {
     let reply = json!({

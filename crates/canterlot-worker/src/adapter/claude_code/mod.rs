@@ -78,6 +78,8 @@ pub struct ClaudeCodeAdapter {
     cli_ready: bool,
     /// Запуск с `--resume`: беседа записана, хотя этот CLI ещё ни разу не ответил.
     resumed: bool,
+    /// Родитель свежего форка: до первого `system/init` перезапуск повторяет форк.
+    fork_parent: Option<String>,
     eof: bool,
     exited: bool,
     start_attempted: bool,
@@ -142,6 +144,7 @@ impl ClaudeCodeAdapter {
             initialized: false,
             cli_ready: false,
             resumed: false,
+            fork_parent: None,
             eof: false,
             exited: false,
             start_attempted: false,
@@ -687,10 +690,18 @@ impl ClaudeCodeAdapter {
 
     /// Аргумент беседы для нового процесса: `--resume` отказывает без записанной
     /// беседы («No conversation found»), повторный `--session-id` — при записанной
-    /// («already in use»). Запись появляется только с первым ходом.
+    /// («already in use»). Запись появляется только с первым ходом. Свежий форк до
+    /// первого хода повторяется форком с тем же id: один `--session-id` поднял бы
+    /// пустую сессию без истории родителя.
     fn relaunch_session(&self) -> SessionArg {
         match Uuid::parse_str(&self.native_id) {
-            Ok(id) if !self.initialized && !self.resumed => SessionArg::New(id),
+            Ok(id) if !self.initialized && !self.resumed => match &self.fork_parent {
+                Some(parent) => SessionArg::Fork {
+                    parent: parent.clone(),
+                    new_id: Some(id),
+                },
+                None => SessionArg::New(id),
+            },
             _ => SessionArg::Resume(self.native_id.clone()),
         }
     }
@@ -1536,6 +1547,10 @@ impl Adapter for ClaudeCodeAdapter {
             (None, None) => (SessionArg::New(Uuid::now_v7()), false),
         };
         self.resumed = matches!(session, SessionArg::Resume(_));
+        self.fork_parent = match &session {
+            SessionArg::Fork { parent, .. } => Some(parent.clone()),
+            _ => None,
+        };
         self.native_id = match &session {
             SessionArg::New(id) => id.to_string(),
             SessionArg::Resume(id) => id.clone(),
