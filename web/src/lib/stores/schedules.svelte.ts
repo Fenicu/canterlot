@@ -30,14 +30,31 @@ export class SchedulesStore {
   version = $state(0);
   error = $state("");
   #sub: Subscription | null = null;
+  /** Номер последнего начатого чтения списка. */
+  #reads = 0;
+  /** Номер чтения, чей ответ сейчас показан. */
+  #shown = 0;
 
   async load(): Promise<void> {
+    const read = ++this.#reads;
     try {
-      this.items = (await listSchedules()).data;
-      this.error = "";
+      this.#show(read, (await listSchedules()).data);
     } catch {
+      // Отказ раннего чтения не прячет список, который успело принести более позднее.
+      if (read < this.#shown) return;
       this.error = "Не удалось загрузить расписания. Повторите при восстановлении связи";
     }
+  }
+
+  /**
+   * Каждое событие запускает своё чтение, и ответы приходят в любом порядке:
+   * ответ чтения, начатого раньше показанного, список не затирает.
+   */
+  #show(read: number, items: Schedule[]): void {
+    if (read < this.#shown) return;
+    this.#shown = read;
+    this.items = items;
+    this.error = "";
   }
 
   open(connection: Connection): void {
@@ -52,16 +69,23 @@ export class SchedulesStore {
 
   private applier: ScopeApplier = {
     loadSnapshot: async () => {
-      const list = await listSchedules();
-      const response = await eventsRange({ scope: "schedules", limit: 1 }).catch(() => null);
-      const body = response?.data as RangeBody | undefined;
+      // Голова журнала читается раньше списка: изменение между двумя запросами попадает
+      // в список, а его событие остаётся впереди курсора и перечитает список ещё раз.
+      // В обратном порядке оно оказалось бы позади курсора и не в списке. Отказ запроса
+      // головы роняет снимок, и область повторит его: курсор «0» повёл бы подписку
+      // с начала журнала.
+      const response = await eventsRange({ scope: "schedules", limit: 1 });
+      const body = response.data as RangeBody | undefined;
       const cursor = body && typeof body.head === "string" && !("resync_required" in body)
         ? body.head
         : "0";
-      return { cursor, data: list.data };
+      const read = ++this.#reads;
+      const list = await listSchedules();
+      return { cursor, data: { read, items: list.data } };
     },
     applySnapshot: (data: unknown) => {
-      this.items = (data ?? []) as Schedule[];
+      const snapshot = data as { read: number; items: Schedule[] };
+      this.#show(snapshot.read, snapshot.items ?? []);
     },
     applyEvents: (batch: AppliedEvent[]) => {
       if (!batch.some(({ event }) =>
