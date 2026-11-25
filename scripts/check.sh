@@ -7,7 +7,7 @@
 #   scripts/check.sh --all --no-web  полная без веб-половины: её целиком делает
 #                                    scripts/check-web.sh (гейт выпуска)
 #   scripts/check.sh --base REF  сравнивать с REF вместо main
-#   scripts/check.sh --fast -E EXPR  свой фильтр тестов nextest вместо выбора по diff (например 'binary(it) & test(/^ws::/)')
+#   scripts/check.sh --fast -E EXPR  свой фильтр тестов nextest вместо выбора по diff (например 'binary(/^it/) & test(/^ws::/)')
 # Скрипт для рабочей копии берёт CANTERLOT_TEST_PG_PORT (своя тестовая PostgreSQL, scripts/test-db.sh).
 # Прогон встаёт в очередь тяжёлых задач воркера: --all берёт аренду gate (весь станок),
 # остальные режимы — build (слот). CANTERLOT_NO_LEASE=1 отключает очередь.
@@ -134,13 +134,11 @@ nextest_filter() {
                 [[ "$crate" == canterlot-speech ]] && continue
                 rest=${path#crates/$crate/}
                 if [[ "$rest" =~ ^tests/it/([^/]+)\.rs$ ]]; then
-                    # Один бинарник it: модуль выбирает свои тесты, main.rs — весь бинарник.
-                    if [[ "${BASH_REMATCH[1]}" == main ]]; then
-                        whole_it[$crate]=1
-                    else
-                        it_modules[$crate]+=" ${BASH_REMATCH[1]}"
-                    fi
-                elif [[ "$rest" == tests/it/support/* ]]; then
+                    # Модуль выбирает свои тесты по имени: бинарник-группу it_<group>
+                    # находит binary(/^it/), раскладка групп здесь не нужна.
+                    it_modules[$crate]+=" ${BASH_REMATCH[1]}"
+                elif [[ "$rest" == tests/it/support/* || "$rest" =~ ^tests/it_[^/]+\.rs$ ]]; then
+                    # Поддержка и корень группы объявляют модули всем бинарникам it.
                     whole_it[$crate]=1
                 elif [[ "$rest" =~ ^tests/([^/]+)\.rs$ ]]; then
                     test_bins[$crate]+=" ${BASH_REMATCH[1]}"
@@ -159,12 +157,12 @@ nextest_filter() {
     done
     for crate in "${!whole_it[@]}"; do
         [[ -n "${src_changed[$crate]:-}" ]] && continue
-        expr+="${expr:+ | }(package($crate) & binary(it))"
+        expr+="${expr:+ | }(package($crate) & binary(/^it/))"
     done
     for crate in "${!it_modules[@]}"; do
         [[ -n "${src_changed[$crate]:-}" || -n "${whole_it[$crate]:-}" ]] && continue
         for name in ${it_modules[$crate]}; do
-            expr+="${expr:+ | }(package($crate) & binary(it) & test(/^${name}::/))"
+            expr+="${expr:+ | }(package($crate) & binary(/^it/) & test(/^${name}::/))"
         done
     done
     for crate in "${!test_bins[@]}"; do
