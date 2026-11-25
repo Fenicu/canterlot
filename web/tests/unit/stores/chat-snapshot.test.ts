@@ -462,6 +462,61 @@ describe("отметка прочтения", () => {
     clock.advance(5000);
     expect(reads).toEqual(["5", "7"]);
   });
+
+  it("отметка, не дошедшая до хаба, уходит повтором, пока её не примут", async () => {
+    const reads: string[] = [];
+    let offline = true;
+    const clock = new FakeClock(1);
+    const chat = chatOf(
+      {
+        markRead: async (_id, seq) => {
+          reads.push(seq);
+          if (offline) throw new Error("network");
+        },
+      },
+      undefined,
+      clock,
+    );
+    chat.open();
+    chat.markRead("5");
+    await Promise.resolve();
+    // Лента зовёт отметку только на новой записи: тот же номер должен уйти сам.
+    clock.advance(2000);
+    expect(reads).toEqual(["5", "5"]);
+    await Promise.resolve();
+    offline = false;
+    clock.advance(4000);
+    expect(reads).toEqual(["5", "5", "5"]);
+    await Promise.resolve();
+    clock.advance(600_000);
+    expect(reads).toEqual(["5", "5", "5"]);
+  });
+
+  it("после закрытия чата потерянная отметка не повторяется сама, но уходит при возврате", async () => {
+    const reads: string[] = [];
+    let offline = true;
+    const clock = new FakeClock(1);
+    const chat = chatOf(
+      {
+        markRead: async (_id, seq) => {
+          reads.push(seq);
+          if (offline) throw new Error("network");
+        },
+      },
+      undefined,
+      clock,
+    );
+    chat.open();
+    chat.markRead("5");
+    chat.close();
+    await Promise.resolve();
+    clock.advance(600_000);
+    expect(reads).toEqual(["5"]);
+    offline = false;
+    chat.open();
+    chat.markRead("5");
+    expect(reads).toEqual(["5", "5"]);
+  });
 });
 
 describe("правило автопинка", () => {

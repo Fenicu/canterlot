@@ -474,6 +474,7 @@ export class ChatStore {
   #readSeq = 0n;
   #readAt = -10_000;
   #readWanted: string | null = null;
+  #readFailures = 0;
   #readTimer: (() => void) | null = null;
   #noteTimers = new SvelteMap<string, () => void>();
   #applier: ScopeApplier | null = null;
@@ -819,20 +820,47 @@ export class ChatStore {
       return;
     }
     if (seq <= this.#readSeq) return;
-    const wait = this.#readAt + 2000 - this.deps.clock.now();
+    const wait = this.#readAt + this.#readPause() - this.deps.clock.now();
     if (wait > 0) {
       this.#readWanted = createdSeq;
-      this.#readTimer ??= this.#later(() => {
-        this.#readTimer = null;
-        const wanted = this.#readWanted;
-        this.#readWanted = null;
-        if (wanted) this.markRead(wanted);
-      }, wait);
+      this.#armRead(wait);
       return;
     }
+    const previous = this.#readSeq;
     this.#readSeq = seq;
     this.#readAt = this.deps.clock.now();
-    this.deps.api.markRead(this.id, createdSeq).catch(() => undefined);
+    this.deps.api.markRead(this.id, createdSeq).then(
+      () => {
+        this.#readFailures = 0;
+      },
+      () => {
+        // Более новая отметка уже ушла и покрывает эту.
+        if (this.#readSeq !== seq) return;
+        // Запрос не дошёл: номер возвращается, иначе та же отметка больше не отправится,
+        // а лента зовёт её снова только на новой записи.
+        this.#readSeq = previous;
+        this.#readFailures += 1;
+        // Закрытый чат сам не повторяет: отметка уйдёт, когда владелец в него вернётся.
+        if (!this.#sub) return;
+        this.#readWanted ??= createdSeq;
+        this.#armRead(this.#readAt + this.#readPause() - this.deps.clock.now());
+      },
+    );
+  }
+
+  /** Обычная пауза между отметками — две секунды; после отказов она растёт до минуты. */
+  #readPause(): number {
+    if (this.#readFailures === 0) return 2000;
+    return Math.min(60_000, 2000 * 2 ** (this.#readFailures - 1));
+  }
+
+  #armRead(wait: number): void {
+    this.#readTimer ??= this.#later(() => {
+      this.#readTimer = null;
+      const wanted = this.#readWanted;
+      this.#readWanted = null;
+      if (wanted) this.markRead(wanted);
+    }, wait);
   }
 
   /** Хаб принял запрос сжатия: идущее состояние видно сразу, не дожидаясь агента. */
