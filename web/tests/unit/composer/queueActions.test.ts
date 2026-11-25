@@ -117,6 +117,37 @@ describe("timeline/QueueActions", () => {
     );
   });
 
+  it("retry_as_new_leaves_no_local_bubble_when_the_device_store_refuses", async () => {
+    const unconfirmed = freshInput("orig-key", "Неподтверждённый текст", Date.now());
+    unconfirmed.id = "inp-unconfirmed-id";
+    unconfirmed.state = "acceptance_unconfirmed";
+    const inputs = new SvelteMap<string, InputView>();
+    const chatMock = {
+      inputs,
+      discardLocal: (key: string) => {
+        inputs.delete(key);
+      },
+    };
+    // Квота или закрытое хранилище: операции в журнале нет, отправлять и подтверждать нечего.
+    const opsMock = {
+      begin: vi.fn(async () => {
+        throw new Error("QuotaExceededError");
+      }),
+      run: vi.fn(async () => undefined),
+    } as unknown as OpJournal;
+
+    await expect(
+      retryAsNew(unconfirmed, {
+        ops: opsMock,
+        chat: chatMock as unknown as ChatStore,
+        conversationId: "conv-1",
+        confirm: async () => true,
+      }),
+    ).rejects.toThrow("Не удалось сохранить на устройстве");
+    expect([...inputs.keys()]).toEqual([]);
+    expect(opsMock.run).not.toHaveBeenCalled();
+  });
+
   it("return_to_draft_keeps_the_typed_text_and_the_files_in_the_mounted_composer", async () => {
     const attachment = {
       attachment_id: "att-1",

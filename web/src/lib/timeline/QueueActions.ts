@@ -115,11 +115,19 @@ export async function retryAsNew(
   localInput.retryOf = retryTarget;
   deps.chat.inputs.set(newKey, localInput);
 
-  const op = await deps.ops.begin("input", body, {
-    conversationId: deps.conversationId,
-    persist: true,
-    key: newKey,
-  });
+  let op: Awaited<ReturnType<OpJournal["begin"]>>;
+  try {
+    op = await deps.ops.begin("input", body, {
+      conversationId: deps.conversationId,
+      persist: true,
+      key: newKey,
+    });
+  } catch {
+    // Хранилище устройства отказало (квота, закрыто): операции нет, и локальный пузырь
+    // с плашкой «Сохраняется» остался бы навсегда. Убираем его и говорим владельцу.
+    deps.chat.discardLocal(newKey);
+    throw new Error("Не удалось сохранить на устройстве, сообщение не отправлено");
+  }
 
   void deps.ops.run(op).catch((err: unknown) => {
     // Отказ хаба показываем на самом пузыре, а не теряем в необработанном промисе.

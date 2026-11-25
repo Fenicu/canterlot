@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getRuntime } from '#lib/app/runtime.js';
+  import { errorText } from '#lib/api/errors.js';
   import { unconfirmed } from '#lib/ops/journal.js';
   import { durationMs } from '#lib/motion.js';
   import { rejectionLabel } from '#lib/format/labels.js';
@@ -120,6 +121,8 @@
   let editRevision = $state(1);
   let editBusy = $state(false);
   let editError = $state<string | null>(null);
+  /** Повтор не удалось даже записать на устройстве: пузыря нового сообщения нет, причина видна здесь. */
+  let retryError = $state<string | null>(null);
   let editClosedNote = $state<string | null>(null);
 
   function startEdit() {
@@ -261,15 +264,20 @@
   {#if input.state === 'acceptance_unconfirmed'}
     <div class="actions">
       <Button
-        onclick={() =>
+        onclick={() => {
+          retryError = null;
           retryAsNew(input, {
             ops: getRuntime().journal,
             chat,
             conversationId: chat.id,
             confirm
-          })}
+          }).catch((err: unknown) => {
+            retryError = errorText(err, 'Повторная отправка не удалась');
+          });
+        }}
       >Отправить повторно как новое</Button>
     </div>
+    {#if retryError}<p class="reason">{retryError}</p>{/if}
   {/if}
   {#if input.state === 'queued' && input.id !== null && !editing}
     <div class="actions">
