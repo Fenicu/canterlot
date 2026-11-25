@@ -861,6 +861,35 @@ export function nonLastRunCards(rows: Row[]): Map<string, string[]> {
 }
 
 /**
+ * Ход, занявший слот очереди. Слот называет ввод (`inputs.id`), а блоки хода несут его команду
+ * (`input_command_id`): живой ход ищется по `command_id` слота, id ввода с блоками не совпадает
+ * никогда. Свободный слот — `null`; у события старого хаба `command_id` нет, и ход неизвестен.
+ */
+export function runSlotCommand(slot: unknown): { command: string | null } | null {
+  if (typeof slot !== "object" || slot === null) return null;
+  const held = (slot as { running?: unknown; dispatching?: unknown }).running ?? (slot as { dispatching?: unknown }).dispatching;
+  if (typeof held !== "object" || held === null) return null;
+  const command = (held as { command_id?: unknown }).command_id;
+  return { command: typeof command === "string" && command !== "" ? command : null };
+}
+
+/**
+ * Команда идущего хода. Слот очереди называет её явно (`command_id`). У хода без слота (его начал
+ * сам CLI) явного имени нет: ход узнаётся по самому новому блоку, который идёт или создан после
+ * начала активности (`latest`). Узнанный ход держится до конца хода: смена состояния или фазы
+ * сдвигает `since` за последний блок, и без памяти карточка теряла бы ход до следующего блока.
+ * Более новый блок другого хода сменяет его; конец хода (`live` ложно) сбрасывает.
+ */
+export function currentRun(
+  prev: string | null,
+  turn: { live: boolean; slot: { command: string | null } | null; latest: string | null },
+): string | null {
+  if (!turn.live) return null;
+  if (turn.slot) return turn.slot.command;
+  return turn.latest ?? prev;
+}
+
+/**
  * Карточки хода, который идёт сейчас, но не последние: живая строка и «Прервать» только у
  * последней, а прежние (ход разрезан сжатием контекста) остаются завершёнными, даже если
  * в них висит блок в `streaming`.

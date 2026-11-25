@@ -916,3 +916,54 @@ async fn already_transmitted_deferral_is_unconfirmed_not_held(pool: PgPool) -> T
     ));
     Ok(())
 }
+
+/// Слот очереди называет ввод (`inputs.id`), а блоки хода — его команду (`input_command_id`):
+/// клиент сопоставляет их только по `command_id` рядом с `input_id`.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn run_slot_carries_the_command_id_of_its_input(pool: PgPool) -> TestResult {
+    let (seed, _, head) = setup(&pool).await;
+    assert_ne!(head.input_id, head.command_id);
+    let slot_of = |name: &str| {
+        let pool = pool.clone();
+        let conversation_id = seed.conversation_id;
+        let name = name.to_owned();
+        async move {
+            let payload: Value = sqlx::query_scalar(
+                "select payload from events where conversation_id = $1 and kind = 'queue_state_changed'
+                 and payload->'run_slot' ? $2 order by scope_seq desc limit 1",
+            )
+            .bind(conversation_id)
+            .bind(&name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            payload["run_slot"][&name].clone()
+        }
+    };
+    let queue = |pool: PgPool| async move {
+        let snapshot =
+            canterlot_hub::snapshot::conversation(&pool, seed.owner_id, seed.conversation_id, 50)
+                .await
+                .unwrap()
+                .unwrap();
+        serde_json::to_value(&snapshot.data.queue).unwrap()["run_slot"].clone()
+    };
+    assert_eq!(
+        slot_of("dispatching").await,
+        json!({"input_id": head.input_id, "attempt": 1, "command_id": head.command_id})
+    );
+    assert_eq!(
+        queue(pool.clone()).await,
+        json!({"dispatching": {"input_id": head.input_id, "attempt": 1, "command_id": head.command_id}})
+    );
+    apply(&pool, head.command_id, 1, InputReceipt::Accepted).await;
+    assert_eq!(
+        slot_of("running").await,
+        json!({"input_id": head.input_id, "command_id": head.command_id})
+    );
+    assert_eq!(
+        queue(pool.clone()).await,
+        json!({"running": {"input_id": head.input_id, "command_id": head.command_id}})
+    );
+    Ok(())
+}

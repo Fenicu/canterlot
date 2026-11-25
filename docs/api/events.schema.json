@@ -940,6 +940,10 @@
                         "attempt": {
                           "type": "integer",
                           "minimum": 0
+                        },
+                        "command_id": {
+                          "$ref": "#/$defs/Uuid",
+                          "description": "Команда ввода в слоте: её несут блоки хода в input_command_id; у старых событий поля нет"
                         }
                       },
                       "required": [
@@ -962,6 +966,10 @@
                       "properties": {
                         "input_id": {
                           "$ref": "#/$defs/Uuid"
+                        },
+                        "command_id": {
+                          "$ref": "#/$defs/Uuid",
+                          "description": "Команда ввода в слоте: её несут блоки хода в input_command_id; у старых событий поля нет"
                         }
                       },
                       "required": [

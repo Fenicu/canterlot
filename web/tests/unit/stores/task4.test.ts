@@ -53,6 +53,9 @@ import { countEffectRuns } from "./effect-runs.svelte";
 
 const CONV = "00000000-0000-4000-8000-0000000000aa";
 const BLOCK = "00000000-0000-4000-8000-0000000000b1";
+// Слот называет ввод, блоки хода — его команду: у хаба это разные id.
+const SLOT_INPUT = "00000000-0000-4000-8000-0000000000a7";
+const SLOT_COMMAND = "00000000-0000-4000-8000-0000000000c7";
 
 function ev(kind: string, payload: unknown, seq = "1"): HubEvent {
   return {
@@ -1192,7 +1195,7 @@ describe("stores task 4", () => {
           {
             pause_reasons: [{ reason: "user_stop" }],
             hold_reasons: [hold],
-            run_slot: { running: { input_id: BLOCK } },
+            run_slot: { running: { input_id: SLOT_INPUT, command_id: SLOT_COMMAND } },
           },
           "4",
         ),
@@ -1201,7 +1204,7 @@ describe("stores task 4", () => {
     ]);
     expect(chat.queue.pause_reasons).toEqual([{ reason: "user_stop" }]);
     expect(chat.queue.hold_reasons).toEqual([hold]);
-    expect(chat.queue.run_slot).toEqual({ running: { input_id: BLOCK } });
+    expect(chat.queue.run_slot).toEqual({ running: { input_id: SLOT_INPUT, command_id: SLOT_COMMAND } });
     chat.applier.applyEvents([
       {
         event: ev(

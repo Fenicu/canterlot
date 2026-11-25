@@ -25087,6 +25087,10 @@
                     "type": "integer",
                     "format": "int32"
                   },
+                  "command_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
                   "input_id": {
                     "type": "string",
                     "format": "uuid"
@@ -25107,6 +25111,10 @@
                   "input_id"
                 ],
                 "properties": {
+                  "command_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
                   "input_id": {
                     "type": "string",
                     "format": "uuid"
@@ -25115,7 +25123,8 @@
               }
             }
           }
-        ]
+        ],
+        "description": "Слот очереди для клиента. Слот называет ввод (`inputs.id`), а блоки хода несут\nего команду (`input_command_id`); `command_id` связывает их. У стёртого ввода его нет."
       },
       "RunState": {
         "type": "string",

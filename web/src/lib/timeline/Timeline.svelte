@@ -24,7 +24,7 @@
   import { activityLiveLine } from '#lib/timeline/present.js';
   import { leaseWaitOf } from '#lib/format/lease.js';
   import { FeedFolds } from '#lib/timeline/folds.js';
-  import { dayStart, nonLastRunCards, settledRunCards, shownInCard, tailKey, RowsCache, type Row } from '#lib/timeline/rows.js';
+  import { currentRun, dayStart, nonLastRunCards, runSlotCommand, settledRunCards, shownInCard, tailKey, RowsCache, type Row } from '#lib/timeline/rows.js';
   import { rowIndexOfInput } from '#lib/timeline/ownerMessages.js';
   import { turnIsLive } from '#lib/composer/sendRules.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
@@ -199,12 +199,8 @@
   const compacting = $derived(!feed && !laneRoot && chat.compacting && !compactingRow);
   const turn = $derived(turnIsLive(chat.activity, chat.queue?.run_slot));
   // Текущий ход узнаётся по слоту очереди: до первого блока последний блок ещё принадлежит прошлому ходу.
-  const runInputId = $derived.by(() => {
-    const slot = chat.queue?.run_slot;
-    if (typeof slot !== 'object' || slot === null) return null;
-    if ('running' in slot) return slot.running?.input_id ?? null;
-    return slot.dispatching?.input_id ?? null;
-  });
+  // Слот называет ввод (`inputs.id`), а блоки хода несут его команду: сравнивается `command_id` слота.
+  const slotRun = $derived(runSlotCommand(chat.queue?.run_slot));
   // Ход, начатый самим CLI, места в очереди не занимает: его выдают блоки, созданные после начала активности.
   const turnStart = $derived.by(() => {
     const since = Date.parse(String(chat.activity?.since ?? ''));
@@ -218,15 +214,24 @@
     return Number.isFinite(at) ? at : null;
   });
   const turnStartedAt = $derived(slotStart ?? turnStart);
-  const activeRun = $derived.by(() => {
-    const state = chat.activity?.state;
-    if (state !== 'working' && state !== 'waiting_for_user') return null;
-    if (runInputId) return runInputId;
+  // Ход идёт для карточки везде, где лента нарисовала бы свою живую строку (`turnIsLive`, в том числе
+  // `stalled`), а ещё при работе без фазы модели (выдача, запуск) и в ожидании владельца: там лента
+  // своей строки не рисует, а карточка ход не отпускает.
+  const runLive = $derived(turn || chat.activity?.state === 'working' || chat.activity?.state === 'waiting_for_user');
+  // Самый новый блок хода без слота: идущий или созданный после начала активности.
+  const latestRun = $derived.by(() => {
+    if (slotRun) return null;
     const own = entries.findLast((entry) =>
       entry.kind === 'block' &&
       (entry.block.state === 'streaming' || (turnStart !== null && entry.block.createdAt >= turnStart))
     );
     return own?.kind === 'block' ? own.block.inputCommandId : null;
+  });
+  // Память хода, а не состояние: читается и пишется только внутри `activeRun`.
+  let heldRun: string | null = null;
+  const activeRun = $derived.by(() => {
+    heldRun = currentRun(heldRun, { live: runLive, slot: slotRun, latest: latestRun });
+    return heldRun;
   });
   const earlierCards = $derived(feed || laneRoot ? new Map<string, string[]>() : nonLastRunCards(rows));
   const settledCards = $derived(feed || laneRoot ? new Set<string>() : settledRunCards(rows, activeRun));

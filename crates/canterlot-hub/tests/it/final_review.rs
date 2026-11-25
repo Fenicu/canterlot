@@ -13,7 +13,7 @@ use canterlot_hub::{
     },
     events::{self, NewEvent, ReadAfter, Scope},
     executions,
-    model::{ExecutionState, InputState, PauseReason, RunSlot},
+    model::{ExecutionState, InputState, PauseReason, RunSlot, RunSlotView},
     testkit::{self, Seed},
 };
 use chrono::Utc;
@@ -175,6 +175,11 @@ async fn assert_queue_event(pool: &PgPool, seed: &Seed, correlation: Uuid) -> Te
     assert_eq!(rows.len(), 1, "exactly one queue event per change");
     let (pauses, holds, slot, input, attempt, tx): (Value, Value, String, Option<Uuid>, Option<i32>, String) = sqlx::query_as("select pause_reasons, hold_reasons, run_slot, run_slot_input_id, run_slot_attempt, xmin::text from queue_state where conversation_id = $1").bind(seed.conversation_id).fetch_one(pool).await?;
     let slot = RunSlot::from_columns(&slot, input, attempt)?;
+    let command: Option<Uuid> = sqlx::query_scalar("select command_id from inputs where id = $1")
+        .bind(input)
+        .fetch_optional(pool)
+        .await?;
+    let slot = RunSlotView::new(&slot, command);
     assert_eq!(
         rows[0].0,
         json!({"pause_reasons": pauses, "hold_reasons": holds, "run_slot": slot})
