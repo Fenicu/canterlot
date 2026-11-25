@@ -469,6 +469,21 @@ pub async fn revoke(
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut tx = crate::db::begin(pool).await?;
     serialize_with_delivery(&mut tx).await?;
+    let revoked = revoke_in_tx(&mut tx, id, reason, spare).await?;
+    tx.commit().await?;
+    if !revoked.is_empty() {
+        super::notify_changed(pool, "session_revoked").await;
+    }
+    Ok(revoked)
+}
+
+/// Вызывающий уже взял `serialize_with_delivery`.
+async fn revoke_in_tx(
+    conn: &mut PgConnection,
+    id: Uuid,
+    reason: RevokeReason,
+    spare: Option<Uuid>,
+) -> Result<Vec<Uuid>, sqlx::Error> {
     let revoked: Vec<Uuid> = sqlx::query_scalar(
         "with recursive tree(id) as (
            select id from owner_sessions where id=$1 and revoked_at is null
@@ -485,13 +500,9 @@ pub async fn revoke(
     .bind(reason.as_str())
     .bind(reason.cascades())
     .bind(spare)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
-    forget_devices_of(&mut tx, reason, &revoked).await?;
-    tx.commit().await?;
-    if !revoked.is_empty() {
-        super::notify_changed(pool, "session_revoked").await;
-    }
+    forget_devices_of(conn, reason, &revoked).await?;
     Ok(revoked)
 }
 
@@ -867,8 +878,12 @@ async fn remember_device(
 /// Откат входа, ответ на который не ушёл: сеанс отзывается (`server`). Строка нового
 /// устройства уходит вместе с ним — его cookie клиент не получил. Известное устройство
 /// сначала возвращается к прежнему сеансу: иначе отзыв забыл бы его, и сбой хаба
-/// отправил бы владельца в общую корзину перебора.
+/// отправил бы владельца в общую корзину перебора. Возврат и отзыв — одна транзакция:
+/// по отдельности сбой между ними оставлял живой сеанс без выданной cookie, а сбой
+/// возврата пропускал отзыв.
 pub async fn undo_sign_in(pool: &PgPool, created: &Created) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut tx = crate::db::begin(pool).await?;
+    serialize_with_delivery(&mut tx).await?;
     if let Some(moved) = &created.moved_device {
         sqlx::query(
             "update owner_devices set session_id=$2 where token_sha256=$1 and session_id=$3",
@@ -876,10 +891,15 @@ pub async fn undo_sign_in(pool: &PgPool, created: &Created) -> Result<Vec<Uuid>,
         .bind(&moved.token_sha256)
         .bind(moved.previous_session)
         .bind(created.id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
-    revoke(pool, created.id, RevokeReason::Server, None).await
+    let revoked = revoke_in_tx(&mut tx, created.id, RevokeReason::Server, None).await?;
+    tx.commit().await?;
+    if !revoked.is_empty() {
+        super::notify_changed(pool, "session_revoked").await;
+    }
+    Ok(revoked)
 }
 
 /// Уборка: полные отозванные строки старше 30 дней уходят в надгробия, надгробия живут

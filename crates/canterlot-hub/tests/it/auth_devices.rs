@@ -291,3 +291,53 @@ async fn auth_devices_a_failed_sign_in_does_not_forget_a_known_device() {
     assert_eq!(again.device, first.device);
     assert_eq!(bound(&hub).await, [Some(again.id)]);
 }
+
+/// Откат неудавшегося входа — одна транзакция: возврат устройства прежнему сеансу и
+/// отзыв нового сеанса проходят вместе или не проходят вовсе. Отзыв отказал в базе:
+/// устройство не вернулось прежнему сеансу, пока новый сеанс жив.
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn auth_devices_undoing_a_failed_sign_in_is_one_transaction() {
+    let pool = canterlot_hub::testkit::db().await;
+    use canterlot_hub::fault_injection::Point;
+    let hub = AuthHub::new(pool).await;
+    hub.set_password(PASSWORD).await;
+    let first = sign_in(&hub, &hub.anonymous(Some("203.0.113.90"))).await;
+    sqlx::raw_sql(
+        "create function refuse_server_revoke() returns trigger language plpgsql as $$
+         begin
+           if new.revoke_reason = 'server' then
+             raise exception 'revoke refused by the test';
+           end if;
+           return new;
+         end $$;
+         create trigger refuse_server_revoke before update on owner_sessions
+           for each row execute function refuse_server_revoke();",
+    )
+    .execute(&hub.pool)
+    .await
+    .unwrap();
+    hub.state
+        .auth_faults
+        .drop_next_at(Point::SignInAfterSession, "");
+    let returning = with_device(hub.anonymous(Some("203.0.113.90")), &first.device);
+    let failed = hub.sign_in_owner(&returning).await;
+    assert_eq!(failed.status, 503, "{:?}", failed.body);
+    let orphan: Uuid = sqlx::query_scalar(
+        "select id from owner_sessions where created_ip='203.0.113.90' and id<>$1",
+    )
+    .bind(first.id)
+    .fetch_one(&hub.pool)
+    .await
+    .unwrap();
+    assert_eq!(hub.revoke_reason(orphan).await, None, "the revoke failed");
+    let bound: Option<Uuid> = sqlx::query_scalar("select session_id from owner_devices")
+        .fetch_one(&hub.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        bound,
+        Some(orphan),
+        "the device move is rolled back together with the failed revoke"
+    );
+}
