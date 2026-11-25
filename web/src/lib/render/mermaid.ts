@@ -76,6 +76,25 @@ function cssId(id: string): string {
   return id.replace(/[^A-Za-z0-9_-]/g, '');
 }
 
+function balanced(text: string, open: string, close: string): boolean {
+  const count = (char: string): number => text.split(char).length - 1;
+  return open === close ? count(open) % 2 === 0 : count(open) === count(close);
+}
+
+/**
+ * Значение `style` у узла приходит из текста диаграммы: mermaid в режиме strict его не чистит.
+ * В правило идёт только «свойство: значение» — без блоков, at-правил, экранирования и
+ * незакрытых кавычек и скобок, которыми объявление выходит из своего правила.
+ */
+function plainDeclaration(part: string): boolean {
+  return (
+    /^-{0,2}[a-z][a-z0-9-]*\s*:[^{}@\\<>]+$/i.test(part) &&
+    balanced(part, '"', '"') &&
+    balanced(part, "'", "'") &&
+    balanced(part, '(', ')')
+  );
+}
+
 /**
  * Mermaid кладёт стилетаг и inline-стили прямо в SVG. Наш CSP разрешает только внешние
  * таблицы, поэтому правила выносятся в строку, которую вызывающий помещает в
@@ -118,7 +137,7 @@ export function extractSvgCss(svg: string): { markup: string; css: string; natur
     const declarations = raw
       .split(';')
       .map((part) => part.trim())
-      .filter(Boolean);
+      .filter(plainDeclaration);
     element.removeAttribute('style');
     if (declarations.length === 0) continue;
     const className = `mermaid-inline-${inline++}`;
@@ -131,6 +150,56 @@ export function extractSvgCss(svg: string): { markup: string; css: string; natur
     .serializeToString(root)
     .replace(/\sstyle="[^"]*"/g, '');
   return { markup, css: rules.join('\n'), natural };
+}
+
+/**
+ * Таблица стилей одной диаграммы. Её текст частично приходит из ответа агента, поэтому
+ * как есть в общую таблицу документа он не попадает: браузер разбирает правила, и они по
+ * одному переносятся внутрь `@scope`, корень которого — контейнер диаграммы `#scopeId`.
+ *
+ * - Обычное правило переносится плоским: селектор и объявления, без вложенных правил.
+ *   Внутри `@scope` оно достаёт только до потомков контейнера, что бы ни стояло в селекторе.
+ * - Правило с `:scope` или `&` отбрасывается: только так селектор дотянулся бы до самого
+ *   контейнера. Mermaid таких не выпускает.
+ * - `@keyframes` получают имя с приставкой контейнера, и ссылки `animation-name`
+ *   переписываются на него: имена анимаций общие на документ.
+ * - Остальные at-правила (`@scope`, `@media`, `@font-face`, `@property`…) отбрасываются.
+ *
+ * Функция самодостаточна, без замыканий и импортов: тест выполняет её текст в Chromium.
+ */
+export function scopedSheet(scopeId: string, css: string): CSSStyleSheet {
+  const source = new CSSStyleSheet();
+  source.replaceSync(css);
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(`@scope (#${scopeId}){}`);
+  const scope = sheet.cssRules[0];
+  // Браузер без @scope правило не разобрал: без границы стили диаграммы не применяются вовсе.
+  if (typeof CSSScopeRule === 'undefined' || !(scope instanceof CSSScopeRule)) {
+    throw new Error('css @scope is not supported');
+  }
+  const local = (name: string): string => `${scopeId}-${name}`;
+  const keyword = /^(none|initial|inherit|unset|revert|revert-layer)$/i;
+  for (const rule of Array.from(source.cssRules)) {
+    try {
+      if (rule instanceof CSSKeyframesRule) {
+        rule.name = local(rule.name);
+        sheet.insertRule(rule.cssText, sheet.cssRules.length);
+      } else if (rule instanceof CSSStyleRule && !/:scope|&/i.test(rule.selectorText)) {
+        const names = rule.style.animationName;
+        if (names) {
+          rule.style.animationName = names
+            .split(',')
+            .map((name) => name.trim())
+            .map((name) => (keyword.test(name) ? name : local(name)))
+            .join(', ');
+        }
+        scope.insertRule(`${rule.selectorText}{${rule.style.cssText}}`, scope.cssRules.length);
+      }
+    } catch {
+      // Правило, которое не встаёт в таблицу отдельно, в неё не попадает.
+    }
+  }
+  return sheet;
 }
 
 let svgPurify: DOMPurifyInstance | undefined;

@@ -2,6 +2,7 @@ import {
   mermaidPhase,
   mermaidThemeVariables,
   renderMermaidSvg,
+  scopedSheet,
   type MermaidPhase
 } from './mermaid.js';
 
@@ -31,31 +32,21 @@ function sourceOf(instance: Instance): HTMLElement {
   return instance.pre.closest<HTMLElement>('.code-block') ?? instance.pre;
 }
 
-/** constructable stylesheet не попадает под style-src: CSP разрешает только встроенные <style> и атрибуты. */
-function adoptCss(id: string, css: string): () => void {
-  const sheet = new CSSStyleSheet();
-  sheet.replaceSync(css);
+/**
+ * constructable stylesheet не попадает под style-src, поэтому границу стилям диаграммы ставит
+ * не CSP, а `scopedSheet`: правила действуют только внутри контейнера `#scopeId`. Запасного
+ * пути с сырым текстом нет: без границы диаграмма остаётся исходником с сообщением об ошибке.
+ */
+function adoptCss(scopeId: string, css: string): () => void {
+  const sheet = scopedSheet(scopeId, css);
   document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
   return () => {
     document.adoptedStyleSheets = document.adoptedStyleSheets.filter((item) => item !== sheet);
   };
 }
 
-function fallbackCss(id: string, css: string): () => void {
-  const style = document.createElement('style');
-  style.dataset.mermaid = id;
-  style.textContent = css;
-  document.head.append(style);
-  return () => style.remove();
-}
-
-function addCss(id: string, css: string): () => void {
-  try {
-    return adoptCss(id, css);
-  } catch {
-    return fallbackCss(id, css);
-  }
-}
+/** Контейнеры диаграмм нумеруются на весь документ: по id контейнера строится граница его стилей. */
+let viewSequence = 0;
 
 /**
  * Заменяет завершённые блоки ```mermaid на переключатель «Код / Диаграмма».
@@ -100,7 +91,7 @@ export function mermaidWithin(node: HTMLElement, value: MermaidBlockInput) {
       const sizing = natural
         ? `#${instance.id} svg{width:${natural.width}px;min-width:min(${natural.width}px,640px);max-width:100%;height:auto}`
         : '';
-      instance.disposeCss = addCss(instance.id, `${result.css}\n${sizing}`);
+      instance.disposeCss = adoptCss(instance.view.id, `${result.css}\n${sizing}`);
       instance.failed = false;
       instance.ready = true;
       apply(instance, mermaidPhase({ streaming: false, failed: false, ready: true, mode: instance.mode }));
@@ -145,6 +136,10 @@ export function mermaidWithin(node: HTMLElement, value: MermaidBlockInput) {
 
       const view = document.createElement('div');
       view.className = 'mermaid-view';
+      view.id = `mermaid-view-${viewSequence++}`;
+      // Стили диаграммы до контейнера не достают, а рисунок не выходит за его рамку,
+      // даже если правило из диаграммы поставит ему position: fixed.
+      view.style.contain = 'paint';
       view.setAttribute('role', 'img');
       view.setAttribute('aria-label', 'Диаграмма');
       const error = document.createElement('div');

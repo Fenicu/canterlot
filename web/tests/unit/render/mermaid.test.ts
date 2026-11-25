@@ -81,6 +81,51 @@ describe("extractSvgCss", () => {
     expect(markup).toContain("mermaid-inline-0");
     expect(markup).toContain('<path d="M0 0 L1 1"/>');
   });
+
+  it("keeps only plain declarations of a style attribute", () => {
+    const hostile = [
+      "path:not(a){body:has(&amp;) button{display:none}}",
+      "} body button{display:none",
+      "@import url(x)",
+      "color:r\\65 d",
+      "font-family:&quot;a",
+      "fill:url(#g"
+    ];
+    const svg =
+      '<svg id="m-1" viewBox="0 0 10 10">' +
+      `<g style="fill:red;${hostile.join(";")};stroke-width: 2px"><path d="M0 0 L1 1"/></g>` +
+      '<text style="font-family:&quot;trebuchet ms&quot;, verdana;fill:rgb(1, 2, 3);stroke:url(#g)">x</text></svg>';
+    const { css } = extractSvgCss(svg);
+    expect(css.split("\n")).toEqual([
+      "#m-1 .mermaid-inline-0{fill:red;stroke-width: 2px}",
+      '#m-1 .mermaid-inline-1{font-family:"trebuchet ms", verdana;fill:rgb(1, 2, 3);stroke:url(#g)}'
+    ]);
+  });
+
+  it("a classDiagram style line cannot smuggle a rule through real mermaid output", async () => {
+    // jsdom не умеет геометрию SVG: mermaid достаточно любых размеров.
+    const proto = (globalThis as unknown as { SVGElement: { prototype: Record<string, unknown> } })
+      .SVGElement.prototype;
+    proto.getBBox = () => ({ x: 0, y: 0, width: 80, height: 20 });
+    proto.getComputedTextLength = () => 80;
+    const mermaid = (await import("mermaid")).default;
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      htmlLabels: false,
+      suppressErrorRendering: true,
+      theme: "base"
+    });
+    const { svg } = await mermaid.render(
+      "mermaid-0",
+      "classDiagram\n class A\n style A fill:red,path:not(a){body:has(&) button{display:none}}"
+    );
+    // Сам mermaid в режиме strict значение не чистит: защита — на нашей стороне.
+    expect(svg).toMatch(/style="[^"]*body:has/);
+    const { css } = extractSvgCss(svg);
+    expect(css).not.toContain("body:has");
+    expect(css).toMatch(/\.mermaid-inline-\d+\{fill:red\}/);
+  });
 });
 
 describe("sanitizeSvg", () => {
