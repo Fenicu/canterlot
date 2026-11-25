@@ -41,6 +41,11 @@ check_route "only CHANGES.rst: fast" fast skip skip "allowlisted" other
 check_route "a crate source file: fast" fast skip skip "allowlisted" crate-src
 check_route "docs and web sources: fast" fast skip skip "allowlisted" docs web-src
 check_route "a version-only bump of Cargo.toml, Cargo.lock and package.json: fast" fast skip skip "allowlisted" version-bump
+# Правила для агентов в корне и стенд Playwright в сборку релиза не входят: тоже быстрый путь.
+check_route "AGENTS.md and CLAUDE.md in the root: fast" fast skip skip "allowlisted" agents-md claude-md
+check_route "the Playwright harness web/e2e: fast" fast skip skip "allowlisted" web-e2e
+check_route "an AGENTS.md outside the root is not on the list" rehearsed run skip "scripts/AGENTS.md" nested-agents-md
+check_route "a web config outside web/e2e is not on the list" rehearsed run skip "web/playwright.config.ts" web-config
 # --- вне списка: репетиция нужна, vzdump по git пропустим (решает ещё манифест в cutover)
 check_route "release.sh changed" rehearsed run skip "scripts/release.sh" release-sh
 check_route "build-release.sh changed" rehearsed run skip "scripts/build-release.sh" build-sh

@@ -9,6 +9,8 @@
 #   other          только CHANGES.rst (прикладной релиз без особенностей)
 #   crate-src      исходник крейта (crates/canterlot-worker/src)
 #   docs, web-src  документация, исходник веба
+#   agents-md, claude-md, web-e2e   правила для агентов в корне и стенд Playwright (в сборку не входят)
+#   nested-agents-md, web-config    AGENTS.md не в корне и конфиг веба вне web/e2e (вне списка)
 #   version-bump   только номер версии в Cargo.toml, Cargo.lock, package.json
 #   migration      новый файл миграции;  unicode-migration — с не-ASCII именем
 #   rename-in      файл из docs/ переименован в каталог миграций; rename-out — обратно
@@ -61,6 +63,11 @@ make_fast_source() {
             other) ;;
             crate-src) printf '// change\n' >>"${FAST_SRC}/crates/canterlot-worker/src/config.rs" ;;
             docs) printf 'more\n' >>"${FAST_SRC}/docs/note.md" ;;
+            agents-md) printf 'rules\n' >"${FAST_SRC}/AGENTS.md" ;;
+            claude-md) printf '@AGENTS.md\n' >"${FAST_SRC}/CLAUDE.md" ;;
+            web-e2e) mkdir -p "${FAST_SRC}/web/e2e/screenshots" && printf 'export {};\n' >"${FAST_SRC}/web/e2e/screenshots/readme.spec.ts" ;;
+            nested-agents-md) printf 'rules\n' >"${FAST_SRC}/scripts/AGENTS.md" ;;
+            web-config) printf 'export default {};\n' >"${FAST_SRC}/web/playwright.config.ts" ;;
             web-src) printf 'export const b = 2;\n' >>"${FAST_SRC}/web/src/a.ts" ;;
             version-bump)
                 sed -i 's/^version = "1.0.0"/version = "1.0.1"/' "${FAST_SRC}/Cargo.toml"

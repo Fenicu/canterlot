@@ -16,7 +16,8 @@
   changed=N                число изменённых путей
 
 Список прикладного кода (быстрый путь без репетиции допустим, только если other пуст):
-исходники и тесты крейтов, исходники/статика/тесты веба, документация, README.md,
+исходники и тесты крейтов, исходники/статика/тесты веба и его стенд Playwright (web/e2e),
+документация, README.md, AGENTS.md и CLAUDE.md в корне,
 CHANGES.rst и изменение одного номера версии в Cargo.toml, Cargo.lock, web/package.json,
 web/package-lock.json. Всё остальное (scripts/, docker/, rust-toolchain*, .cargo/,
 build.rs, зависимости) — только с репетицией.
@@ -41,9 +42,14 @@ ALLOW = [
     re.compile(r"^web/src/.+"),
     re.compile(r"^web/static/.+"),
     re.compile(r"^web/tests/.+"),
+    # Стенд Playwright (разовые проверки и скриншоты README): в сборку PWA не входит.
+    re.compile(r"^web/e2e/.+"),
     re.compile(r"^docs/.+"),
     re.compile(r"^README\.md$"),
     re.compile(r"^CHANGES\.rst$"),
+    # Правила разработки для агентов, только в корне: ни в один артефакт релиза не попадают.
+    re.compile(r"^AGENTS\.md$"),
+    re.compile(r"^CLAUDE\.md$"),
 ]
 VERSION_ONLY = ("Cargo.toml", "Cargo.lock", "web/package.json", "web/package-lock.json")
 
