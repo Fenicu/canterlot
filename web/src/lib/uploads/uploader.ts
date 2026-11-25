@@ -172,6 +172,12 @@ export async function uploadFile(
       retryDelay,
       signal,
     );
+    if (signal?.aborted) {
+      // Запрос регистрации сигнал отмены не получает и дошёл до конца: о новом вложении
+      // знает только этот вызов, поэтому убрать его с хаба больше некому.
+      await api.deleteAttachment?.(regRes.id).catch(() => undefined);
+      throw new Error("Загрузка отменена");
+    }
     attachmentId = regRes.id;
     if (regRes.upload?.upload_chunk_bytes)
       chunkBytes = regRes.upload.upload_chunk_bytes;
@@ -219,6 +225,8 @@ export async function uploadFile(
       throw err;
     }
   }
+  // У пустого файла цикла передачи нет: отмена проверяется здесь, иначе он был бы опубликован.
+  throwIfAborted(signal);
   if (file.size === 0) options?.onProgress?.({ uploaded: 0, total: 0 });
 
   options?.onPhase?.("completing");

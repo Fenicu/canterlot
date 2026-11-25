@@ -500,6 +500,56 @@ describe("uploads/uploader", () => {
     expect(res.status).toBe("ready");
   });
 
+  it("cancel_during_registration_deletes_the_attachment_the_hub_has_just_created", async () => {
+    // Запрос регистрации сигнал отмены не получает и доходит до конца: строка на хабе уже есть.
+    let created!: (value: { id: string; state: string; upload: { offset: number; upload_chunk_bytes: number } }) => void;
+    const known: string[] = [];
+    const mockApi = {
+      createAttachment: vi.fn().mockReturnValue(new Promise((resolve) => { created = resolve; })),
+      headContent: vi.fn().mockResolvedValue({ offset: 0, length: 20 * 1024 }),
+      patchContent: vi.fn(),
+      completeAttachment: vi.fn(),
+      deleteAttachment: vi.fn().mockResolvedValue(undefined),
+    };
+    const controller = new AbortController();
+    const upload = uploadFile(mockFile, conversationId, {
+      api: mockApi,
+      signal: controller.signal,
+      onAttachmentCreated: (id) => known.push(id),
+    });
+    await vi.waitFor(() => expect(mockApi.createAttachment).toHaveBeenCalled());
+    controller.abort();
+    created({ id: "att-late", state: "created", upload: { offset: 0, upload_chunk_bytes: 8192 } });
+
+    await expect(upload).rejects.toThrow(/отмен/i);
+    expect(mockApi.deleteAttachment).toHaveBeenCalledWith("att-late");
+    // Отменённая загрузка дальше не идёт и никому не сообщает о вложении.
+    expect(known).toEqual([]);
+    expect(mockApi.headContent).not.toHaveBeenCalled();
+    expect(mockApi.patchContent).not.toHaveBeenCalled();
+    expect(mockApi.completeAttachment).not.toHaveBeenCalled();
+  });
+
+  it("a_cancelled_empty_file_is_not_published", async () => {
+    // У пустого файла цикла передачи нет: без проверки отмены загрузчик дошёл бы до завершения.
+    let head!: (value: { offset: number; length: number }) => void;
+    const mockApi = {
+      createAttachment: vi.fn().mockResolvedValue({ id: "att-empty", state: "created", upload: { offset: 0, upload_chunk_bytes: 8192 } }),
+      headContent: vi.fn().mockReturnValue(new Promise((resolve) => { head = resolve; })),
+      patchContent: vi.fn(),
+      completeAttachment: vi.fn().mockResolvedValue({ id: "att-empty", state: "ready" }),
+      deleteAttachment: vi.fn().mockResolvedValue(undefined),
+    };
+    const controller = new AbortController();
+    const upload = uploadFile(new File([], ".gitkeep"), conversationId, { api: mockApi, signal: controller.signal });
+    await vi.waitFor(() => expect(mockApi.headContent).toHaveBeenCalled());
+    controller.abort();
+    head({ offset: 0, length: 0 });
+
+    await expect(upload).rejects.toThrow(/отмен/i);
+    expect(mockApi.completeAttachment).not.toHaveBeenCalled();
+  });
+
   it("attachment_names_keep_the_last_component_within_255_bytes", () => {
     expect(attachmentName("dir/sub\\notes.txt")).toBe("notes.txt");
     const exact = "a".repeat(255);
