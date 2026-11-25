@@ -63,10 +63,13 @@
 | `docs/design/api.md` | Контракт API пилота: представление данных, ошибки, маршруты, виды событий, покрытие экранов |
 | `docs/design/` | Автоматы состояний, правила идемпотентности и протоколы восстановления |
 | `docs/adr/` | Решения по архитектуре и их обоснования |
+| `docs/features.md` | Полный перечень возможностей интерфейса и инструментов агента |
+| `docs/deploy/` | Развёртывание: пилотный контур (`pilot.md`), установка из готовых архивов (`release-archives.md`), образец значений стенда |
+| `docs/screenshots/`, `web/e2e/screenshots/readme.spec.ts` | Картинки README и спека, которая их снимает на выдуманных данных |
 
 ## Тулчейн
 
-- Rust 1.99.1 (закреплён в `rust-toolchain.toml`)
+- Rust 1.100.0 (закреплён в `rust-toolchain.toml`)
 - protoc 36.2
 - Node.js 24 LTS (сборка PWA)
 
@@ -87,6 +90,14 @@
 3. Положите одноразовую спеку в `web/e2e/tmp/` (каталог не отслеживается git). Для вторичного экрана используйте `bootSecondary` из `e2e/ui/secondary-fixture.ts`, для любого экрана с готовыми данными — `bootScreen` и `SCREENS` из `e2e/parity/states.ts`.
 4. Запустите её: `npx playwright test e2e/tmp/<name>.spec.ts --project=phone --workers=1` из `web/`.
 5. Посмотрите снимок и удалите файл спеки.
+
+### Скриншоты README
+
+Картинки `docs/screenshots/*.png` снимает `web/e2e/screenshots/readme.spec.ts` на FakeHub с закреплёнными часами: `cd web && npm run build && npm run screenshots`. Кадры телефона — 390×844 при плотности 2, кадры стола — 1600×1000 при плотности 2 (от 1600 px ширины правая панель плана и делегатов открыта сама). Если установлен `oxipng`, спека сжимает PNG сама.
+
+Данные в спеке выдуманы целиком: проект `lighthouse`, машины `workstation` и `mini`, каталог `/srv/lighthouse`. Настоящие имена хостов, адреса, пути домашних каталогов и идентификаторы в спеку и на картинки не попадают. После прогона откройте каждый PNG: текст не обрезан, нет индикаторов загрузки и случайных пустых состояний, размеры кадров одинаковы. Файл, на который README больше не ссылается, удаляется из репозитория.
+
+### Обвязка выката, храповик и пул тестов
 
 Обвязка выката (`scripts/deploy/tests/run.sh`: shellcheck, синтаксис python, статическая проверка pipe-lint, юнит-проверки `lib.sh` и наборы параллельно) идёт около 10 минут, поэтому в `--fast` она запускается только когда diff затронул `scripts/deploy/**`, `scripts/release.sh`, `scripts/check-proxy.sh`, `scripts/check-version.sh` или `scripts/lease.sh`; иначе печатается одна строка `deploy: skipped`. `scripts/gate.sh` запускает те же наборы отдельным шагом между `check.sh --all --no-web` и `check-web.sh`: они содержат тайминги и не должны идти рядом с тяжёлыми проверками. Diff для гейта берётся от последнего тега `vX.Y.Z`, а без тега наборы идут всегда. Аттестация гейта пишет `deploy_exit=0` или `deploy_exit=skipped`; `release.sh ship` принимает оба. Наборы быстрого пути выпуска без миграций — `fastpath`, `fastcutover`, `release-fast` (описание — §11.6 `docs/deploy/pilot.md`). Выбор проверяет `scripts/deploy/tests/test-changed.sh` (набор `changed`), а ограничить прогон можно `RUN_SUITES="…"`.
 
@@ -210,10 +221,64 @@ canterlot-worker job run --title "Гейт <sha8>" --machine <значение> 
 
 Отмены у `job run` нет, и новых API хаба для неё не заведено: Ctrl-C (или TERM) на `gate.sh --runner` останавливает только ожидание, печатает идентификатор задачи, а сама задача на раннере продолжает работать (иначе она остановится по своему таймауту в 240 минут). Отменить задачу можно в PWA, в её карточке. Проверки без сети и без настоящего docker — `scripts/gate/test.sh` с подменами `scripts/gate/fake-worker` (`CANTERLOT_WORKER_BIN`) и `scripts/gate/fake-docker` (`CANTERLOT_DOCKER`).
 
+### Полный гейт на сборочной машине
+
+Тот же прогон можно снять на сборочной машине (`CANTERLOT_BUILD_HOST`) в контейнере Debian 13, без влияния на рабочую VM:
+
+```bash
+scripts/gate-remote.sh 4d884712            # коммит на сборочной машине
+scripts/gate-remote.sh 4d884712 --local    # то же на местном docker, для проверки
+```
+
+`REV` — любой коммит, не только тег (по умолчанию `HEAD`). Скрипт отправляет его в `~/canterlot.git` как `refs/gate/<sha12>`, создаёт отсоединённую рабочую копию `~/gate/src-<sha12>` и запускает в контейнере тот же `scripts/gate.sh --no-attest`, что идёт на VM (через `scripts/gate/in-container.sh`, с тестовой PostgreSQL). Без тега `vX.Y.Z` в рабочей копии наборы выката идут всегда.
+
+Образ `canterlot-gate:<hash>` (`docker/gate/Dockerfile`) — Debian trixie по digest, Rust из `rust-toolchain.toml`, Node 24, PostgreSQL 18 и те же шрифты, что на VM. Тег считается из Dockerfile и `rust-toolchain.toml`. База поднимается внутри контейнера на `127.0.0.1:55441` с выключенным fsync; на хосте порт не занимается, поэтому гейт на VM можно запускать одновременно.
+
+Ограничения контейнера — `--cpus 30 --memory 48g --pids-limit 8192 --shm-size=2g`: общая память 2 ГБ вместо 64 МБ по умолчанию, `strace`-тестам выдаётся `SYS_PTRACE`, `--init` пожинает осиротевших потомков. Кэши на сборочной машине — `~/gate/cache/{cargo,target,npm,tmp}`, локально — `~/.cache/canterlot-gate` (`CANTERLOT_GATE_CACHE`); повторный прогон того же коммита их переиспользует. `tmp` — это `/tmp` контейнера (база и временные каталоги тестов): на overlayfs и на tmpfs те же проверки ловят таймауты, на обычной ФС хоста проходят.
+
+Результат и логи (`gate.log`, `npm-ci.log`, `check.log`, `deploy.log`, `web.log`, `result.txt` и `state.tsv` в формате `scripts/gate.sh`) складываются в `/tmp/gate-remote/<sha12>` (`CANTERLOT_GATE_OUT`). Код возврата — код гейта. Рабочая копия и ref на сборочной машине убираются автоматически (`git worktree remove --force` и `update-ref -d`, без `rm`).
+
+## Выпуск
+
+Запись версии в `CHANGES.rst` пишется руками и только плоскими пунктами: вложенные списки экран «Что нового» теряет, и `web/tests/unit/changelog.test.ts` роняет гейт. Правила бампа — в [versioning.md](versioning.md). Дальше три команды (ранбук — §11.7 [deploy/pilot.md](deploy/pilot.md)):
+
+```bash
+scripts/release.sh prepare 1.35.0    # бамп версии во всех местах, cargo update -w, check-version, коммит «Выпустить версию 1.35.0»
+scripts/gate.sh                      # полный гейт, аттестация .superpowers/gate/<sha>.ok
+scripts/release.sh ship 1.35.0       # тег, push, сборка, stage, репетиция, боевой прогон, check-proxy, публикация, журнал
+scripts/release.sh ship 1.35.0 --full   # то же без быстрого пути: всегда репетиция и vzdump
+```
+
+`prepare` правит `Cargo.toml`, `web/package.json`, `docs/api/openapi.json`, бейдж версии и строку «Текущая версия — X.Y.Z.» в `README.md`; формат обоих мест менять нельзя, его сверяет `scripts/check-version.sh`.
+
+Выпуск прикладного кода без миграций идёт быстрым путём: `ship` сам сравнивает развёрнутый релиз с целью (`scripts/deploy/fastpath.sh`, точные хэши коммитов и список прикладного кода). Если изменились только исходники, тесты, веб, документация и номер версии, репетиции нет (`cutover.sh --fast` сам повторяет проверки, и все ворота остаются), а vzdump пропускается, только когда манифест миграций бинаря цели (`canterlot-hub migrations manifest --json`) точно совпал с `_sqlx_migrations` живой базы (проверенный `pg_dump` остаётся точкой отката). Любая неясность — полный путь; путь и причины пишутся в лог, файл итога и журнал. Подробности — §11.1 и §11.7 [deploy/pilot.md](deploy/pilot.md).
+
+`ship` можно запускать в фоне: ход — в `.superpowers/deploy/release-1.35.0.log`, итог — в `release-1.35.0.result`. Он публикует только после `cutover done` без мягких ошибок, репетицию повторяет один раз и только на переходных кодах (стартующая сессия, идущий vzdump), боевой прогон не повторяет никогда; после остановки — `scripts/release.sh ship 1.35.0 --continue`.
+
+Выкат production идёт только через `scripts/deploy` (§11 [deploy/pilot.md](deploy/pilot.md)): он проверяет готовый dist из `build-release.sh`, `cutover.sh <id> --dry-run` или `--rehearse` (весь путь записи, записи только печатаются) выдаёт токен, а боевой прогон `cutover.sh --execute <id> --confirm <токен>` принимает его 2 часа и только для того же плана. Значения своего стенда — в `.superpowers/site.env`, образец в [deploy/site.env.example](deploy/site.env.example).
+
+Архивы выпуска публикует `scripts/publish-release.sh vX.Y.Z` из того же каталога сборки, без повторной компиляции.
+
 ## Сборка выпуска и кэш
 
-Выпуск собирает `scripts/build-release.sh` в контейнере Debian 13; что и как он
-проверяет — в README, «Сборка выпуска», и в `scripts/release-build/in-container.sh`.
+Выпуск собирается один раз в контейнере Debian 13, а готовый каталог затем используют и выкат, и публикация. Собирать напрямую, без контейнера, нельзя: прод — Debian 13 с glibc 2.41, и бинарники, собранные на системе с более новой glibc, на нём не запустятся.
+
+```bash
+scripts/build-release.sh v1.24.0            # сборочная машина (CANTERLOT_BUILD_HOST, по умолчанию canterlot-build)
+scripts/build-release.sh v1.24.0 --local    # та же сборка на местном docker
+```
+
+Тег должен быть локально и на origin. На сборочной машине нужны ssh-доступ (алиас `canterlot-build`), работающий docker и bare-репозиторий `~/canterlot.git`. Скрипт:
+
+1. отправляет тег в bare-репозиторий `~/canterlot.git` на сборочной машине;
+2. создаёт там чистую рабочую копию `~/release/src-<sha12>` на коммите тега;
+3. собирает или переиспользует образ `canterlot-release-build:<hash Dockerfile + rust-toolchain.toml>` из `docker/release-build/Dockerfile`: Debian trixie по digest, Rust из `rust-toolchain.toml`, Node 24 с проверкой sha256;
+4. запускает контейнер от uid хоста с ограничениями `--cpus 24 --memory 40g --pids-limit 4096` (systemd-лимиты сборочной машины на контейнеры dockerd не действуют);
+5. переносит готовый каталог по ssh tar-потоком в `.superpowers/deploy/dist/<sha12>` этой рабочей копии (`CANTERLOT_DIST_ROOT`), проверяет SHA256SUMS, `RELEASE`, `--version` и состав файлов; существующий каталог не перезаписывается;
+6. убирает рабочую копию на сборочной машине через `git worktree remove --force`.
+
+Внутри контейнера `scripts/release-build/in-container.sh` собирает хаб, воркер, синтетический воркер, `canterlot-speech` с CUDA 12.9 для sm_70 (`hub/bin/canterlot-speech`; образ содержит nvcc, cudart, cublas и cccl из архивов redist NVIDIA с проверкой sha256) и PWA (`npm ci`, `PWA_VERSION=<sha12> npm run build`) и проверяет то же, что выкат: отсутствие libssl и CUDA у хаба, прямые зависимости `canterlot-speech` (только glibc, libstdc++ и `libcuda.so.1`, `libcudart.so.12`, `libcublas*.so.12`), `hub openapi` против `docs/api/openapi.json`, CSP, `_app/version.json`, `synthetic-cli` только в синтетическом воркере, SHA256SUMS и максимальную версию GLIBC не выше 2.41. Тестов здесь нет: полный гейт уже прошёл на этом коммите. Сборочный инструмент берётся из этой рабочей копии, а не из тега.
+
 Сборка переиспользует общий каталог кэша (`CANTERLOT_BUILD_CACHE`; локально
 `~/.cache/canterlot-release-build`, на сборочной машине `~/release/cache`):
 
