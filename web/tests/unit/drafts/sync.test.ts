@@ -22,7 +22,6 @@ function harness(options: {
   let now = 0;
   let current = "";
   let currentAttachments: string[] = [];
-  let revision = 1;
   const timers: Timer[] = [];
   const puts: Array<{ text: string; attachments: string[]; base: number }> = [];
   const applied: Array<{ text: string; attachments: string[] }> = [];
@@ -67,10 +66,11 @@ function harness(options: {
     api: {
       put: async (text, attachments, base) => {
         puts.push({ text, attachments, base });
+        // Как хаб: запись принимается на текущей ревизии и получает следующую.
         const record: DraftRecord = {
           text,
           attachment_ids: attachments,
-          revision: revision++,
+          revision: base + 1,
           updated_at: new Date(now).toISOString(),
           device_id: "device-a",
         };
@@ -157,8 +157,9 @@ describe("drafts/sync", () => {
     expect(h.sync.revision).toBe(2);
   });
 
+  // Чужая правка ждёт паузы, только пока своя запись не легла поверх неё: здесь сети нет.
   it("waits_for_a_two_second_pause_before_replacing_active_typing", async () => {
-    const h = harness();
+    const h = harness({ online: false });
     await h.sync.start({ text: "", revision: 1 });
     h.setText("печатаю");
     h.sync.typed();
@@ -172,7 +173,7 @@ describe("drafts/sync", () => {
   });
 
   it("a_new_keystroke_postpones_the_pending_remote_text", async () => {
-    const h = harness();
+    const h = harness({ online: false });
     await h.sync.start({ text: "", revision: 1 });
     h.setText("а");
     h.sync.typed();
@@ -185,6 +186,24 @@ describe("drafts/sync", () => {
     expect(h.text()).toBe("аб");
     await h.advance(100);
     expect(h.text()).toBe("чужое");
+  });
+
+  it("a_deferred_remote_text_does_not_replace_a_newer_saved_revision", async () => {
+    const h = harness();
+    await h.sync.start({ text: "", revision: 3 });
+    h.setText("важный длинный текст");
+    h.sync.typed();
+    // В ту же секунду с другого устройства приходит ревизия 4: владелец печатает, она ждёт паузы.
+    h.sync.remote({ text: "с ноутбука", revision: 4, device_id: "device-b" });
+    // Через 500 мс своя запись ложится поверх неё: хаб принимает ревизию 5.
+    await h.advance(500);
+    expect(h.puts).toEqual([{ text: "важный длинный текст", attachments: [], base: 4 }]);
+    expect(h.sync.revision).toBe(5);
+    // Пауза прошла: отложенная ревизия 4 старше сохранённой и в поле не встаёт.
+    await h.advance(5_000);
+    expect(h.text()).toBe("важный длинный текст");
+    expect(h.sync.dirty).toBe(false);
+    expect(h.local()).toMatchObject({ text: "важный длинный текст", baseRevision: 5, unsynced: false });
   });
 
   it("keeps_an_offline_edit_in_the_local_buffer_and_sends_it_when_online", async () => {

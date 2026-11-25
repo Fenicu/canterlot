@@ -79,7 +79,8 @@ export function stopDraftSyncs(): void {
  * она синхронизировалась, и признак правок после неё. Выбор копии идёт по
  * ревизиям, не по часам: буфер без оффлайн-правок уступает серверу, даже пустому.
  * Эхо собственной записи отбрасывается по `device_id`, чужое применяется сразу,
- * если владелец не печатает, иначе — после паузы в `idleMs`.
+ * если владелец не печатает, иначе — после паузы в `idleMs`, и только пока хаб
+ * не принял более новую ревизию: своя запись, успевшая лечь поверх, её отменяет.
  */
 export class DraftSync {
   readonly #options: DraftSyncOptions;
@@ -257,6 +258,7 @@ export class DraftSync {
         this.#revision,
       );
       this.#revision = Math.max(this.#revision, record.revision);
+      this.#dropStalePending();
       this.#savedText = record.text;
       this.#savedAttachments = record.attachment_ids ?? attachmentIds;
       this.#dirty =
@@ -273,6 +275,7 @@ export class DraftSync {
       if (err instanceof DraftConflict) {
         const record = err.record;
         this.#revision = Math.max(this.#revision, record.revision);
+        this.#dropStalePending();
         this.#savedText = record.text;
         this.#savedAttachments = record.attachment_ids ?? [];
         const rebase =
@@ -367,9 +370,20 @@ export class DraftSync {
     );
     this.#idleTimer = this.#options.schedule(() => {
       this.#idleTimer = null;
+      this.#dropStalePending();
       const record = this.#pending;
       if (record) this.#applyRemote(record);
     }, wait);
+  }
+
+  /**
+   * Отложенная чужая правка старше того, что хаб уже принял или вернул: поверх более новой
+   * ревизии она не встаёт, иначе поле ввода и хаб разошлись бы без признака несохранённого.
+   */
+  #dropStalePending(): void {
+    if (!this.#pending || this.#pending.revision >= this.#revision) return;
+    this.#pending = null;
+    this.#cancelIdle();
   }
 
   #cancelSave(): void {
