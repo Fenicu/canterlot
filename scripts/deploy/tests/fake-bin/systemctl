@@ -187,6 +187,10 @@ case "${op}" in
             echo "fake-systemctl: injected worker start failure" >&2
             exit 1
         fi
+        if [ "${FAKE_FAIL_HUB_START:-0}" = "1" ] && [ "${unit}" = "canterlot-hub" ]; then
+            echo "fake-systemctl: injected hub start failure" >&2
+            exit 1
+        fi
         if [ "${FAKE_FAIL_WORKER_START:-}" = "once" ] && [ "${unit}" = "canterlot-worker" ] \
             && [ ! -f "${STATE_DIR}/worker-start-failed" ]; then
             : >"${STATE_DIR}/worker-start-failed"

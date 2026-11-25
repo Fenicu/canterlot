@@ -81,11 +81,15 @@ if [ -n "${LATE_PHASE}" ]; then
     assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "stop-and-report printed"
 elif [ -n "${EARLY_PHASE}" ]; then
     case "${EARLY_PHASE}" in
-        early|backing-up|regating|worker-stopping|worker-stopped|dumping|dump-verifying|backed-up)
+        early|backing-up|regating|worker-stopping|worker-stopped|hub-stopping|hub-stopped|dumping|dump-verifying|backed-up)
             case_ok "early path phase ${EARLY_PHASE}" ;;
         *) case_fail "unexpected early phase ${EARLY_PHASE}" ;;
     esac
     hub_is "${SHA_PREV}" && case_ok "hub untouched on early path" || case_fail "hub moved on early path"
+    # Сигнал пришёл после дампа: хаб к этому моменту остановлен, ловушка обязана поднять его обратно.
+    FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub \
+        && case_ok "hub started again by the trap on the early path" || case_fail "hub left stopped on the early path"
+    assert_contains "${FAKE_ROOT}/cutover.log" "hub is back on its previous release ${SHA_PREV}" "hub recovery logged on the early path"
     diff -q "${FAKE_ROOT}/state/db-pre.txt" <(grep -v '^TOC' "${FAKE_ROOT}/state/db.txt" 2>/dev/null || cat "${FAKE_ROOT}/state/db.txt") >/dev/null \
         && case_ok "db intact" || case_fail "db changed"
     FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \

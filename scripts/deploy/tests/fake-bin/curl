@@ -18,6 +18,8 @@ if [[ "${url}" == *readyz* ]]; then
     else
         ok="${FAKE_READYZ_OK:-1}"
     fi
+    # Остановленный хаб не отвечает. Нет файла состояния (стенд без юнита хаба) — как раньше.
+    if [ "$(cat "${FAKE_ROOT}/state/unit-fakehub-canterlot-hub.active" 2>/dev/null || echo 1)" != "1" ]; then ok="0"; fi
     if [ "${want_code}" = "1" ]; then
         [ "${ok}" = "1" ] && printf '200' || printf '000'
     else

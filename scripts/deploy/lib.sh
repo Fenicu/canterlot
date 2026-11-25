@@ -337,8 +337,8 @@ plan_text() {
         "${step2}" \
         "${step3}" \
         "  4 stop worker ${WORKER_UNIT} (sessions keep running); prove no control worker is left" \
-        "  5 quiesced pg_dump canterlot-pre-${sha}-<ts>.dump, verified readable" \
-        "  6 hub flip ${b_hub} -> ${sha} under the host lock, one restart of ${HUB_UNIT}; readyz, migrations, exe, NRestarts" \
+        "  5 stop hub ${HUB_UNIT} (the only database client); quiesced pg_dump canterlot-pre-${sha}-<ts>.dump, verified readable; the hub stays down until step 6" \
+        "  6 hub flip ${b_hub} -> ${sha} under the host lock, one start of ${HUB_UNIT} (systemctl restart); readyz, migrations, exe, NRestarts" \
         "  7 worker flip ${b_worker} -> ${sha}, start; guarded MainPID/exe wait; state=live wait; NRestarts; downtime printed" \
         "  8 PWA (soft, after the worker is live, never stops it): canterlot.env.${sha} from dist csp.txt, build flip ${b_web} -> ${sha}, one recreate of ${WEB_CONTAINER}" \
         "  9 speech: restart ${SPEECH_UNIT} (bounded to ${SPEECH_RESTART_TIMEOUT} s) and ask health when installed, enabled and configured; stop and disable it when ${sha} has no canterlot-speech; every speech failure is soft" \

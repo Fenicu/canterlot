@@ -45,18 +45,18 @@ assert_proc_alive "${SUP1}" "session 1 supervisor alive"
 assert_eq "$(find "${HUB_BACKUP_DIR}" -name '*.dump' | wc -l)" "1" "no new dump written (only the old one)"
 ls "${HUB_BASE}"/.reserved.* "${WORKER_BASE}"/.reserved.* >/dev/null 2>&1 && case_fail "reservation files written" || case_ok "no reservation files"
 [ ! -e "${WEB_RELEASES}/${SHA_NEW}/_app/immutable/chunks/probe-old.js" ] && case_ok "old chunks not merged" || case_fail "chunks merged"
-for label in "stop worker" "vzdump" "pg_dump" "hub flip" "hub restart" "write canterlot.env.${SHA_NEW}" "web build flip" "caddy recreate" "worker flip" "worker start" "merge old immutable chunks" "loopback caddy probe" "reserve hub releases" "release worker reservations"; do
+for label in "stop worker" "stop hub for the dump" "vzdump" "pg_dump" "hub flip" "hub restart" "write canterlot.env.${SHA_NEW}" "web build flip" "caddy recreate" "worker flip" "worker start" "merge old immutable chunks" "loopback caddy probe" "reserve hub releases" "release worker reservations"; do
     assert_contains "${FAKE_ROOT}/rehearse.log" "(${label}):" "WOULD-WRITE printed for: ${label}"
 done
 in_order "${FAKE_ROOT}/rehearse.log" "target check PASS for ${SHA_NEW}" "(vzdump):" \
-    "re-checking read gates and the session inventory after vzdump" "(stop worker):" "(pg_dump):" \
+    "re-checking read gates and the session inventory after vzdump" "(stop worker):" "(stop hub for the dump):" "(pg_dump):" \
     "dump fully readable" "(hub flip):" "(hub restart):" "(worker flip):" "(worker start):" \
     'worker journal parse found state="live"' "(write canterlot.env.${SHA_NEW}):" "(web build flip):" \
     "(caddy recreate):" "running verification" \
     && case_ok "rehearsal prints the new order: vzdump, gates again, stop, dump, hub, worker live, PWA" \
     || case_fail "rehearsal order differs"
 in_order "${FAKE_ROOT}/rehearse.log" "| steps:" "|   2 fresh vzdump of CT" "|   3 read gates and the session inventory again" \
-    "|   4 stop worker ${WORKER_UNIT}" "|   5 quiesced pg_dump" "|   6 hub flip" "|   7 worker flip" "|   8 PWA" \
+    "|   4 stop worker ${WORKER_UNIT}" "|   5 stop hub ${HUB_UNIT}" "|   6 hub flip" "|   7 worker flip" "|   8 PWA" \
     && case_ok "plan text lists the new order" || case_fail "plan text order differs"
 assert_contains "${FAKE_ROOT}/rehearse.log" "rehearse: no down time" "rehearsal measures no down time"
 N="$(grep -c 'WOULD-WRITE #' "${FAKE_ROOT}/rehearse.log" || true)"

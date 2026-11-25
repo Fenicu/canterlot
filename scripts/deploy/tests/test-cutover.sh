@@ -170,7 +170,16 @@ case_end
 case_begin "pg_dump fails"
 setup_cutover pgdumpfail
 export FAKE_FAIL_PG_DUMP=1
+: >"${FAKE_ROOT}/state/calls.log"
 if run_cutover; then case_fail "exit 0 despite pg_dump failure"; else case_ok "exit nonzero"; fi
+# Хаб остановлен под дамп (единственный клиент базы), а сбой до flip поднимает его обратно на
+# прежнем релизе раньше воркера.
+in_order "${FAKE_ROOT}/state/calls.log" "stop canterlot-worker" "stop canterlot-hub" "pg_dump -Fc" "start canterlot-hub" "start canterlot-worker" \
+    && case_ok "commands: worker stop -> hub stop -> pg_dump -> hub start -> worker start" || case_fail "pre-flip recovery out of order"
+FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub \
+    && case_ok "hub started again on its previous release" || case_fail "hub left stopped after a pre-flip failure"
+assert_contains "${FAKE_ROOT}/cutover.log" "hub is back on its previous release ${SHA_PREV}" "hub recovery logged"
+db_migr_is 40 0 && case_ok "the old hub came back without migrating" || case_fail "the database was migrated by the recovery"
 assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "failed_before_flip" "result file: failed_before_flip"
 assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" recovery)" "worker_restarted" "result file: worker restarted"
 assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" vzdump_done)/$(result_of "${FAKE_ROOT}/cutover.result" worker_stopped)/$(result_of "${FAKE_ROOT}/cutover.result" dump_verified)/$(result_of "${FAKE_ROOT}/cutover.result" hub_flipped)" "yes/yes/no/no" "result file: facts"
@@ -185,6 +194,26 @@ FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-wo
 teardown_case
 case_end
 
+# --- E2. хаб не поднялся обратно после сбоя до flip: воркер всё равно на прежнем релизе, ---
+# --- доклад требует владельца и печатает команду старта хаба ---
+case_begin "pg_dump fails and the hub does not come back"
+setup_cutover pgdumpfail-hubdown
+export FAKE_FAIL_PG_DUMP=1 FAKE_FAIL_HUB_START=1 READYZ_POLLS=2
+if run_cutover; then case_fail "exit 0 despite pg_dump failure"; else case_ok "exit nonzero"; fi
+unset FAKE_FAIL_PG_DUMP FAKE_FAIL_HUB_START READYZ_POLLS
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)/$(result_of "${FAKE_ROOT}/cutover.result" recovery)" "failed_before_flip/needs_owner" "result file: needs_owner when the hub stays down"
+assert_contains "${FAKE_ROOT}/cutover.log" "hub did NOT come back on ${SHA_PREV}" "hub failure is loud"
+hub_is "${SHA_PREV}" && case_ok "hub link untouched" || case_fail "hub moved"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
+    && case_ok "worker restarted on its previous release anyway" || case_fail "worker not restarted"
+E2_BLOCK="$(result_of "${FAKE_ROOT}/cutover.result" stop_block)"
+assert_contains "${E2_BLOCK}" "the hub was stopped for the dump" "block: says the hub was stopped"
+grep -A3 'start the hub on its previous release' "${E2_BLOCK}" | grep -q "systemctl start" \
+    && case_ok "block: the hub start command is printed" || case_fail "block: no hub start command"
+assert_not_contains "${E2_BLOCK}" "rollback-db.sh" "block: no DB restore (the database is untouched)"
+teardown_case
+case_end
+
 # --- F. дамп не прошёл проверку (битый TOC) ---
 case_begin "dump verification fails"
 setup_cutover corruptdump
@@ -192,6 +221,8 @@ export FAKE_DUMP_CORRUPT=1
 if run_cutover; then case_fail "exit 0 despite corrupt dump"; else case_ok "exit nonzero"; fi
 unset FAKE_DUMP_CORRUPT
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
+FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub \
+    && case_ok "hub started again after the failed verification" || case_fail "hub left stopped"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
 assert_contains "${FAKE_ROOT}/cutover.log" "dump verification failed" "verification failure logged"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
@@ -207,6 +238,8 @@ export FAKE_FAIL_CMD="mv -T"
 if run_cutover; then case_fail "exit 0 despite hub flip failure"; else case_ok "exit nonzero"; fi
 unset FAKE_FAIL_CMD
 hub_is "${SHA_PREV}" && case_ok "hub untouched (no flip-back: nothing was flipped)" || case_fail "hub moved"
+FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub \
+    && case_ok "hub started again on its previous release after the failed flip" || case_fail "hub left stopped after the failed flip"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
 assert_contains "${FAKE_ROOT}/cutover.log" "provably unchanged" "readback proved current unchanged"
 assert_not_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "pre-flip recovery, not stop-and-report"
@@ -240,6 +273,11 @@ unset FAKE_FAIL_CMD
 hub_is "${SHA_NEW}" && case_ok "hub is on the new release (flip happened)" || case_fail "hub not flipped"
 assert_contains "${FAKE_ROOT}/cutover.log" "treating as post-flip" "changed current classified as post-flip"
 assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "stop-and-report printed"
+# Хаб стоял под дампом и на новом релизе не стартовал: после flip скрипт его не трогает, но
+# говорит прямо, что он лежит, и таблица отката его поднимает (строки 1 и 2).
+assert_contains "${FAKE_ROOT}/cutover.log" "the hub was stopped for the dump and has not been started on any release since: it is DOWN" "the stopped hub is named in the post-flip stop"
+FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub \
+    && case_fail "the hub was started after a post-flip failure" || case_ok "the hub is left as is after a post-flip failure"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
     && case_fail "worker started (must stay stopped)" || case_ok "worker stays stopped"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
@@ -490,9 +528,14 @@ check_done_run() {
     [ "${gates}" -ge 2 ] && case_ok "read gates ran before the writes and again before the stop (${gates}x)" || case_fail "read gates ran ${gates}x"
     assert_contains "${L}" "the session inventory" "the session inventory was re-checked"
     assert_contains "${L}" "control-worker scan before the worker stop: exactly the unit process" "the control-worker scan ran before the stop"
-    in_order "${C}" "stop canterlot-worker" "pg_dump -Fc" "pg_restore --list" "restart canterlot-hub" "start canterlot-worker" "compose up -d caddy" \
-        && case_ok "commands: worker stop -> pg_dump -> dump verify -> hub restart -> worker start -> caddy recreate" \
+    in_order "${C}" "stop canterlot-worker" "stop canterlot-hub" "pg_dump -Fc" "pg_restore --list" "restart canterlot-hub" "start canterlot-worker" "compose up -d caddy" \
+        && case_ok "commands: worker stop -> hub stop -> pg_dump -> dump verify -> hub restart -> worker start -> caddy recreate" \
         || case_fail "commands out of order"
+    # Снимок pg_dump берётся при остановленном хабе: всё, что хаб принял бы после снимка, при
+    # откате базы на этот дамп пропало бы без следа.
+    assert_eq "$(cat "${FAKE_ROOT}/state/hub-active-at-dump" 2>/dev/null)" "0" "the hub was stopped when pg_dump took its snapshot"
+    awk '/ stop canterlot-hub/ { on = 1 } / restart canterlot-hub/ { exit } on' "${C}" | grep -q ' start canterlot-hub' \
+        && case_fail "the hub was started between its stop and the flip" || case_ok "the hub stays down from the dump to the flip"
     assert_eq "$(result_of "${R}" status)/$(result_of "${R}" mode)" "done/execute" "result file: done, mode execute"
     [ -n "$(result_of "${R}" dump)" ] && case_ok "result file: dump named" || case_fail "result file: no dump"
     assert_eq "$(result_of "${R}" dump_verified)" "yes" "result file: dump_verified=yes"
@@ -561,7 +604,7 @@ in_order "${L}" "control-worker scan before vzdump: exactly the unit process" "v
 REGATES="$(sed -n '/vzdump done:/,/stopping worker/p' "${L}" | grep -c 'read gates for target' || true)"
 [ "${REGATES}" -ge 1 ] && case_ok "read gates ran again between vzdump and the stop" || case_fail "no read gates between vzdump and the stop"
 assert_contains "${L}" "downtime: worker " "worker downtime printed"
-grep -qE 'downtime: worker [0-9]+ s \(stop -> state=live\), hub [0-9]+ s \(restart -> readyz ok\)' "${L}" \
+grep -qE 'downtime: worker [0-9]+ s \(stop -> state=live\), hub [0-9]+ s \(stop before the dump -> readyz ok\)' "${L}" \
     && case_ok "downtime line names both components" || case_fail "downtime line malformed: $(grep 'downtime:' "${L}")"
 assert_contains "${L}" "hub interruption: " "hub interruption measured"
 assert_eq "$(result_of "${R}" soft_failures)/$(result_of "${R}" speech_soft_failures)" "0/0" "result file: no soft failures"

@@ -10,6 +10,8 @@ for arg in "$@"; do
     prev="${arg}"
 done
 [ -n "${file}" ] || { echo "fake-pg_dump: no -f" >&2; exit 99; }
+# Работал ли хаб в момент снимка: 1 — активен, 0 — остановлен (читает сценарий «дамп при стоящем хабе»).
+cat "${FAKE_ROOT}/state/unit-fakehub-canterlot-hub.active" >"${FAKE_ROOT}/state/hub-active-at-dump" 2>/dev/null || true
 # Кластер задаёт только явный -h: без него (кластер по умолчанию) или с чужим сокетом — отказ.
 if [ -n "${FAKE_PG_SOCKET:-}" ]; then
     got=""; prev=""
