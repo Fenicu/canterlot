@@ -1298,7 +1298,7 @@ pub async fn recover_interrupted(
     .await?;
     let mut claimed = Vec::new();
     for (run_id, schedule_id) in candidates {
-        match recover_one(pool, run_id, schedule_id, cutoff).await {
+        match recover_one(pool, run_id, schedule_id, cutoff, now).await {
             Ok(Some(run)) => claimed.push(run),
             Ok(None) => {}
             Err(error) => {
@@ -1318,6 +1318,7 @@ async fn recover_one(
     run_id: Uuid,
     schedule_id: Uuid,
     cutoff: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
 ) -> Result<Option<ClaimedRun>, sqlx::Error> {
     let mut tx = crate::db::begin(pool).await?;
     // Сначала расписание (B): удаление идёт тем же порядком.
@@ -1399,11 +1400,33 @@ async fn recover_one(
             .bind(cutoff)
             .fetch_optional(&mut *tx)
             .await?;
-            match row {
-                Some(row) => Some(ClaimedRun {
-                    run: row.into_run()?,
-                    schedule,
-                }),
+            match row.map(RunRow::into_run).transpose()? {
+                // Окно catch-up проверялось при заявке. Заявка, пережившая долгий простой
+                // хаба, его уже покинула: владелец просил позже не запускать, поэтому она
+                // записывается пропущенной. Ручной запуск окна не имеет.
+                Some(mut run)
+                    if !run.manual
+                        && now - run.scheduled_at > effective_window(schedule.catch_up_minutes) =>
+                {
+                    let mut detail = run.detail.clone();
+                    if !detail.is_object() {
+                        detail = json!({});
+                    }
+                    detail["reason"] = json!("catch_up_expired");
+                    sqlx::query(
+                        "update schedule_runs set state='missed',detail=$2,
+                            updated_at=clock_timestamp() where id=$1",
+                    )
+                    .bind(run_id)
+                    .bind(&detail)
+                    .execute(&mut *tx)
+                    .await?;
+                    run.state = RunState::Missed;
+                    run.detail = detail;
+                    run_changed(&mut tx, &run, Uuid::now_v7()).await?;
+                    None
+                }
+                Some(run) => Some(ClaimedRun { run, schedule }),
                 None => None,
             }
         }

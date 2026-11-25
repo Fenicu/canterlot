@@ -678,6 +678,43 @@ async fn resume_does_not_fire_the_occurrence_that_passed_while_paused() {
     assert_eq!(runs_of(&pool, &id).await, 1);
 }
 
+/// Тик заявил срабатывание, и хаб остановился до приёмки. Окно catch-up проверялось только
+/// при заявке, поэтому после шести часов простоя запуск уходил в работу. Теперь заявка
+/// старше окна записывается пропущенной.
+#[tokio::test]
+async fn a_stranded_claim_past_its_catch_up_window_is_missed_not_started() {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule_id = Uuid::parse_str(&id).unwrap();
+    let now = Utc::now();
+    let fired = now - TimeDelta::hours(6);
+    due(&pool, &id, fired).await;
+    let mut tx = pool.begin().await.unwrap();
+    let claimed = canterlot_hub::schedules::claim_due(&mut tx, fired + TimeDelta::seconds(1), 32)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    tx.commit().await.unwrap();
+    sqlx::query("update schedule_runs set lease_at=$2, updated_at=$2 where schedule_id=$1")
+        .bind(schedule_id)
+        .bind(fired)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Курсор расписания уже впереди: тик ничего нового не заявляет, только разбирает старое.
+    due(&pool, &id, now + TimeDelta::hours(1)).await;
+
+    scheduler(&f).tick(now).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    let (state, detail) = state(&pool, rid).await;
+    assert_eq!(state, "missed", "{detail}");
+    assert_eq!(detail["reason"], "catch_up_expired", "{detail}");
+    assert_eq!(inputs_with_text(&pool, "посмотреть коммиты").await, 0);
+    assert_eq!(runs_of(&pool, &id).await, 1);
+}
+
 #[tokio::test]
 async fn stranded_claimed_is_readmitted_and_young_prechecking_survives() {
     let pool = canterlot_hub::testkit::db().await;
@@ -695,14 +732,15 @@ async fn stranded_claimed_is_readmitted_and_young_prechecking_survives() {
     .bind(rid)
     .bind(schedule)
     .bind(f.seed.owner_id)
-    .bind(now - TimeDelta::hours(2))
+    // Заявка брошена дольше срока аренды, но ещё внутри окна catch-up (30 минут).
+    .bind(now - TimeDelta::minutes(25))
     .bind("crashed-claim")
     .execute(&pool)
     .await
     .unwrap();
     sqlx::query("update schedule_runs set updated_at=$2 where id=$1")
         .bind(rid)
-        .bind(now - TimeDelta::hours(1))
+        .bind(now - TimeDelta::minutes(15))
         .execute(&pool)
         .await
         .unwrap();
@@ -1132,7 +1170,8 @@ async fn recovery_skips_a_run_being_admitted_by_this_hub() {
     let f = Fixture::new(pool.clone()).await;
     let id = create(&f, existing(&f), "0 9 * * *").await;
     let now = Utc::now();
-    let old = now - TimeDelta::hours(2);
+    // Старше срока аренды, но внутри окна catch-up: иначе заявка стала бы пропущенной.
+    let old = now - TimeDelta::minutes(20);
     let rid = Uuid::now_v7();
     sqlx::query(
         "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key,attempt_id,lease_at)
@@ -1577,10 +1616,11 @@ async fn guarded_runs_do_not_starve_recovery_of_an_abandoned_claim() {
         .bind(rid)
         .bind(schedule)
         .bind(f.seed.owner_id)
-        .bind(now - TimeDelta::hours(5) + TimeDelta::minutes(n))
+        // Все заявки внутри окна catch-up и старше срока аренды; порядок задают секунды.
+        .bind(now - TimeDelta::minutes(25) + TimeDelta::seconds(n))
         .bind(format!("starve-{n}"))
         .bind(Uuid::now_v7())
-        .bind(now - TimeDelta::hours(3) + TimeDelta::minutes(n))
+        .bind(now - TimeDelta::minutes(15) + TimeDelta::seconds(n))
         .execute(&pool)
         .await
         .unwrap();
@@ -2561,10 +2601,10 @@ async fn recovery_skips_a_locked_schedule() {
         .bind(Uuid::now_v7())
         .bind(id)
         .bind(f.seed.owner_id)
-        .bind(now - TimeDelta::hours(5))
+        .bind(now - TimeDelta::minutes(25))
         .bind(format!("skip-locked-{name}"))
         .bind(Uuid::now_v7())
-        .bind(now - TimeDelta::hours(3))
+        .bind(now - TimeDelta::minutes(15))
         .execute(&pool)
         .await
         .unwrap();
@@ -2621,10 +2661,10 @@ async fn recovery_batch_limit_applies_after_skipping_locked_schedules() {
             .bind(Uuid::now_v7())
             .bind(schedule)
             .bind(f.seed.owner_id)
-            .bind(now - TimeDelta::hours(5) - TimeDelta::minutes(n))
+            .bind(now - TimeDelta::minutes(20) - TimeDelta::seconds(n))
             .bind(format!("batch-{schedule}-{n}"))
             .bind(Uuid::now_v7())
-            .bind(now - TimeDelta::hours(3))
+            .bind(now - TimeDelta::minutes(15))
             .execute(&pool)
             .await
             .unwrap();
