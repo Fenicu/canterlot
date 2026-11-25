@@ -202,12 +202,13 @@ pub async fn add(
 }
 
 /// После успешной проверки: счётчик и состояние резервной копии сохраняются, отмечается
-/// последнее использование. `false`: ключ не найден (удалён между start и finish).
+/// последнее использование. Возвращает ключ; `None`: ключ не найден (удалён между start
+/// и finish).
 pub async fn record_use(
     pool: &PgPool,
     owner_id: Uuid,
     result: &AuthenticationResult,
-) -> Result<bool, sqlx::Error> {
+) -> Result<Option<Uuid>, sqlx::Error> {
     let mut tx = crate::db::begin(pool).await?;
     let row: Option<(Uuid, Value)> = sqlx::query_as(
         "select id,passkey from owner_passkeys where owner_id=$1 and credential_id=$2 for update",
@@ -217,7 +218,7 @@ pub async fn record_use(
     .fetch_optional(&mut *tx)
     .await?;
     let Some((id, value)) = row else {
-        return Ok(false);
+        return Ok(None);
     };
     let mut passkey: Passkey =
         serde_json::from_value(value).map_err(|error| sqlx::Error::Decode(error.into()))?;
@@ -230,7 +231,7 @@ pub async fn record_use(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(true)
+    Ok(Some(id))
 }
 
 /// Новое имя. `false`: ключа нет.

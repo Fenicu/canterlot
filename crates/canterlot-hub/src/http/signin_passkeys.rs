@@ -30,9 +30,9 @@ use super::{
     signin::{FreshView, SignInView, bucket_for, record_failure, refused, signed_in, too_many},
 };
 use crate::owner_auth::{
-    Method, device,
+    device,
     passkeys::{self, Kind, Stored},
-    sessions,
+    sessions::{self, Proof},
     throttle::{self, Reservation},
 };
 
@@ -223,7 +223,7 @@ async fn passkey_start(
 }
 
 /// Проверка ответа ключа: состояние обряда забирается один раз, ключ должен быть
-/// среди ключей владельца, счётчик и резервная копия сохраняются.
+/// среди ключей владельца, счётчик и резервная копия сохраняются. Возвращает ключ.
 async fn verify(
     state: &AppState,
     webauthn: &Webauthn,
@@ -231,21 +231,21 @@ async fn verify(
     session: Option<Uuid>,
     challenge_id: Uuid,
     credential: Value,
-) -> Result<bool, ApiError> {
+) -> Result<Option<Uuid>, ApiError> {
     let owner_id = state.installation.owner_id;
     let Some(stored) =
         passkeys::take_challenge(&state.pool, owner_id, challenge_id, kind, session).await?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let (Ok(ceremony), Ok(credential)) = (
         serde_json::from_value::<PasskeyAuthentication>(stored),
         serde_json::from_value::<PublicKeyCredential>(credential),
     ) else {
-        return Ok(false);
+        return Ok(None);
     };
     let Ok(result) = webauthn.finish_passkey_authentication(&credential, &ceremony) else {
-        return Ok(false);
+        return Ok(None);
     };
     Ok(passkeys::record_use(&state.pool, owner_id, &result).await?)
 }
@@ -270,7 +270,7 @@ async fn passkey_finish(
     {
         return Ok(refused(retry_after));
     }
-    if !verify(
+    let Some(passkey) = verify(
         &state,
         webauthn,
         Kind::SignIn,
@@ -279,13 +279,15 @@ async fn passkey_finish(
         body.credential,
     )
     .await?
-    {
+    else {
         record_failure(&state, &bucket).await?;
         tracing::info!(kind = "sign_in_failed", method = "passkey", bucket = %bucket, "passkey sign-in failed");
         return Err(ApiError::new(ErrorCode::InvalidCredentials));
-    }
+    };
     throttle::succeeded(&state.pool, &bucket).await?;
-    signed_in(&state, &client, Method::Passkey, body.device).await
+    signed_in(&state, &client, Proof::Passkey(passkey), body.device)
+        .await?
+        .ok_or_else(|| ApiError::new(ErrorCode::InvalidCredentials))
 }
 
 #[utoipa::path(get, path = "/api/v1/auth/passkeys", tag = "auth", responses(
@@ -505,7 +507,7 @@ async fn reauth_finish(
     {
         return Err(too_many(retry_after));
     }
-    if !verify(
+    if verify(
         &state,
         webauthn,
         Kind::Reauth,
@@ -514,6 +516,7 @@ async fn reauth_finish(
         body.credential,
     )
     .await?
+    .is_none()
     {
         record_failure(&state, &bucket).await?;
         tracing::info!(kind = "reauth_failed", method = "passkey", bucket = %bucket, "passkey check failed");

@@ -29,8 +29,7 @@ use crate::{
     owner_auth::{
         self, Method, RevokeReason, bucket_key,
         password::{self},
-        recovery,
-        sessions::{self, ClientInfo, SessionRow},
+        sessions::{self, ClientInfo, Proof, SessionRow},
         throttle::{self, Reservation},
     },
 };
@@ -194,28 +193,43 @@ pub(super) async fn record_failure(state: &AppState, bucket: &str) -> Result<(),
 }
 
 /// Новый сеанс по доказанному паролю, ключу или ссылке: сеанс и известное устройство
-/// одной транзакцией, затем cookie, пуш, вид сеанса.
+/// одной транзакцией, затем cookie, пуш, вид сеанса. `None`: доказательство перестало
+/// действовать, пока шла проверка (`sessions::Proof`), сеанс не записан.
 pub(super) async fn signed_in(
     state: &AppState,
     client: &Client,
-    method: Method,
+    proof: Proof<'_>,
     device: Option<Value>,
-) -> Result<Response, ApiError> {
+) -> Result<Option<Response>, ApiError> {
+    #[cfg(feature = "fault-injection")]
+    state
+        .auth_faults
+        .pause(crate::fault_injection::Point::SignInVerified)
+        .await;
+    let method = proof.method();
     let info = ClientInfo::located(client.ip, client.user_agent.clone(), device, &state.geo);
-    let (created, device) = sessions::sign_in(
+    let Some((created, device)) = sessions::sign_in(
         &state.pool,
         state.installation.owner_id,
-        method,
+        proof,
         &info,
         client.device_token.as_ref().map(|token| token.0.as_str()),
     )
-    .await?;
+    .await?
+    else {
+        tracing::info!(
+            kind = "sign_in_stale",
+            method = method.as_str(),
+            "credential changed during sign-in"
+        );
+        return Ok(None);
+    };
     let (session, mut cookies) = issue(state, &created, &info, method).await?;
     cookies.push(device_cookie(&device));
-    Ok(with_cookies(
+    Ok(Some(with_cookies(
         Json(SignInView { session }).into_response(),
         cookies,
-    ))
+    )))
 }
 
 /// Сеанс создан и записан: уходит пуш о входе. Возвращает вид сеанса и `Set-Cookie`
@@ -309,15 +323,22 @@ async fn sign_in_password(
         .as_bytes()
         .ct_eq(state.http.owner_login.as_bytes())
         .into();
-    let verified = state.passwords.verify(body.password, stored).await;
+    let verified = state.passwords.verify(body.password, stored.clone()).await;
     drop(_permit);
-    if !(verified && login_matches) {
-        record_failure(&state, &bucket).await?;
-        tracing::info!(kind = "sign_in_failed", method = "password", bucket = %bucket, "password sign-in failed");
-        return Err(ApiError::new(ErrorCode::InvalidCredentials));
-    }
+    let phc = match stored {
+        Some(phc) if verified && login_matches => phc,
+        _ => {
+            record_failure(&state, &bucket).await?;
+            tracing::info!(kind = "sign_in_failed", method = "password", bucket = %bucket, "password sign-in failed");
+            return Err(ApiError::new(ErrorCode::InvalidCredentials));
+        }
+    };
     throttle::succeeded(&state.pool, &bucket).await?;
-    signed_in(&state, &client, Method::Password, body.device).await
+    // Пароль сменили, пока шёл argon2: тот же 401, что у неверного пароля, без неудачи
+    // перебора — пароль был верен.
+    signed_in(&state, &client, Proof::Password(&phc), body.device)
+        .await?
+        .ok_or_else(|| ApiError::new(ErrorCode::InvalidCredentials))
 }
 
 /// Вход по ссылке восстановления: одноразовый токен из `canterlot-hub auth recovery-link`.
@@ -337,14 +358,20 @@ async fn sign_in_recovery(
     {
         return Ok(refused(retry_after));
     }
-    let owner = recovery::redeem(&state.pool, &body.token).await?;
-    if owner != Some(state.installation.owner_id) {
+    // Токен гасится в транзакции сеанса: погашенный до отзыва сеансов токен не даёт
+    // сеанса после отзыва, а вход, не записавший сеанса, токен не тратит.
+    let Some(response) =
+        signed_in(&state, &client, Proof::Recovery(&body.token), body.device).await?
+    else {
         record_failure(&state, &bucket).await?;
         tracing::info!(kind = "sign_in_failed", method = "recovery", bucket = %bucket, "recovery sign-in failed");
         return Err(ApiError::new(ErrorCode::InvalidCredentials));
+    };
+    // Сеанс уже выдан: сбой очистки корзины не должен отнять у ответа cookie.
+    if let Err(error) = throttle::succeeded(&state.pool, &bucket).await {
+        tracing::warn!(kind = "sign_in_bucket_not_cleared", error = %crate::dberr::describe(&error), "bucket not cleared after a recovery sign-in");
     }
-    throttle::succeeded(&state.pool, &bucket).await?;
-    signed_in(&state, &client, Method::Recovery, body.device).await
+    Ok(response)
 }
 
 #[derive(Serialize, ToSchema)]

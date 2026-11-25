@@ -586,3 +586,98 @@ async fn auth_password_endpoints_keep_csrf_and_methods_reports_a_password() {
     let response = hub.sign_in_owner(&no_secret).await;
     assert_eq!(error_code(&response), "unauthenticated");
 }
+
+#[cfg(feature = "fault-injection")]
+mod races {
+    //! Гонки входа и смены пароля: запрос останавливается в точке после argon2, пока
+    //! другой запрос меняет пароль.
+
+    use std::time::Duration;
+
+    use canterlot_hub::{
+        fault_injection::Point,
+        owner_auth::{Method as SignInMethod, SESSION_COOKIE},
+        testkit::{Method, TEST_OWNER_LOGIN, TEST_SESSION_ID, TestClient, TestResponse},
+    };
+    use serde_json::json;
+
+    use crate::support::auth::{AuthHub, PASSWORD, error_code, set_cookie};
+
+    const WAIT: Duration = Duration::from_secs(30);
+
+    fn change(
+        client: &TestClient,
+        current: Option<&str>,
+        new: &str,
+    ) -> tokio::task::JoinHandle<TestResponse> {
+        let client = client.clone();
+        let mut body = json!({"new_password": new});
+        if let Some(current) = current {
+            body["current_password"] = json!(current);
+        }
+        tokio::spawn(async move {
+            client
+                .send(Method::PUT, "/api/v1/auth/password", None, Some(body))
+                .await
+        })
+    }
+
+    async fn phc(hub: &AuthHub) -> Option<String> {
+        sqlx::query_scalar("select phc from owner_passwords where owner_id=$1")
+            .bind(hub.owner_id())
+            .fetch_optional(&hub.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn live_from(hub: &AuthHub, ip: &str) -> i64 {
+        sqlx::query_scalar(
+            "select count(*) from owner_sessions where created_ip=$1::inet and revoked_at is null",
+        )
+        .bind(ip)
+        .fetch_one(&hub.pool)
+        .await
+        .unwrap()
+    }
+
+    /// Вход проверил старый пароль, а пока он шёл к записи сеанса, владелец сменил пароль
+    /// и завершил остальные сеансы. Сеанс по старому паролю не появляется.
+    #[tokio::test]
+    async fn auth_password_sign_in_checked_against_the_old_password_loses_to_a_change() {
+        let pool = canterlot_hub::testkit::db().await;
+        let hub = AuthHub::new(pool).await;
+        hub.set_password(PASSWORD).await;
+        let paused = hub.state.auth_faults.pause_next(Point::SignInVerified);
+        let client = hub.anonymous(Some("203.0.113.70"));
+        let signing = tokio::spawn(async move {
+            client
+                .send(
+                    Method::POST,
+                    "/api/v1/auth/password",
+                    None,
+                    Some(json!({"login": TEST_OWNER_LOGIN, "password": PASSWORD})),
+                )
+                .await
+        });
+        let resume = tokio::time::timeout(WAIT, paused).await.unwrap().unwrap();
+        let changed = change(&hub.owner(), Some(PASSWORD), "a brand new password")
+            .await
+            .unwrap();
+        assert_eq!(changed.status, 200, "{:?}", changed.body);
+        resume.send(()).unwrap();
+        let late = tokio::time::timeout(WAIT, signing).await.unwrap().unwrap();
+        assert_eq!(late.status, 401, "{:?}", late.body);
+        assert_eq!(error_code(&late), "invalid_credentials");
+        assert!(set_cookie(&late, SESSION_COOKIE).is_none());
+        assert_eq!(live_from(&hub, "203.0.113.70").await, 0);
+        // Новый пароль входит как обычно.
+        let ok = hub
+            .sign_in(
+                &hub.anonymous(Some("203.0.113.70")),
+                TEST_OWNER_LOGIN,
+                "a brand new password",
+            )
+            .await;
+        assert_eq!(ok.status, 200, "{:?}", ok.body);
+    }
+}

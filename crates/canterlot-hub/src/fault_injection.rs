@@ -28,6 +28,8 @@ pub enum Point {
     WsStalled,
     /// Вход: сбой после записи нового сеанса, до ответа.
     SignInAfterSession,
+    /// Вход: доказательство проверено, сеанс ещё не записан.
+    SignInVerified,
 }
 
 #[derive(Clone, Debug)]

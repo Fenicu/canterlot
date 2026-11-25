@@ -491,3 +491,51 @@ async fn auth_passkeys_register_finish_needs_the_session_still_fresh() {
         .unwrap();
     assert_eq!(stored, 0);
 }
+
+/// Ключ подписал вход, а пока вход шёл к записи сеанса, владелец удалил этот ключ.
+/// Сеанс по удалённому ключу не появляется: под замком сеансов ключ сверяется заново.
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn auth_passkeys_sign_in_by_a_key_deleted_meanwhile_is_refused() {
+    use canterlot_hub::fault_injection::Point;
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+    let pool = canterlot_hub::testkit::db().await;
+    let hub = AuthHub::new(pool).await;
+    let mut key = authenticator();
+    let owner = hub.owner();
+    let added: Value = register(&owner, &mut key, Some("Телефон")).await.json();
+    let id = added["id"].as_str().unwrap().to_owned();
+    let client = hub.anonymous(Some("203.0.113.73"));
+    let (challenge, credential) = assertion(&client, "/api/v1/auth/passkey/start", &mut key).await;
+    let paused = hub.state.auth_faults.pause_next(Point::SignInVerified);
+    let signing = tokio::spawn(async move {
+        post(
+            &client,
+            "/api/v1/auth/passkey/finish",
+            json!({"challenge_id": challenge, "credential": credential}),
+        )
+        .await
+    });
+    let resume = tokio::time::timeout(WAIT, paused).await.unwrap().unwrap();
+    let deleted = owner
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/auth/passkeys/{id}"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(deleted.status, 200, "{:?}", deleted.body);
+    resume.send(()).unwrap();
+    let late = tokio::time::timeout(WAIT, signing).await.unwrap().unwrap();
+    assert_eq!(late.status, 401, "{:?}", late.body);
+    assert_eq!(error_code(&late), "invalid_credentials");
+    assert!(set_cookie(&late, SESSION_COOKIE).is_none());
+    let live: i64 = sqlx::query_scalar(
+        "select count(*) from owner_sessions where created_ip='203.0.113.73' and revoked_at is null",
+    )
+    .fetch_one(&hub.pool)
+    .await
+    .unwrap();
+    assert_eq!(live, 0);
+}

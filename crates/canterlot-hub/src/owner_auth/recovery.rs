@@ -1,7 +1,7 @@
 //! Ссылка восстановления (она же первый вход): выпускается командой на хосте хаба,
 //! хранится хешем, одна на владельца, новая заменяет прежнюю, используется один раз.
 
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::{Secret, digest, generate_token, token_shape_ok};
@@ -27,7 +27,8 @@ pub async fn issue(pool: &PgPool, owner_id: Uuid, minutes: u32) -> Result<String
 }
 
 /// Погашает токен: владелец, если токен известен и не истёк. Повтор того же токена пуст.
-pub async fn redeem(pool: &PgPool, token: &str) -> Result<Option<Uuid>, sqlx::Error> {
+/// Гасится в транзакции входа (`sessions::sign_in`): откат входа возвращает токен.
+pub async fn redeem(conn: &mut PgConnection, token: &str) -> Result<Option<Uuid>, sqlx::Error> {
     if !token_shape_ok(token) {
         return Ok(None);
     }
@@ -36,6 +37,6 @@ pub async fn redeem(pool: &PgPool, token: &str) -> Result<Option<Uuid>, sqlx::Er
          returning owner_id",
     )
     .bind(digest(Secret::Recovery, token))
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
 }

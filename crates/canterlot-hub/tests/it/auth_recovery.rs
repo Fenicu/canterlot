@@ -267,3 +267,37 @@ async fn auth_recovery_cli_push_sends_only_to_gotify() {
     let hub = AuthHub::new(pool).await;
     assert_eq!(redeem(&hub, "203.0.113.121", token).await.status, 200);
 }
+
+/// Ссылка гасится той же транзакцией, что пишет сеанс: вход, не записавший сеанса,
+/// ссылку не тратит, а погашенная ссылка не даёт сеанса, пережившего отзыв.
+#[tokio::test]
+async fn auth_recovery_token_is_redeemed_with_the_session() {
+    let pool = canterlot_hub::testkit::db().await;
+    let hub = AuthHub::new(pool).await;
+    let token = recovery::issue(&hub.pool, hub.owner_id(), 10)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "create function refuse_session() returns trigger language plpgsql as $$
+         begin raise exception 'session refused by the test'; end $$;
+         create trigger refuse_session before insert on owner_sessions
+           for each row execute function refuse_session();",
+    )
+    .execute(&hub.pool)
+    .await
+    .unwrap();
+    let failed = redeem(&hub, "203.0.113.74", &token).await;
+    assert_eq!(failed.status, 500, "{:?}", failed.body);
+    sqlx::raw_sql("drop trigger refuse_session on owner_sessions")
+        .execute(&hub.pool)
+        .await
+        .unwrap();
+    let ok = redeem(&hub, "203.0.113.74", &token).await;
+    assert_eq!(
+        ok.status, 200,
+        "the link survives a sign-in that wrote no session"
+    );
+    let again = redeem(&hub, "203.0.113.74", &token).await;
+    assert_eq!(again.status, 401);
+    assert_eq!(error_code(&again), "invalid_credentials");
+}

@@ -124,18 +124,77 @@ pub async fn create(
     Ok(created)
 }
 
+/// Чем доказан вход. Пароль и ключ проверяются до записи сеанса, долго и без замка;
+/// под замком сеансов доказательство сверяется заново. Иначе вход, проверенный по
+/// старому паролю или удалённому ключу, создал бы сеанс уже после смены пароля и
+/// отзыва сеансов.
+#[derive(Debug, Clone, Copy)]
+pub enum Proof<'a> {
+    /// Строка PHC, с которой сверен пароль.
+    Password(&'a str),
+    /// Ключ доступа, которым подписан ответ.
+    Passkey(Uuid),
+    /// Токен ссылки восстановления: гасится той же транзакцией, что пишет сеанс.
+    Recovery(&'a str),
+}
+
+impl Proof<'_> {
+    pub fn method(&self) -> Method {
+        match self {
+            Self::Password(_) => Method::Password,
+            Self::Passkey(_) => Method::Passkey,
+            Self::Recovery(_) => Method::Recovery,
+        }
+    }
+}
+
+/// Доказательство всё ещё действует. Вызывающий держит `serialize_with_delivery`: смена
+/// пароля и отзыв сеансов берут тот же замок.
+async fn proof_holds(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    proof: Proof<'_>,
+) -> Result<bool, sqlx::Error> {
+    match proof {
+        Proof::Password(phc) => {
+            sqlx::query_scalar(
+                "select exists(select 1 from owner_passwords where owner_id=$1 and phc=$2)",
+            )
+            .bind(owner_id)
+            .bind(phc)
+            .fetch_one(conn)
+            .await
+        }
+        Proof::Passkey(id) => {
+            sqlx::query_scalar(
+                "select exists(select 1 from owner_passkeys where owner_id=$1 and id=$2)",
+            )
+            .bind(owner_id)
+            .bind(id)
+            .fetch_one(conn)
+            .await
+        }
+        Proof::Recovery(token) => Ok(super::recovery::redeem(conn, token).await? == Some(owner_id)),
+    }
+}
+
 /// Вход паролем, ключом или ссылкой: сеанс и известное устройство одной транзакцией.
 /// Действующая cookie устройства `existing` сохраняется и переносится на новый сеанс,
-/// иначе выдаётся новая. Возвращает сеанс и токен cookie устройства.
+/// иначе выдаётся новая. Возвращает сеанс и токен cookie устройства; `None`, если
+/// доказательство уже не действует (`proof_holds`), и тогда ничего не записано.
 pub async fn sign_in(
     pool: &PgPool,
     owner_id: Uuid,
-    method: Method,
+    proof: Proof<'_>,
     client: &ClientInfo,
     existing: Option<&str>,
-) -> Result<(Created, String), sqlx::Error> {
+) -> Result<Option<(Created, String)>, sqlx::Error> {
     let mut tx = crate::db::begin(pool).await?;
-    let mut created = create_in_tx(&mut tx, owner_id, method, None, client).await?;
+    serialize_with_delivery(&mut tx).await?;
+    if !proof_holds(&mut tx, owner_id, proof).await? {
+        return Ok(None);
+    }
+    let mut created = create_in_tx(&mut tx, owner_id, proof.method(), None, client).await?;
     let (device, moved) = remember_device(&mut tx, owner_id, existing, created.id).await?;
     created.moved_device = moved;
     tx.commit().await?;
@@ -143,7 +202,7 @@ pub async fn sign_in(
         super::notify_changed(pool, "session_revoked").await;
     }
     super::notify_changed(pool, "session_changed").await;
-    Ok((created, device))
+    Ok(Some((created, device)))
 }
 
 /// То же в чужой транзакции (часть 2: вход по QR в одной транзакции с доставкой).
