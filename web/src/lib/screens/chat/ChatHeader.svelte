@@ -361,9 +361,9 @@
 				type="button"
 				class="icon-button messages-btn"
 				aria-label="Мои сообщения"
-				aria-pressed={pane.desktop ? pane.view === 'messages' : undefined}
+				aria-pressed={pane.lane ? pane.view === 'messages' : undefined}
 				onclick={() => {
-					if (pane.desktop) pane.toggle('messages');
+					if (pane.lane) pane.toggle('messages');
 					else onOpenMessages?.();
 				}}
 			>
@@ -523,7 +523,7 @@
 						icon="clock"
 						onclick={() => {
 							menuOpen = false;
-							if (pane.desktop) pane.toggle('alarms');
+							if (pane.lane) pane.toggle('alarms');
 							else onOpenAlarms();
 						}}
 					>Будильники · {alarmCount}</MenuItem>

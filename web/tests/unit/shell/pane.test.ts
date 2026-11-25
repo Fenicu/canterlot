@@ -203,3 +203,121 @@ describe('shell/pane: панель на широком окне', () => {
     expect(bare.shown).toBeNull();
   });
 });
+
+describe('shell/pane: стол стоя', () => {
+  it('правой панели нет: настройки, сообщения и поиск открываются листом', () => {
+    const portrait = new Pane(() => memoryStorage());
+    portrait.mode = 'desktop';
+    portrait.width = 1080;
+    expect(portrait.lane).toBe(true);
+    portrait.dock = true;
+    expect(portrait.desktop).toBe(true);
+    expect(portrait.lane).toBe(false);
+    portrait.mode = 'tablet';
+    portrait.dock = false;
+    expect(portrait.lane).toBe(false);
+  });
+});
+
+describe('shell/pane: нижняя панель стола стоя', () => {
+  let storage: Storage;
+
+  function make(dock: boolean, width = dock ? 1080 : 1920): Pane {
+    const next = new Pane(() => storage);
+    next.mode = 'desktop';
+    next.dock = dock;
+    next.width = width;
+    return next;
+  }
+
+  beforeEach(() => {
+    storage = memoryStorage();
+  });
+
+  it('стоя порога ширины нет: открыта сама у сессии с планом или делегатами', () => {
+    expect(laneAutoOpen({ mode: 'desktop', width: 1080, dock: true, delegated: true, closed: false })).toBe(true);
+    expect(laneAutoOpen({ mode: 'desktop', width: 1080, dock: true, delegated: false, closed: false })).toBe(false);
+    expect(laneAutoOpen({ mode: 'desktop', width: 1080, dock: true, delegated: true, closed: true })).toBe(false);
+    expect(laneAutoOpen({ mode: 'tablet', width: 1080, dock: true, delegated: true, closed: false })).toBe(false);
+    const portrait = make(true);
+    expect(portrait.docked).toBe(false);
+    portrait.delegated = true;
+    expect(portrait.shown).toBe('delegation');
+    expect(portrait.docked).toBe(true);
+    expect(portrait.stacked).toBe(true);
+    expect(portrait.lane).toBe(false);
+  });
+
+  it('полоса плана уходит, пока план в нижней панели, и возвращается после закрытия', () => {
+    const portrait = make(true);
+    portrait.delegated = true;
+    expect(portrait.planDocked).toBe(true);
+    portrait.closeDelegation();
+    expect(portrait.docked).toBe(false);
+    expect(portrait.planDocked).toBe(false);
+  });
+
+  it('одна память на обе формы: закрытая стоя не открывается боком, «Делегирование» боком открывает и стоя', () => {
+    const portrait = make(true);
+    portrait.delegated = true;
+    portrait.closeDelegation();
+    expect(storage.getItem(LANE_CLOSED_KEY)).toBe('closed');
+    // Ушли из чата и вернулись: панель закрыта.
+    portrait.delegated = false;
+    portrait.delegated = true;
+    expect(portrait.docked).toBe(false);
+    const landscape = make(false);
+    landscape.delegated = true;
+    expect(landscape.shown).toBeNull();
+    landscape.toggleDelegation();
+    expect(landscape.shown).toBe('delegation');
+    expect(storage.getItem(LANE_CLOSED_KEY)).toBeNull();
+    const again = make(true);
+    again.delegated = true;
+    expect(again.docked).toBe(true);
+  });
+
+  it('«Делегирование» стоя открывает закрытую нижнюю панель и стирает память', () => {
+    const portrait = make(true);
+    portrait.delegated = true;
+    portrait.toggleDelegation();
+    expect(portrait.docked).toBe(false);
+    expect(portrait.closed).toBe(true);
+    portrait.toggleDelegation();
+    expect(portrait.docked).toBe(true);
+    expect(portrait.view).toBeNull();
+    expect(portrait.closed).toBe(false);
+  });
+
+  it('поворот переносит ту же панель между правой и нижней, открытой или закрытой', () => {
+    const shell = make(false);
+    shell.delegated = true;
+    expect(shell.shown).toBe('delegation');
+    shell.dock = true;
+    shell.width = 1080;
+    expect(shell.docked).toBe(true);
+    shell.dock = false;
+    shell.width = 1920;
+    expect(shell.shown).toBe('delegation');
+    expect(shell.docked).toBe(false);
+    shell.closeDelegation();
+    shell.dock = true;
+    shell.width = 1080;
+    expect(shell.docked).toBe(false);
+    shell.dock = false;
+    shell.width = 1920;
+    expect(shell.shown).toBeNull();
+  });
+
+  it('другая панель, открытая боком, стоя не прячет план и делегаты и возвращается после поворота назад', () => {
+    const shell = make(false);
+    shell.delegated = true;
+    shell.toggle('messages');
+    expect(shell.shown).toBe('messages');
+    shell.dock = true;
+    expect(shell.shown).toBe('delegation');
+    expect(shell.docked).toBe(true);
+    shell.dock = false;
+    expect(shell.shown).toBe('messages');
+  });
+});

@@ -21,12 +21,12 @@ class SearchRequest {
 export const searchRequest = new SearchRequest();
 
 /**
- * Открыть поиск: на столе — третья панель, иначе экран `/search`.
+ * Открыть поиск: на столе боком — третья панель, иначе экран `/search`.
  * Запрос едет в `history.state`, а не в адресе.
  */
 export function openSearch(q: string, session: SessionScope | null = null): void {
 	const state: SearchState = { ...emptyState(session), q };
-	if (pane.desktop) {
+	if (pane.lane) {
 		searchRequest.open(state);
 		return;
 	}

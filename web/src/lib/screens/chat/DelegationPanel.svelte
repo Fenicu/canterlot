@@ -10,11 +10,14 @@
 	let {
 		chat,
 		stacked = false,
+		dock = false,
 		onclose
 	}: {
 		chat: ChatStore;
 		/** Широкий стол: план и дерево делегатов стопкой вместо вкладок. */
 		stacked?: boolean;
+		/** Стол стоя: панель стоит внизу колонки чата, а не справа. */
+		dock?: boolean;
 		onclose?: () => void;
 	} = $props();
 
@@ -39,11 +42,11 @@
 	});
 </script>
 
-<aside class="desktop-lane-panel" aria-label={stacked && hasPlan ? 'Панель плана и делегатов' : 'Панель делегирования'}>
+<aside class="desktop-lane-panel" aria-label={stacked && hasPlan ? 'Панель плана и делегатов' : 'Панель делегирования'} data-dock={dock ? '' : undefined}>
 	<header class="topbar">
 		<h2 class="panel-title grow">{title}</h2>
 		{#if onclose}
-			<IconButton icon="close" label="Закрыть боковую панель" onclick={onclose} />
+			<IconButton icon="close" label={dock ? 'Закрыть нижнюю панель' : 'Закрыть боковую панель'} onclick={onclose} />
 		{/if}
 	</header>
 
