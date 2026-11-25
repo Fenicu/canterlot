@@ -231,8 +231,12 @@ async fn discover_inner(
     )
     .await
     .map_err(DiscoverError::Version)?;
-    let models = probe_models(cfg, env, &layout.tmp(), version::parse_version(version.label())
-        .is_ok_and(|number| number >= (2, 4, 1)))
+    let models = probe_models(
+        cfg,
+        env,
+        &layout.tmp(),
+        version::parse_version(version.label()).is_ok_and(|number| number >= (2, 4, 1)),
+    )
     .await
     .map_err(|_| DiscoverError::Catalog)?;
     Ok(OpenCodeCatalog { version, models })
@@ -294,9 +298,9 @@ async fn probe_models(
                 }
                 cfg.providers.is_empty()
                     || list.iter().any(|model| {
-                        model["providerID"]
-                            .as_str()
-                            .is_some_and(|provider| cfg.providers.iter().any(|name| name == provider))
+                        model["providerID"].as_str().is_some_and(|provider| {
+                            cfg.providers.iter().any(|name| name == provider)
+                        })
                     })
             };
             let mut models = models;

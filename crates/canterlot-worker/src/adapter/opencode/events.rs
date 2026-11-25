@@ -1339,7 +1339,11 @@ impl Translator {
     }
 
     fn on_tool_failed(&mut self, data: &Value) -> Vec<Translated> {
-        let status = if data.pointer("/metadata/interrupted").and_then(Value::as_bool) == Some(true) {
+        let status = if data
+            .pointer("/metadata/interrupted")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
             "interrupted"
         } else {
             match data.pointer("/error/type").and_then(Value::as_str) {

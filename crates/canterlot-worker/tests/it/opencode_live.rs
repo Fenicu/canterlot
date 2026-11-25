@@ -919,7 +919,8 @@ async fn real_mcp_elicitation_is_refused_and_the_call_returns() {
     })
     .await;
     let events = session.turn(&input("спроси")).await;
-    assert_eq!(stub.requests().len(), 2, "{events:?}");    let seen = stub.requests()[1].to_string();
+    assert_eq!(stub.requests().len(), 2, "{events:?}");
+    let seen = stub.requests()[1].to_string();
     assert!(seen.contains("elicitation cancel"), "{seen}");
     session.close().await;
 }
@@ -1814,18 +1815,19 @@ async fn real_subagent_runs_in_the_lane_of_its_call() {
         })
     };
     if !has_child_text(&events) {
-        let deadline = tokio::time::Instant::now() + WAIT;
-        loop {
-            let event = tokio::time::timeout_at(deadline, session.adapter.next_event())
-                .await
-                .expect("background child must finish");
-            let stop =
-                matches!(event, AdapterEvent::RunFinished { .. }) && has_child_text(&events);
-            events.push(event);
-            if stop {
-                break;
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let event = session.adapter.next_event().await;
+                let stop =
+                    matches!(event, AdapterEvent::RunFinished { .. }) && has_child_text(&events);
+                events.push(event);
+                if stop {
+                    break;
+                }
             }
-        }
+        })
+        .await
+        .expect("background child must finish");
     }
     let lane: Vec<_> = events
         .iter()
@@ -2130,17 +2132,18 @@ async fn real_child_todo_list_goes_to_the_lane_of_its_call() {
         .iter()
         .any(|event| matches!(event, AdapterEvent::TodoUpdated { .. }))
     {
-        let deadline = tokio::time::Instant::now() + WAIT;
-        loop {
-            let event = tokio::time::timeout_at(deadline, session.adapter.next_event())
-                .await
-                .expect("background child todo");
-            let stop = matches!(event, AdapterEvent::TodoUpdated { .. });
-            events.push(event);
-            if stop {
-                break;
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let event = session.adapter.next_event().await;
+                let stop = matches!(event, AdapterEvent::TodoUpdated { .. });
+                events.push(event);
+                if stop {
+                    break;
+                }
             }
-        }
+        })
+        .await
+        .expect("background child todo");
     }
     let lists: Vec<_> = events
         .iter()

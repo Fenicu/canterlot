@@ -16,7 +16,8 @@ const OUTPUT_CAP: u64 = 64 * 1024;
 
 // Минимальная проверенная версия CLI.
 pub const MIN_SUPPORTED_VERSION: (u32, u32, u32) = (0, 164, 0);
-pub const VERIFIED_VERSIONS: &[(u32, u32, u32)] = &[(0, 164, 0), (0, 167, 0), (0, 169, 0), (0, 172, 0)];
+pub const VERIFIED_VERSIONS: &[(u32, u32, u32)] =
+    &[(0, 164, 0), (0, 167, 0), (0, 169, 0), (0, 172, 0)];
 
 const POLICY: VersionPolicy = VersionPolicy {
     prefix: "codex-cli",
