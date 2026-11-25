@@ -63,6 +63,9 @@ const MCP_READY_WAIT: Duration = Duration::from_secs(90);
 const REQUEST_WAIT: Duration = Duration::from_secs(10);
 /// Весь `discover` при старте воркера: запуск сервера, версия и каталог.
 const DISCOVER_WAIT: Duration = Duration::from_secs(20);
+/// 2.4.1 наполняет `/api/model` после первой сессии волнами; ждём не дольше этого,
+/// чтобы пустой каталог остался пустым, а не стал отказом по общему сроку.
+const MODEL_SETTLE: Duration = Duration::from_secs(5);
 const INTERRUPT_WAIT: Duration = Duration::from_secs(5);
 const POLL_EVERY: Duration = Duration::from_millis(100);
 /// Эвристика: `connected` публикуется раньше инструментов, дебаунс `mcp.tools.changed`
@@ -305,7 +308,7 @@ async fn probe_models(
             };
             let mut models = models;
             if let Some(id) = id {
-                let deadline = Instant::now() + DISCOVER_WAIT;
+                let deadline = Instant::now() + MODEL_SETTLE;
                 while !wanted(&models) && Instant::now() < deadline {
                     tokio::time::sleep(POLL_EVERY).await;
                     models = models_reply(&http, "/api/model", DISCOVER_WAIT)
