@@ -57,6 +57,9 @@ for n,line in enumerate(sys.stdin,1):
         elif frame=='@wait':
             (d/'waiting').write_text('1')
             while True: time.sleep(1)
+        elif frame=='@eof':
+            # Ждать закрытия stdin: остальные кадры хода уходят уже во время мягкой остановки.
+            while sys.stdin.readline(): pass
         elif isinstance(frame,str) and frame.startswith('@sleep:'): time.sleep(int(frame.split(':')[1])/1000)
         elif frame=='@exit': sys.exit(7)
         else:

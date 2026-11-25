@@ -83,6 +83,8 @@ pub struct ClaudeCodeAdapter {
     resumed: bool,
     /// Родитель свежего форка: до первого `system/init` перезапуск повторяет форк.
     fork_parent: Option<String>,
+    /// Строки stdout, дочитанные во время остановки CLI: разбор ждёт конца дочитывания.
+    drained: Vec<String>,
     eof: bool,
     exited: bool,
     start_attempted: bool,
@@ -148,6 +150,7 @@ impl ClaudeCodeAdapter {
             cli_ready: false,
             resumed: false,
             fork_parent: None,
+            drained: Vec::new(),
             eof: false,
             exited: false,
             start_attempted: false,
@@ -733,30 +736,13 @@ impl ClaudeCodeAdapter {
             return;
         };
         cli.close_stdin();
-        if !drain_until_exit(
-            cli,
-            &mut self.parser,
-            &mut self.queue,
-            Duration::from_secs(5),
-        )
-        .await
-        {
+        if !drain_until_exit(cli, &mut self.drained, Duration::from_secs(5)).await {
             signal_group(cli.pid, process::Signal::Term);
-            if !drain_until_exit(
-                cli,
-                &mut self.parser,
-                &mut self.queue,
-                Duration::from_secs(2),
-            )
-            .await
-            {
+            if !drain_until_exit(cli, &mut self.drained, Duration::from_secs(2)).await {
                 signal_group(cli.pid, process::Signal::Kill);
-                let drained = timeout(
-                    KILL_DRAIN,
-                    drain_to_eof(cli, &mut self.parser, &mut self.queue),
-                )
-                .await
-                .is_ok();
+                let drained = timeout(KILL_DRAIN, drain_to_eof(cli, &mut self.drained))
+                    .await
+                    .is_ok();
                 if !drained || timeout(KILL_DRAIN, cli.wait()).await.is_err() {
                     // Новый CLI ещё не запущен: всё в контейнере принадлежит старому.
                     let _ = group.terminate(KILL_DRAIN).await;
@@ -764,6 +750,7 @@ impl ClaudeCodeAdapter {
                 }
             }
         }
+        self.feed_drained();
         self.cli = None;
         self.eof = false;
         self.exited = false;
@@ -1309,19 +1296,15 @@ fn signal_group(pid: u32, signal: process::Signal) {
     let _ = kill_process_group(pid, signal);
 }
 
-/// Питать разбор строками stdout, пока процесс не выйдет или не кончится срок.
-async fn drain_until_exit(
-    cli: &mut CliProcess,
-    parser: &mut Parser,
-    queue: &mut Option<InputQueue>,
-    limit: Duration,
-) -> bool {
+/// Читать stdout, пока процесс не выйдет или не кончится срок. Строки копятся для
+/// разбора после дочитывания: их события (последний текст, итог хода) нужны журналу.
+async fn drain_until_exit(cli: &mut CliProcess, lines: &mut Vec<String>, limit: Duration) -> bool {
     let start = Instant::now();
     loop {
         match cli.try_wait() {
             Ok(Some(_)) => {
                 // Инструмент может держать чужой stdout и писать в него без конца.
-                let _ = timeout(KILL_DRAIN, drain_available(cli, parser, queue)).await;
+                let _ = timeout(KILL_DRAIN, drain_available(cli, lines)).await;
                 return true;
             }
             // Убран чужой проверкой: процесса нет, остаток stdout уже не прочитать.
@@ -1332,13 +1315,7 @@ async fn drain_until_exit(
             return false;
         }
         match timeout(Duration::from_millis(50), cli.next_line()).await {
-            Ok(StdoutLine::Line(line)) => {
-                for parsed in parser.feed(&line) {
-                    if let Some(queue) = queue.as_mut() {
-                        queue.on_parsed(&parsed);
-                    }
-                }
-            }
+            Ok(StdoutLine::Line(line)) => lines.push(line),
             // Конец stdout отвечает мгновенно, а процесс ещё жив.
             Ok(StdoutLine::Eof) => tokio::time::sleep(Duration::from_millis(50)).await,
             Ok(_) | Err(_) => {}
@@ -1346,37 +1323,21 @@ async fn drain_until_exit(
     }
 }
 
-/// Добрать остаток stdout без разбора событий: процесс умирает, кадры не нужны.
-async fn drain_available(
-    cli: &mut CliProcess,
-    parser: &mut Parser,
-    queue: &mut Option<InputQueue>,
-) {
+/// Добрать остаток stdout вышедшего процесса: в нём последние кадры хода.
+async fn drain_available(cli: &mut CliProcess, lines: &mut Vec<String>) {
     loop {
         match timeout(Duration::from_millis(50), cli.next_line()).await {
-            Ok(StdoutLine::Line(line)) => {
-                for parsed in parser.feed(&line) {
-                    if let Some(queue) = queue.as_mut() {
-                        queue.on_parsed(&parsed);
-                    }
-                }
-            }
+            Ok(StdoutLine::Line(line)) => lines.push(line),
             _ => return,
         }
     }
 }
 
 /// Читать stdout до конца после SIGKILL.
-async fn drain_to_eof(cli: &mut CliProcess, parser: &mut Parser, queue: &mut Option<InputQueue>) {
+async fn drain_to_eof(cli: &mut CliProcess, lines: &mut Vec<String>) {
     loop {
         match cli.next_line().await {
-            StdoutLine::Line(line) => {
-                for parsed in parser.feed(&line) {
-                    if let Some(queue) = queue.as_mut() {
-                        queue.on_parsed(&parsed);
-                    }
-                }
-            }
+            StdoutLine::Line(line) => lines.push(line),
             _ => return,
         }
     }
@@ -1387,6 +1348,14 @@ impl ClaudeCodeAdapter {
         match self.cli.as_ref() {
             Some(cli) => cli.signal(process::Signal::Int),
             None => Err(std::io::Error::other("no cli")),
+        }
+    }
+
+    /// Кадры, дочитанные во время остановки CLI, проходят обычный разбор: последний
+    /// текст, расход и конец хода не должны пропасть из журнала.
+    fn feed_drained(&mut self) {
+        for line in std::mem::take(&mut self.drained) {
+            self.feed(StdoutLine::Line(line));
         }
     }
 
@@ -1962,16 +1931,26 @@ impl Adapter for ClaudeCodeAdapter {
             // с 143), затем срок stop_grace; SIGKILL — только после него. Stdout
             // читается и здесь: CLI на записи в полный pipe сигнал бы не обработал.
             let exited = match mode {
-                CloseMode::Force => false,
+                CloseMode::Force => Ok(false),
                 CloseMode::Graceful => {
-                    drain_until_exit(cli, &mut self.parser, &mut self.queue, grace).await || {
-                        group.signal_member(&member, rustix::process::Signal::TERM)?;
-                        drain_until_exit(cli, &mut self.parser, &mut self.queue, self.stop_grace)
-                            .await
+                    if drain_until_exit(cli, &mut self.drained, grace).await {
+                        Ok(true)
+                    } else {
+                        match group.signal_member(&member, rustix::process::Signal::TERM) {
+                            Ok(_) => {
+                                Ok(drain_until_exit(cli, &mut self.drained, self.stop_grace).await)
+                            }
+                            Err(error) => Err(error),
+                        }
                     }
                 }
             };
-            if !exited {
+            // Дочитанное разбирается при любом исходе остановки, до возможной ошибки.
+            self.feed_drained();
+            let Some(cli) = &mut self.cli else {
+                return Ok(());
+            };
+            if !exited? {
                 group.signal_member(&member, rustix::process::Signal::KILL)?;
                 timeout(grace, cli.wait())
                     .await

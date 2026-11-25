@@ -1505,6 +1505,47 @@ async fn undetermined_interrupt_refuses_the_open_request_to_the_cli() {
     f.close().await;
 }
 
+/// Мягкая остановка посреди хода: stdin закрыт, CLI доделывает шаг и выходит. Кадры,
+/// дочитанные за это время, проходят обычный разбор: последний текст и конец хода с
+/// расходом не должны пропасть из журнала.
+#[tokio::test]
+async fn frames_read_during_a_graceful_stop_still_reach_the_journal() {
+    let id = Uuid::now_v7();
+    let mut f = Fake::new(vec![vec![
+        json!({"type":"stream_event","user_message_uuid":id,"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+        json!("@eof"),
+        json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}),
+        json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"last words"}}}),
+        json!({"type":"stream_event","event":{"type":"content_block_stop","index":0}}),
+        json!({"type":"stream_event","event":{"type":"message_stop"}}),
+        json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":[id],"modelUsage":{}}),
+    ]]);
+    f.start().await;
+    f.send(&tx(id)).await;
+    tokio::time::timeout(WAIT, f.adapter.close(CloseMode::Graceful, &f.group))
+        .await
+        .expect("graceful close in time")
+        .unwrap();
+    f.permit.take();
+    let mut events = vec![];
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), f.adapter.next_event())
+            .await
+            .unwrap_or_else(|_| panic!("the turn end must survive the stop, got {events:?}"));
+        let done = matches!(&event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == id);
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::BlockFinal { text, .. } if text == "last words")),
+        "{events:?}"
+    );
+}
+
 #[tokio::test]
 async fn command_lifecycle_proves_delivery_before_a_slow_first_answer_frame() {
     let id = Uuid::now_v7();
