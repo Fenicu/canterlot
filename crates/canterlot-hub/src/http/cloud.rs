@@ -12,7 +12,7 @@ use super::{
     AppState,
     auth::{IdempotencyKey, Owner},
     error::{ApiError, ErrorCode},
-    extract::ApiPath,
+    extract::{ApiJson, ApiPath},
 };
 use crate::{
     cloud::{
@@ -144,7 +144,7 @@ async fn budget_put(
     State(state): State<AppState>,
     owner: Owner,
     IdempotencyKey(key): IdempotencyKey,
-    Json(body): Json<budget::Update>,
+    ApiJson(body): ApiJson<budget::Update>,
 ) -> Result<Json<budget::BudgetView>, ApiError> {
     let owner_id = owner.owner_id;
     let fingerprint = body.clone();
@@ -225,7 +225,7 @@ async fn propose(
     State(state): State<AppState>,
     owner: Owner,
     IdempotencyKey(key): IdempotencyKey,
-    Json(body): Json<ProposeBody>,
+    ApiJson(body): ApiJson<ProposeBody>,
 ) -> Result<Json<Opened>, ApiError> {
     let Some(cloud) = state.cloud.clone() else {
         return Err(ApiError::new(ErrorCode::InvalidState));

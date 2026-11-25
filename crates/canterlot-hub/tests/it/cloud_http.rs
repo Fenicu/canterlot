@@ -331,6 +331,42 @@ async fn a_delete_replay_never_revokes_the_next_window() {
     assert_eq!(api.list().await["items"][0]["id"], second.to_string());
 }
 
+/// Плохое тело в бюджете и в форме запуска отвечает конвертом ошибки, как остальной API,
+/// а не текстом экстрактора: PWA разбирает ошибку как конверт и читает из него код.
+#[tokio::test]
+async fn a_bad_body_in_cloud_writes_is_answered_with_the_error_envelope() {
+    let api = Api::new(canterlot_hub::testkit::db().await).await;
+    for (method, path) in [
+        (Method::PUT, "/api/v1/cloud/budget"),
+        (Method::POST, "/api/v1/cloud/proposals"),
+    ] {
+        for body in [b"{not json".to_vec(), br#"{"unexpected":1}"#.to_vec()] {
+            let response = api
+                .client
+                .send_raw(
+                    method.clone(),
+                    path,
+                    Some(&Uuid::now_v7().to_string()),
+                    body,
+                )
+                .await;
+            assert_eq!(
+                response.status.as_u16(),
+                400,
+                "{path}: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+            let envelope: Value = serde_json::from_slice(&response.body)
+                .unwrap_or_else(|_| panic!("{path}: the answer is not an error envelope"));
+            assert_eq!(envelope["error"]["code"], "invalid_request", "{path}");
+            assert!(
+                envelope["error"]["correlation_id"].is_string(),
+                "{envelope}"
+            );
+        }
+    }
+}
+
 fn cloud_config(api: &Api) -> CloudConfig {
     toml::from_str(&format!(
         "provider='yandex'\nkey_file='k.json'\nfolder_id='b1gfakefolder000000'\n\
