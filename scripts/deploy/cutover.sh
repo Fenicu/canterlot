@@ -441,9 +441,57 @@ db_identity_check() {
     fi
     log "database identity: ${HUB_PG_DB} on ${HUB_PG_SOCKET} has system identifier ${sys} as expected and ${n} connection(s) of the running hub (user ${HUB_PG_USER}); dump and restore use the same socket and database"
 }
+# Полный путь: новые миграции накатит хаб цели, поэтому версии, которых в базе ещё нет, — норма. Но
+# расхождение уже применённых миграций с бинарём цели (другая контрольная сумма, версия, которой
+# в бинаре нет, неуспешная строка) sqlx не прощает: хаб после flip вышел бы с migration_error при
+# остановленном воркере. Сверка та же, что у путей с пропуском, и тоже до первой записи; токен при
+# расхождении не выдаётся. Манифест не напечатан — сверить нечем, это тоже отказ.
+applied_migrations_check() {
+    local manifest rows cmp why="" code="" saved_phase="${PHASE}"
+    # dry-run до заливки цели: бинаря ещё нет, сверка не выполнена — тот же пропуск NOT RUN, что у
+    # остальных проверок цели (без --allow-skipped dry-run не проходит). Боевой прогон и репетиция
+    # сюда без залитой цели не доходят: target-check отказывает раньше.
+    if [ "${DRY_RUN}" = "1" ] && ! ssh_hub "test -x '${HUB_RELEASES}/${SHA}/bin/canterlot-hub'"; then
+        log "NOT RUN: applied migrations vs the target hub manifest (hub ${SHA} is not staged)"
+        # С --allow-skipped пропуск признан явно, как у target-check; без него dry-run не проходит.
+        [ "${ALLOW_SKIPPED}" = "1" ] || NOT_RUN=1
+        return 0
+    fi
+    PHASE="eligibility"
+    if ! manifest="$(ssh_hub "runuser -u '${HUB_SERVICE_USER}' -- timeout ${MANIFEST_TIMEOUT} '${HUB_RELEASES}/${SHA}/bin/canterlot-hub' migrations manifest --json")"; then
+        why="the target hub binary cannot print its migrations manifest (as ${HUB_SERVICE_USER}, within ${MANIFEST_TIMEOUT} s): the applied migrations cannot be compared with it"
+    else
+        rows="$(hub_psql "select version::text || ' ' || encode(checksum, 'hex') || ' ' || success::int::text from _sqlx_migrations order by version")"
+        if ! cmp="$(python3 -I "${SCRIPT_DIR}/migration-compare.py" "${manifest}" "${rows}" 2>&1)"; then
+            why="the migrations manifest could not be compared with the database: ${cmp}"
+        else
+            case "${cmp}" in
+                equal) log "applied migrations: the live database equals the target hub manifest (same versions and checksums, all successful)" ;;
+                pending*) log "applied migrations: every applied migration matches the target hub binary (same checksums, all successful); pending ${cmp#pending } (the new hub applies them after the flip)" ;;
+                *)
+                    code="migration_mismatch"
+                    why="the live database and the target hub binary disagree on migrations (${cmp#mismatch }): manual review, not a release" ;;
+            esac
+        fi
+    fi
+    if [ -n "${why}" ]; then
+        if [ "${DRY_RUN}" = "1" ]; then
+            # dry-run записывает отказ и показывает остальные проверки; токена при жёсткой ошибке нет.
+            hard_code "${code:-unknown}" "${why}"
+        else
+            fail_mark
+            [ -z "${code}" ] || fail_code "${code}"
+            die_after "${why}: refusing before any write"
+        fi
+    fi
+    PHASE="${saved_phase}"
+}
 skip_eligibility() {
     local live_full target_full fp reh vz tb manifest rows cmp n rel_last man_max saved_phase="${PHASE}"
-    [ "${FAST}" = "1" ] || [ "${SKIP_VZDUMP}" = "1" ] || return 0
+    if [ "${FAST}" != "1" ] && [ "${SKIP_VZDUMP}" != "1" ]; then
+        applied_migrations_check
+        return 0
+    fi
     if [ "${FAST}" = "1" ]; then ELIG_WHAT="the fast path"; else ELIG_WHAT="to skip the vzdump"; fi
     PHASE="eligibility"
     local comp now base

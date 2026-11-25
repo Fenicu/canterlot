@@ -160,6 +160,43 @@ check_mismatch "version 41 failed" "failed migration rows in the database: 41"
 finish_fast
 case_end
 
+# Полный путь (как раз тот, где менялись миграции) сверяет применённые миграции с бинарём цели так
+# же: новая версия в бинаре — норма, а другая контрольная сумма у применённой — отказ до первой
+# записи. Иначе репетиция выдаёт токен, а хаб после flip выходит с migration_error.
+case_begin "the full path accepts a pending migration and hard-stops on an applied one whose checksum differs"
+setup_fast fullsum migration
+fast_to_full_migration
+if fcut "${SHA_NEW}" --rehearse --result "${FAKE_ROOT}/reh.result"; then case_ok "pending only: the plain rehearsal passes"; else case_fail "pending only: the plain rehearsal failed"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
+FULL_TOKEN="$(result_of "${FAKE_ROOT}/reh.result" token)"
+[ -n "${FULL_TOKEN}" ] && case_ok "pending only: a token is issued" || case_fail "pending only: no token"
+grep -q 'migrations manifest' "${FAKE_ROOT}/state/ssh-cmds.log" && case_ok "the full path asks the target binary for its manifest" || case_fail "the full path never asked for the manifest"
+assert_contains "${FAKE_ROOT}/cutover.log" "pending 41" "the pending version is named, not refused"
+for v in $(seq 1 40); do if [ "${v}" = 7 ]; then printf '7 e7 1\n'; else printf '%s c%s 1\n' "${v}" "${v}"; fi; done >"${FAKE_ROOT}/state/db-migrations.txt"
+: >"${FAKE_ROOT}/state/ssh-cmds.log"
+for mode in "${SHA_NEW} --rehearse" "${SHA_NEW} --dry-run" "--execute ${SHA_NEW} --confirm ${FULL_TOKEN}"; do
+    what="${mode%% --confirm*}"
+    # shellcheck disable=SC2086 # режим — несколько слов
+    if fcut ${mode} --result "${FAKE_ROOT}/x.result"; then case_fail "${what}: exit 0 with a changed applied migration"; else case_ok "${what}: refused"; fi
+    # dry-run записывает отказ и докладывает остальные проверки (фаза dry-run); репетиция и боевой
+    # прогон останавливаются здесь же, в фазе eligibility.
+    want_phase=eligibility
+    case "${mode}" in *--dry-run*) want_phase=dry-run ;; esac
+    assert_eq "$(result_of "${FAKE_ROOT}/x.result" phase)/$(result_of "${FAKE_ROOT}/x.result" fail_codes)/$(result_of "${FAKE_ROOT}/x.result" token)" \
+        "${want_phase}/migration_mismatch/" "${what}: phase ${want_phase}, code migration_mismatch, no token"
+    assert_contains "${FAKE_ROOT}/cutover.log" "checksum differs from the target binary: 7" "${what}: reason printed"
+done
+no_writes_yet "full path, changed applied migration"
+# Бинарь цели не печатает манифест: сверить нечем, полный путь тоже отказывает до записи.
+rm -f "${FAKE_ROOT}/state/db-migrations.txt"  # lint: local-temp
+: >"${FAKE_ROOT}/state/manifest-hang"
+export MANIFEST_TIMEOUT=1
+if fcut "${SHA_NEW}" --rehearse --result "${FAKE_ROOT}/x.result"; then case_fail "the plain rehearsal passed with a hanging manifest"; else case_ok "a hanging manifest fails the plain rehearsal"; fi
+unset MANIFEST_TIMEOUT
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" phase)/$(result_of "${FAKE_ROOT}/x.result" token)" "eligibility/" "hanging manifest: phase eligibility, no token"
+assert_contains "${FAKE_ROOT}/cutover.log" "cannot print its migrations manifest" "hanging manifest: reason printed"
+finish_fast
+case_end
+
 case_begin "--fast refuses a database that is not the one the running hub is connected to"
 setup_fast fastcluster other
 export FAKE_HUB_CONNS=0

@@ -50,7 +50,8 @@ make_target_dist() {
     local d="${FAKE_ROOT}/dist/${TARGET}"
     mkdir -p "${d}/hub/bin" "${d}/worker/bin" "${d}/synthetic/bin" "${d}/web/_app" "${d}/web/icons"
     # shellcheck disable=SC2016 # format string is intentional
-    printf '#!/bin/sh\ncase "$1" in\n  --version) echo "canterlot-hub 1.17.0" ;;\n  openapi) cat "%s" ;;\n  *) exit 99 ;;\nesac\n' "${REPO_ROOT}/docs/api/openapi.json" >"${d}/hub/bin/canterlot-hub"
+    # migrations manifest: версии 1..42 (как migrations_last цели) с суммами c<N>, как у фейковой базы.
+    printf '#!/bin/sh\ncase "$1" in\n  --version) echo "canterlot-hub 1.17.0" ;;\n  openapi) cat "%s" ;;\n  migrations) printf "{\\"migrations\\":["; i=1; while [ "$i" -le 42 ]; do [ "$i" -le 1 ] || printf ","; printf "{\\"checksum\\":\\"c%%s\\",\\"description\\":\\"m\\",\\"version\\":%%s}" "$i" "$i"; i=$((i + 1)); done; printf "]}\\n" ;;\n  *) exit 99 ;;\nesac\n' "${REPO_ROOT}/docs/api/openapi.json" >"${d}/hub/bin/canterlot-hub"
     # shellcheck disable=SC2016 # format string is intentional
     printf '#!/bin/sh\ncase "$1" in --version) echo "canterlot-worker 1.17.0";; capabilities) printf "capability claude_histories_v1\\ncapability path_probe_v1\\nharness claude_code\\nharness codex\\n";; *) exit 99;; esac\n' >"${d}/worker/bin/canterlot-worker"
     # shellcheck disable=SC2016 # format string is intentional
