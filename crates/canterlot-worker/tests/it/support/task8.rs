@@ -209,7 +209,8 @@ async fn seed_execution(
         .unwrap();
     manager.handle(command, accept).await.unwrap();
     manager.on_hub_session(Default::default());
-    timeout(Duration::from_secs(10), async {
+    // Запуск сопровождения пишет на диск десятки раз; под fsync соседей это дольше 10 с.
+    timeout(Duration::from_secs(30), async {
         loop {
             let batch = rx.recv().await.unwrap();
             if batch.records.iter().any(|r| matches!(r.body.as_ref().and_then(|b| b.body.as_ref()), Some(Body::ExecutionState(f)) if f.state == "running")) { break; }
@@ -270,12 +271,27 @@ async fn reconcile_report_lists_nonterminal_executions_once_per_connection() {
 #[cfg(feature = "synthetic-adapter")]
 #[tokio::test]
 async fn hello_lists_only_unretired_sj_journals() {
+    hello_after_the_journal_closed(false).await;
+}
+
+/// Освобождение после закрытия журнала идёт через подтверждение, выход сопровождения и
+/// удаление каталога, каждое с записью на диск. Когда fsync соседей на общем диске стоит
+/// по полсекунды, это дольше любой паузы теста: здесь сопровождение замирает на секунду.
+#[cfg(feature = "synthetic-adapter")]
+#[tokio::test]
+async fn hello_lists_only_unretired_sj_journals_when_the_release_is_slow() {
+    hello_after_the_journal_closed(true).await;
+}
+
+#[cfg(feature = "synthetic-adapter")]
+async fn hello_after_the_journal_closed(slow_release: bool) {
+    use rustix::process::{Pid, Signal, kill_process};
     let (mut hub, store) = ProtocolHub::start(Behavior {
         capabilities: vec!["exec_v1".into()],
         ..Default::default()
     })
     .await;
-    let _guard = process_guard::ProcessGuard::new(hub.config.data_dir.parent().unwrap());
+    let guard = process_guard::ProcessGuard::new(hub.config.data_dir.parent().unwrap());
     execution_config(&mut hub.config);
     let execution = Uuid::now_v7();
     let store = seed_execution(&hub.config, store, execution, Uuid::now_v7()).await;
@@ -315,7 +331,34 @@ async fn hello_lists_only_unretired_sj_journals() {
             }
         }
     }
-    sleep(Duration::from_millis(200)).await;
+    if slow_release {
+        let stopped: Vec<u32> = guard
+            .members()
+            .into_iter()
+            .filter(|member| guard.signal(*member, Signal::STOP))
+            .map(|(pid, _)| pid)
+            .collect();
+        tokio::spawn(async move {
+            sleep(Duration::from_secs(1)).await;
+            for pid in stopped {
+                let _ = kill_process(Pid::from_raw(pid as i32).unwrap(), Signal::CONT);
+            }
+        });
+    }
+    // Каталог исполнения удаляется последним шагом освобождения, сразу перед тем, как журнал
+    // уходит из приветствия. Обрыв до этого застал бы журнал ещё не снятым.
+    let exec_dir = hub
+        .config
+        .data_dir
+        .join("executions")
+        .join(execution.to_string());
+    timeout(Duration::from_secs(20), async {
+        while exec_dir.exists() {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("execution released");
     hub.fail(tonic::Status::unavailable("test retirement"))
         .await;
     wait_backoff(&mut state).await;

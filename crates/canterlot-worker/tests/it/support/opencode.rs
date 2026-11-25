@@ -33,34 +33,43 @@ fn state(pid: u32) -> Option<char> {
 
 impl Fake {
     pub fn new(script: Script) -> Self {
-        Self::build(script, false)
+        Self::build(script, |_| String::new())
     }
 
     /// Первый `serve` завершается сразу: так проверяется повторная проба после сбоя.
     pub fn failing_first(script: Script) -> Self {
-        Self::build(script, true)
+        Self::build(script, |dir| {
+            let marker = dir.join("first-serve-failed");
+            format!(
+                "if [ \"$1\" = serve ] && [ ! -e '{}' ]; then : > '{}'; exit 1; fi\n",
+                marker.display(),
+                marker.display()
+            )
+        })
     }
 
-    fn build(mut script: Script, fail_first: bool) -> Self {
+    /// `serve` молчит `delay` до строки готовности, как сервер на машине, где fsync
+    /// соседей задерживает каждую запись на секунды.
+    pub fn slow_serve(script: Script, delay: Duration) -> Self {
+        Self::build(script, |_| {
+            format!(
+                "if [ \"$1\" = serve ]; then sleep {}; fi\n",
+                delay.as_secs_f64()
+            )
+        })
+    }
+
+    fn build(mut script: Script, prelude: impl FnOnce(&std::path::Path) -> String) -> Self {
         let dir = TempDir::new().unwrap();
         let log = dir.path().join("requests.jsonl");
         script.log = Some(log.clone());
         let path = dir.path().join("script.json");
         fs::write(&path, serde_json::to_vec(&script).unwrap()).unwrap();
-        let failed_marker = dir.path().join("first-serve-failed");
-        let fail = if fail_first {
-            format!(
-                "if [ \"$1\" = serve ] && [ ! -e '{}' ]; then : > '{}'; exit 1; fi\n",
-                failed_marker.display(),
-                failed_marker.display()
-            )
-        } else {
-            String::new()
-        };
+        let prelude = prelude(dir.path());
         let exe = fake_exec::write_executable(
             &dir.path().join("opencode"),
             format!(
-                "#!/bin/sh\n{fail}exec '{}' --script '{}' \"$@\"\n",
+                "#!/bin/sh\n{prelude}exec '{}' --script '{}' \"$@\"\n",
                 env!("CARGO_BIN_EXE_fake-opencode"),
                 path.display()
             ),
