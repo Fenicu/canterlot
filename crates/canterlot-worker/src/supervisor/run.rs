@@ -2178,10 +2178,15 @@ impl Supervisor {
             supervisor.send(ack(command.command_id.clone(), attempt, "steer_deferred"));
             Ok(())
         };
+        // Журнал закрыт: запись в SJ невозможна, итог фиксирует воркер в CJ по ответу,
+        // как для любой команды закрытого исполнения.
+        if matches!(self.lifecycle, Lifecycle::Draining { .. }) {
+            self.send(ack(command.command_id.clone(), attempt, "execution_closed"));
+            return Ok(());
+        }
         // Проверка в порядке дешевизны: поколение, дубли, затем состояние хода.
         if command.execution_id != self.spec.execution_id.to_string()
             || command.execution_generation != self.spec.generation
-            || matches!(self.lifecycle, Lifecycle::Draining { .. })
         {
             return deferred(self, "generation_closed");
         }
@@ -4647,6 +4652,45 @@ mod tests {
             body,
             Body::InputAccepted(accepted) if accepted.command_id == key.0.to_string()
         )));
+    }
+
+    /// Журнал закрыт (`finish_stop` поставил терминальные записи в очередь), а хаб ещё
+    /// видит прежнее состояние и шлёт steer. Ответ идёт по IPC, как любой команде закрытого
+    /// исполнения, и итог фиксирует воркер в CJ: в закрытый SJ ничего не дописывается,
+    /// и сопровождение не падает, теряя очередь с итогом исполнения.
+    #[tokio::test]
+    async fn a_late_steer_after_the_journal_closed_is_answered_without_touching_the_sj() {
+        let (_dir, mut supervisor, _state) = test_supervisor();
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        supervisor
+            .begin_stop(StopCause::StorageFailure, false)
+            .unwrap();
+        supervisor.adapter_exited = true;
+        supervisor.finish_stop().unwrap();
+        assert!(matches!(supervisor.lifecycle, Lifecycle::Draining { .. }));
+        let (tx, mut rx) = mpsc::channel(8);
+        supervisor.conns.insert(0, Conn { tx, attached: true });
+        supervisor.attached = Some(0);
+        let next = supervisor.sj.next_seq();
+        let deliver = steer_deliver(&supervisor, first.0, "too late");
+        let key = steer_key(&deliver);
+        supervisor.on_steer(deliver).await.unwrap();
+        assert_eq!(supervisor.sj.next_seq(), next, "nothing is appended");
+        let reply = rx.try_recv().expect("the steer is answered");
+        assert!(matches!(
+            reply.msg,
+            Some(up::Msg::DeliverAck(ack))
+                if ack.command_id == key.0.to_string()
+                    && ack.dispatch_attempt == key.1
+                    && ack.result == "execution_closed"
+        ));
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(bodies.iter().any(|body| matches!(
+            body,
+            Body::ExecutionState(fact) if fact.outcome == "storage_failure"
+        )));
+        assert!(matches!(bodies.last(), Some(Body::JournalClosed(_))));
     }
 
     #[tokio::test]
