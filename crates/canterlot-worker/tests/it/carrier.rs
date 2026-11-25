@@ -59,14 +59,34 @@ struct FakeControl {
     installation_id: Uuid,
     restore_generation: Uuid,
     token: String,
-    requests: Mutex<Vec<(Uuid, bool)>>,
+    requests: Mutex<Vec<RecordedRequest>>,
     observations: Mutex<Vec<Observation>>,
     refuse: Mutex<bool>,
 }
 
+struct RecordedRequest {
+    machine_id: Uuid,
+    reset: bool,
+    at: std::time::Instant,
+}
+
 impl FakeControl {
     fn requests(&self) -> Vec<(Uuid, bool)> {
-        self.requests.lock().unwrap().clone()
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|recorded| (recorded.machine_id, recorded.reset))
+            .collect()
+    }
+
+    fn request_times(&self) -> Vec<std::time::Instant> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|recorded| recorded.at)
+            .collect()
     }
 
     fn observations(&self) -> Vec<Observation> {
@@ -81,10 +101,11 @@ impl RunnerControl for FakeControl {
         machine_id: Uuid,
         reset_local_state: bool,
     ) -> Result<RunnerCredentials, TokenError> {
-        self.requests
-            .lock()
-            .unwrap()
-            .push((machine_id, reset_local_state));
+        self.requests.lock().unwrap().push(RecordedRequest {
+            machine_id,
+            reset: reset_local_state,
+            at: std::time::Instant::now(),
+        });
         WAKE.notify_waiters();
         if *self.refuse.lock().unwrap() {
             return Err(TokenError::Refused(carrier::TokenRefusal::Revoked));
@@ -623,26 +644,42 @@ async fn a_fatal_exit_asks_for_a_token_once_per_pause_and_does_not_spin() {
             .unwrap_or(false)
     })
     .await;
-    // Второй запрос приходит после паузы; за следующие 15 наблюдений (около пяти кругов
-    // присмотра) третьего нет: пауза растёт до 4 с. Без паузы запрос шёл бы каждый круг.
+    // Контракт — не больше одного запроса за паузу: пауза не короче `token_retry_min`,
+    // растёт к `token_retry_max`, а два живых круга подряд сбрасывают её к минимуму.
+    // Считать круги присмотра нельзя: под нагрузкой воркер умирает медленно, успевает
+    // побыть живым и сбросить паузу, и третий запрос законно приходит раньше максимума.
+    // Без паузы запрос шёл бы каждый круг (около 300 мс), поэтому зазоры не короче
+    // минимума с запасом отличают паузу от вращения при любой скорости кругов.
     until("the second token request", || {
         fixture.control.requests().len() >= 2
     })
     .await;
-    let seen = fixture.control.observations().len();
-    until("more supervision rounds", || {
-        fixture.control.observations().len() >= seen + 15
+    let at_second = fixture.control.observations().len();
+    until("the third token request", || {
+        fixture.control.requests().len() >= 3
     })
     .await;
     let requests = fixture.control.requests();
+    let times = fixture.control.request_times();
     assert!(
-        requests.len() == 2,
-        "token requests must follow the pause, got {requests:?}"
+        requests.len() >= 3 && times.len() >= 3,
+        "the carrier keeps asking after every pause, got {requests:?}"
+    );
+    let floor = test_timings().token_retry_min - Duration::from_secs(1);
+    let gaps: Vec<Duration> = times.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    assert!(
+        gaps.iter().all(|gap| *gap >= floor),
+        "token requests must follow the pause, gaps were {gaps:?}"
     );
     assert!(requests[0].1, "the first request resets the new state dir");
     assert!(
-        !requests[1].1,
-        "a revoked credential needs a new token, not a state reset"
+        requests[1..].iter().all(|(_, reset)| !reset),
+        "a revoked credential needs a new token, not a state reset: {requests:?}"
+    );
+    // Присмотр не стоял: между вторым и третьим запросом круги шли.
+    assert!(
+        fixture.control.observations().len() >= at_second + 5,
+        "supervision rounds must continue during the pause"
     );
 }
 
