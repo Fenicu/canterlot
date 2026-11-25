@@ -213,6 +213,76 @@ fn torn_tail_below_the_stored_ack_is_sealed() {
 }
 
 #[test]
+fn corrupted_length_in_the_middle_of_the_last_segment_is_sealed() {
+    let dir = TempDir::new().unwrap();
+    let mut journal = create(dir.path());
+    for payload in [b"a", b"b", b"c"] {
+        journal.append(payload).unwrap();
+    }
+    journal.ack(1).unwrap();
+    drop(journal);
+    let path = segments(dir.path()).remove(0);
+    let mut bytes = fs::read(&path).unwrap();
+    // Длина второй записи 1 становится 65 и уходит за конец файла, третья
+    // запись цела. Это порча, а не недописанный append: номера 2 и 3 уже выданы.
+    let second = RECORD_HEADER_BYTES + 1;
+    bytes[second] ^= 0x40;
+    fs::write(&path, &bytes).unwrap();
+    let (mut journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert_eq!(journal.last_seq(), 1);
+    assert_eq!(report.corrupted_tail.unwrap().from_seq, 2);
+    assert_eq!(journal.is_sealed(), Some(2));
+    assert!(matches!(
+        journal.append(b"replacement"),
+        Err(JournalError::Sealed { from_seq: 2 })
+    ));
+}
+
+#[test]
+fn corrupted_length_of_the_last_complete_record_is_sealed() {
+    let dir = TempDir::new().unwrap();
+    let mut journal = create(dir.path());
+    journal.append(b"one").unwrap();
+    journal.append(b"two").unwrap();
+    drop(journal);
+    let path = segments(dir.path()).remove(0);
+    let mut bytes = fs::read(&path).unwrap();
+    // Последняя запись дописана целиком, но её длина испорчена в большую
+    // сторону: CRC сходится по всем байтам до конца файла, append вернулся.
+    let second = RECORD_HEADER_BYTES + 3;
+    bytes[second] ^= 0x10;
+    fs::write(&path, &bytes).unwrap();
+    let (mut journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert_eq!(journal.last_seq(), 1);
+    assert_eq!(report.corrupted_tail.unwrap().from_seq, 2);
+    assert_eq!(journal.is_sealed(), Some(2));
+    assert!(matches!(
+        journal.append(b"replacement"),
+        Err(JournalError::Sealed { from_seq: 2 })
+    ));
+}
+
+#[test]
+fn cut_header_with_a_foreign_sequence_is_sealed() {
+    let dir = TempDir::new().unwrap();
+    let mut journal = create(dir.path());
+    journal.append(b"one").unwrap();
+    drop(journal);
+    let path = segments(dir.path()).remove(0);
+    // Полный заголовок с номером, который append здесь выдать не мог.
+    let mut header = [0u8; RECORD_HEADER_BYTES];
+    header[..4].copy_from_slice(&64u32.to_le_bytes());
+    header[8..].copy_from_slice(&7u64.to_le_bytes());
+    let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(&header).unwrap();
+    file.write_all(b"xy").unwrap();
+    file.sync_all().unwrap();
+    let (journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert_eq!(report.corrupted_tail.unwrap().from_seq, 2);
+    assert_eq!(journal.is_sealed(), Some(2));
+}
+
+#[test]
 fn oversized_length_at_the_tail_is_sealed() {
     let dir = TempDir::new().unwrap();
     let mut journal = create(dir.path());

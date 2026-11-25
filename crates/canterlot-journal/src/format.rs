@@ -61,7 +61,8 @@ pub(crate) fn write_record(writer: &mut impl Write, seq: u64, payload: &[u8]) ->
 pub(crate) enum Scanned {
     Record(Record),
     /// Запись оборвана концом данных: заголовок неполон либо payload короче
-    /// объявленной допустимой длины. Так выглядит незавершённый append.
+    /// объявленной допустимой длины. Так выглядит незавершённый append, но так же
+    /// выглядит и испорченная длина: различает их [`cut_is_torn`].
     Cut,
     /// Запись цела по длине, но негодна: длина сверх предела или неверная CRC32C.
     Invalid,
@@ -92,6 +93,42 @@ pub(crate) fn scan_record(
         return Ok(Scanned::Invalid);
     }
     Ok(Scanned::Record(Record { seq, payload }))
+}
+
+/// Доказуемо ли оборванный хвост — недописанный append, а не порча длины.
+/// `tail` — байты от начала оборванной записи до конца файла, `expected_seq` —
+/// номер, который append выдал бы этой записи. Незавершённый append оставляет
+/// префикс своего пакета: заголовок с ожидаемым номером и неполный payload, за
+/// которым ничего нет. Если CRC сходится по всем байтам до конца файла, запись
+/// дописана и испорчена только длина; если дальше лежит целая запись с номером
+/// не меньше ожидаемого, append вернулся и его номера уже выданы. Обе картины и
+/// чужой номер в заголовке — порча, хвост нужно запечатать.
+pub(crate) fn cut_is_torn(tail: &[u8], expected_seq: u64, max_record_bytes: u32) -> bool {
+    let header_bytes = RECORD_HEADER_BYTES as usize;
+    if tail.len() < header_bytes {
+        return true;
+    }
+    let crc = u32::from_le_bytes(tail[4..8].try_into().unwrap());
+    let seq = u64::from_le_bytes(tail[8..16].try_into().unwrap());
+    if seq != expected_seq || checksum(seq, &tail[header_bytes..]) == crc {
+        return false;
+    }
+    // Записей после оборванной не больше, чем заголовков помещается в хвост.
+    let max_seq = expected_seq.saturating_add((tail.len() / header_bytes) as u64);
+    !(header_bytes..=tail.len() - header_bytes).any(|at| {
+        let header = &tail[at..at + header_bytes];
+        let seq = u64::from_le_bytes(header[8..].try_into().unwrap());
+        let len = u32::from_le_bytes(header[..4].try_into().unwrap());
+        if !(expected_seq..=max_seq).contains(&seq)
+            || len > max_record_bytes
+            || len as usize > tail.len() - at - header_bytes
+        {
+            return false;
+        }
+        let crc = u32::from_le_bytes(header[4..8].try_into().unwrap());
+        let start = at + header_bytes;
+        checksum(seq, &tail[start..start + len as usize]) == crc
+    })
 }
 
 pub(crate) fn read_record(

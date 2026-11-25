@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ use crate::{CorruptedTail, JournalError, Record};
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ScanStop {
     pub offset: u64,
-    /// Запись оборвана концом файла (незавершённый append), а не испорчена.
+    /// Запись доказуемо оборвана незавершённым append, а не испорчена.
     pub cut: bool,
 }
 
@@ -72,7 +72,15 @@ impl Segment {
         while offset < bytes {
             let record = match format::scan_record(&mut file, bytes - offset, max_record_bytes)? {
                 Scanned::Record(record) => record,
-                Scanned::Cut => return Ok((segment, stop(offset, true))),
+                Scanned::Cut => {
+                    // Хвост меньше заголовка и предела записи: читается целиком.
+                    let mut tail = Vec::new();
+                    file.seek(SeekFrom::Start(offset))?;
+                    file.read_to_end(&mut tail)?;
+                    let expected = last_valid_seq.checked_add(1).unwrap_or(u64::MAX);
+                    let torn = format::cut_is_torn(&tail, expected, max_record_bytes);
+                    return Ok((segment, stop(offset, torn)));
+                }
                 Scanned::Invalid => return Ok((segment, stop(offset, false))),
             };
             if last_valid_seq.checked_add(1) != Some(record.seq) {
