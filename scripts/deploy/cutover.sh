@@ -1189,9 +1189,23 @@ recover_before_hub_flip() {
     HUB_BACK="untouched"
     if [ "${HUB_STOP_ISSUED}" = "1" ]; then
         log "STOP before hub flip (phase ${PHASE}): the hub was stopped for the dump and never flipped, DB untouched; starting the hub on ${PREV_HUB_SHA}, then the worker"
-        run_write "start hub on its previous release" hub_locked 'systemctl start "$1"' "${HUB_UNIT}" || log "hub start command failed: needs the owner loudly"
+        # Сверка ссылки и старт — одно действие под замком хоста: юнит запускает то, на что ссылка
+        # указывает сейчас, и ссылка, переставленная руками после стопа, подняла бы другой бинарь с
+        # его миграциями, а readyz записался бы как возвращение прежнего хаба. Не та ссылка — код 3,
+        # хаб не стартует, нужен владелец.
         HUB_BACK="down"
+        HUB_START_RC=0
+        HUB_START_OUT="$(run_write "start hub on its previous release" hub_locked \
+            'l="$(readlink "$1")"; if [ "${l}" != "releases/$2" ]; then printf "%s\n" "${l:-unreadable}"; exit 3; fi; systemctl start "$3"' \
+            "${HUB_CURRENT}" "${PREV_HUB_SHA}" "${HUB_UNIT}")" || HUB_START_RC=$?
+        if [ "${HUB_START_RC}" = "3" ]; then
+            HUB_BACK="moved"
+            log "hub link is ${HUB_START_OUT}, not releases/${PREV_HUB_SHA}: NOT starting the hub on it (someone changed the link after the stop); needs the owner loudly"
+        elif [ "${HUB_START_RC}" != "0" ]; then
+            log "hub start command failed (exit ${HUB_START_RC}): needs the owner loudly"
+        fi
         for _ in $(seq 1 "${READYZ_POLLS:-30}"); do
+            [ "${HUB_BACK}" != "moved" ] || break
             HUB_BACK_READYZ="$(ssh_hub "curl -fsS -m 2 'http://${HUB_IP}:8080/readyz'" 2>/dev/null)" || HUB_BACK_READYZ=""
             if [ "${HUB_BACK_READYZ}" = '{"status":"ok"}' ]; then
                 HUB_BACK="up"
@@ -1201,6 +1215,8 @@ recover_before_hub_flip() {
         done
         if [ "${HUB_BACK}" = "up" ]; then
             log "hub is back on its previous release ${PREV_HUB_SHA} (readyz ok); the database is the one it ran on"
+        elif [ "${HUB_BACK}" = "moved" ]; then
+            log "hub left stopped: its link is ${HUB_START_OUT}, the start command in the report below checks the link first"
         else
             log "hub did NOT come back on ${PREV_HUB_SHA} (no readyz ok): needs the owner loudly"
         fi
@@ -1239,7 +1255,7 @@ recover_before_hub_flip() {
         log "worker was not active before the run; left stopped"
     fi
     # Восстановление полное, только если и остановленный под дамп хаб снова отвечает.
-    if [ "${HUB_BACK}" = "down" ]; then RESULT_RECOVERY="needs_owner"; fi
+    if [ "${HUB_BACK}" = "down" ] || [ "${HUB_BACK}" = "moved" ]; then RESULT_RECOVERY="needs_owner"; fi
     release_reservations
     report_and_stop
     write_result failed_before_flip 1

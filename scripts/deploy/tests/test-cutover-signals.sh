@@ -455,5 +455,41 @@ assert_contains "${FAKE_ROOT}/cutover.recovery.log" "STOP before hub flip" "the 
 teardown_case
 case_end
 
+# --- Крючок после стопа хаба: $1 — тело крючка (выполняется в bash), затем прогон в фоне ---
+run_cutover_after_hub_stop() {
+    cat >"${FAKE_ROOT}/stop-hook.sh" <<EOF
+#!/usr/bin/env bash
+exec >/dev/null 2>&1
+$1
+EOF
+    # shellcheck disable=SC2016 # буквальный текст удалённой команды стопа хаба, а не раскрытие
+    export FAKE_SSH_AFTER_CMD='systemctl stop "$1"' FAKE_SSH_AFTER_NTH=1 FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/stop-hook.sh"
+    bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "$(confirm_for "${SHA_NEW}")" \
+        --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" \
+        --result "${FAKE_ROOT}/cutover.result" >"${FAKE_ROOT}/cutover.log" 2>&1 &
+    CUTOVER_PID=$!
+    printf '%s\n' "${CUTOVER_PID}" >"${FAKE_ROOT}/state/cutover.pid"
+    RC=0; wait "${CUTOVER_PID}" || RC=$?
+    unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_NTH FAKE_SSH_AFTER_HOOK
+}
+
+# --- Ссылку хаба переставили между стопом под дамп и восстановлением до flip ---
+# Старт по сохранённому SHA запустил бы юнит по фактической ссылке: другой бинарь, его миграции,
+# а readyz записался бы как возвращение прежнего хаба. Сверка ссылки и старт — одно действие под
+# замком хоста; расхождение — хаб не стартует, needs_owner.
+case_begin "the hub link moved before the pre-flip recovery: the hub is not started on it"
+setup_cutover linkmoved
+run_cutover_after_hub_stop "ln -sfn 'releases/${SHA_NEW}' '${HUB_CURRENT}'; kill -TERM \"\$(cat '${FAKE_ROOT}/state/cutover.pid')\""
+assert_eq "${RC}" "1" "exit 1"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "failed_before_flip" "result file: failed_before_flip"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" recovery)" "needs_owner" "result file: needs_owner"
+hub_is "${SHA_NEW}" && case_ok "the moved link is left as found" || case_fail "the link was changed back"
+FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub \
+    && case_fail "the hub was started on the moved link" || case_ok "the hub is not started on the moved link"
+assert_contains "${FAKE_ROOT}/cutover.log" "NOT starting the hub" "the refusal is named"
+assert_contains "${FAKE_ROOT}/cutover.log" "releases/${SHA_NEW}" "the actual link is named"
+teardown_case
+case_end
+
 printf 'cutover-signals harness: %s passed, %s failed (cumulative)\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]
