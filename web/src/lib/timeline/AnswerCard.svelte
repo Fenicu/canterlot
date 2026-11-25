@@ -270,4 +270,14 @@
   h3 { margin: var(--s0); font-size: var(--fs-body); font-weight: var(--weight-semibold); }
   .incomplete { margin: 0; color: var(--warning); font-size: var(--fs-sm); }
   .more { align-self: flex-start; min-height: var(--target); padding-inline: var(--s6); color: var(--accent-link); font-size: var(--fs-sm); }
+  /* Под мышью строки карточки стоят вплотную: без своих плашек зазор между ними не нужен.
+     Абзацы и живое окно держат свои поля, чтобы не слипаться со строками, подпись ниже цели касания. */
+  @media (hover: hover) and (pointer: fine) {
+    .card { gap: var(--s0); }
+    .entry:has(> :global(.text)) { margin-block: var(--s3); }
+    .live-fold { margin-block: var(--s2); }
+    .byline { min-height: var(--row-footer); margin-top: var(--s0); }
+    .byline :global(button) { min-width: var(--row-footer); min-height: var(--row-footer); }
+    .more { min-height: var(--row); }
+  }
 </style>

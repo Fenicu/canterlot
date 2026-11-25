@@ -175,7 +175,7 @@
 	.breadcrumb, .lane-intro, .lane-footer {
 		box-sizing: border-box;
 		width: calc(100% - 2 * var(--gutter));
-		max-width: calc(var(--reading-max) - 2 * var(--gutter));
+		max-width: calc(var(--feed-max) - 2 * var(--gutter));
 		margin-inline: auto;
 	}
 	.breadcrumb {

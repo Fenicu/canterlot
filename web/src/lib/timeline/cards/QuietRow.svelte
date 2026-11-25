@@ -61,4 +61,10 @@
   .word[data-tone='danger'] { color: var(--danger); }
   .fold { display: grid; grid-template-rows: 1fr; }
   .rows { display: flex; flex-direction: column; gap: var(--s1); min-height: 0; min-width: 0; overflow: hidden; }
+  /* Под мышью строка той же высоты, что строка вызова, и подсвечивается при наведении. */
+  @media (hover: hover) and (pointer: fine) {
+    .head { min-height: var(--row); }
+    .head:hover { background: var(--hover); }
+    .rows { gap: var(--s0); }
+  }
 </style>

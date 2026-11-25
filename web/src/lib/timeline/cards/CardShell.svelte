@@ -76,7 +76,7 @@
   const wordKey = $derived(`${tone}:${status.replace(/\d+/g, '#')}`);
 </script>
 
-<div class="feed-card" data-card={call.id} data-state={call.state} data-quiet={quiet ? '' : undefined} data-grows={grows ? '' : undefined} data-icon={icon ?? undefined}>
+<div class="feed-card" data-card={call.id} data-state={call.state} data-open={env.open ? '' : undefined} data-quiet={quiet ? '' : undefined} data-grows={grows ? '' : undefined} data-icon={icon ?? undefined}>
   <div class="head">
     <!-- Кнопка лежит под всей шапкой: ссылки в шапке стоят поверх неё и остаются ссылками. -->
     <button type="button" class="hit" aria-expanded={env.open} aria-label={`${line}. ${env.open ? 'Скрыть' : 'Показать'} ${reveal}`} onclick={env.onToggle}></button>
@@ -157,5 +157,14 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .feed-card[data-grows], .dot[data-live] { animation: none; }
+  }
+  /* Под мышью строка плотнее цели касания и без своей плашки: плашка встаёт при наведении
+     и остаётся у раскрытой строки, подпись под строкой прижата к ней. Подсветка лежит на самой
+     шапке, а не на кнопке поверх неё: фон кнопки закрыл бы текст строки. */
+  @media (hover: hover) and (pointer: fine) {
+    .head { min-height: var(--row); border-radius: var(--radius-card); }
+    .head:hover { background: var(--hover); }
+    .feed-card:not([data-open]) { background: var(--transparent); }
+    .content { gap: var(--s1); padding-bottom: var(--s1); }
   }
 </style>

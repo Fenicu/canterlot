@@ -95,7 +95,7 @@
   const isCliPolicy = $derived(block.approvedBy === 'cli_policy' || result?.approvedBy === 'cli_policy');
 </script>
 
-<div class="tool">
+<div class="tool" data-open={open ? '' : undefined}>
   <StepHead name={title.name || 'Шаг'} {detail} dir={label.dir} {status} state={error ? 'error' : running ? 'running' : stopped ? 'stopped' : launched ? 'background' : 'done'} {open} ontoggle={onToggle}>
     {#snippet badge()}
       {#if background}<span class="policy-badge">Фоном</span>{/if}
@@ -181,4 +181,8 @@
   /* Ссылка нажимается так же, как кнопка. */
   .shot a:active { transform: scale(var(--scale-press)); }
   img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  /* Под мышью у закрытой строки нет своей плашки: её даёт наведение, раскрытая стоит на плашке. */
+  @media (hover: hover) and (pointer: fine) {
+    .tool:not([data-open]) { background: var(--transparent); }
+  }
 </style>
