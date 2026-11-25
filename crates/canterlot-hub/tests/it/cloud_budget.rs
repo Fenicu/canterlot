@@ -1940,6 +1940,61 @@ async fn a_failed_hub_card_leaves_no_request_or_expiry_job() -> TestResult {
     Ok(())
 }
 
+/// Одобренное окно ждёт сверки каталога, а списки провайдера не читаются. Заявка не живёт
+/// вечно: через четверть часа она заканчивается без машины, и возвращение провайдера через
+/// часы уже ничего не создаёт.
+#[tokio::test]
+async fn a_create_intent_expires_instead_of_posting_hours_later() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, false).await;
+    let _carrier = testkit::fake_session(&rig.registry, rig.carrier, &["runners_v1"], true);
+    let id = rig
+        .service
+        .create(CreateRequest {
+            trigger: Trigger::Owner,
+            proposal_id: None,
+            replaces_window_id: None,
+            hard_cap_minutes: 120,
+            consent_over_budget_kopecks: None,
+            prepare: None,
+        })
+        .await
+        .expect("window created");
+    // Списки каталога отвечают 500: сверка не проходит, создание ждёт.
+    rig._fake.control().list_fail_folder = Some(FOLDER.to_owned());
+    let state = || async {
+        sqlx::query_as::<_, (String, Option<String>)>(
+            "select state, last_error from cloud_windows where id = $1",
+        )
+        .bind(id)
+        .fetch_one(&rig.pool)
+        .await
+        .unwrap()
+    };
+    let t0 = now_micros();
+    for minute in [0, 5, 10] {
+        rig.service.tick(t0 + TimeDelta::minutes(minute)).await;
+    }
+    assert_eq!(state().await.0, "create_intent", "still inside the wait");
+    rig.service.tick(t0 + TimeDelta::minutes(16)).await;
+    assert_eq!(
+        state().await,
+        ("failed".to_owned(), Some("expired".to_owned()))
+    );
+    assert_eq!(rig.push_count("intent_expired").await, 1);
+
+    // Через двенадцать часов списки снова читаются: создавать уже нечего.
+    rig._fake.control().list_fail_folder = None;
+    let late = t0 + TimeDelta::hours(12);
+    rig.service.tick(late).await;
+    rig.service.tick(late + TimeDelta::seconds(10)).await;
+    assert_eq!(create_posts(&rig), 0);
+    assert_eq!(state().await.0, "failed");
+    assert_eq!(rig.push_count("intent_expired").await, 1);
+    Ok(())
+}
+
 /// Машина не удаляется, и окно тарифицируется дольше, чем покрывает резерв: расход месяца и
 /// пуши о бюджете считают его по набежавшей цене, а не ждут конца окна.
 #[tokio::test]

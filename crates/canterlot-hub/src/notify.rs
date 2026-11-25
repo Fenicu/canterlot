@@ -823,6 +823,7 @@ fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
         "auto_failed" => {
             let reason = match payload["reason"].as_str().unwrap_or_default() {
                 "ready_timeout" => "раннер не подключился за отведённое время".to_owned(),
+                "expired" => "провайдер не отвечал, заявка устарела".to_owned(),
                 "create_failed" => "провайдер не создал машину".to_owned(),
                 "vm_broken" => "машина остановилась или сломалась".to_owned(),
                 "gone" => "машина пропала из каталога".to_owned(),
@@ -839,6 +840,13 @@ fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
                 ),
             )
         }
+        "intent_expired" => (
+            "Облако: окно не создано".to_owned(),
+            format!(
+                "Заявка {name} четверть часа ждала ответа провайдера (каталог или цены) и \
+                 устарела. Машины нет, расхода нет; если работа ещё ждёт, создайте окно заново."
+            ),
+        ),
         "stray_server_deleted" => (
             "Облако: удалена лишняя машина".to_owned(),
             format!("Машина {name} в каталоге раннеров не принадлежала ни одному окну; удалена."),
@@ -2589,6 +2597,7 @@ mod tests {
         let codes = [
             "auto_started",
             "auto_failed",
+            "intent_expired",
             "budget_80",
             "budget_100",
             "stray_server_deleted",

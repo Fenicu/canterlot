@@ -265,6 +265,7 @@ canterlot-worker job run --title T [--machine NAME|auto] [--labels a,b] [--expec
 | Было | Условие | Стало |
 | --- | --- | --- |
 | `create_intent` без метки вызова | первая успешная сверка в этом запуске; цена, образ и cloud-init готовы; метка `create_called_at` и пределы ставятся до вызова | вызов `create`: профили по порядку |
+| `create_intent` без метки вызова | заявке больше 15 минут, а сверки каталога или свежей цены так и нет | `failed` с `last_error = expired`, расхода нет; пуш `intent_expired` (у автоматического окна вместо него `auto_failed`) |
 | `create_intent` с меткой вызова | ответ не записан (упал хаб, оборвали проход) | `create_unknown`; второго POST нет |
 | вызов: `Accepted` | | `identified` (+`instance_id`, `create_operation_id`, строка раннера `cloud` готова) |
 | вызов: `Rejected` с `next_profile` (429 код 8; 400 код 9 про квоту или ресурсы) | машины точно нет | вызов следующего профиля в том же окне; перед ним в строке стоят его размеры и обе ставки |
@@ -340,7 +341,7 @@ canterlot-worker job run --title T [--machine NAME|auto] [--labels a,b] [--expec
 
 ### 7.6 Пуши владельцу (`cloud_alert`)
 
-Через `owner_pushes` (вид `cloud_alert`, без разговора, ключ `dedupe_key` с номером попытки или получасового слота): `auto_started`, `auto_failed`, `budget_80`, `budget_100`, `stray_server_deleted`, `stray_server_stuck`, `stray_disk_deleted`, `stray_disk_stuck`, `delete_failing`, `disk_delete_failing`, `preempted`, `vm_broken`, `window_overrun`, `outage_extra_cost` (с оценкой лишнего расхода), `window_gone`, `hard_cap`, `cloud_window_hard_cap`, `ownership_mismatch`, `late_create`, `late_disk`, `reprice_growth`, `prepare_failed`. Каждый выпускаемый код обязан рендериться в заголовок и текст (тест обходит весь список). Без `[notify.gotify]` пуша нет, но запись в журнале (`cloud_alert`, код без значений) остаётся.
+Через `owner_pushes` (вид `cloud_alert`, без разговора, ключ `dedupe_key` с номером попытки или получасового слота): `auto_started`, `auto_failed`, `intent_expired`, `budget_80`, `budget_100`, `stray_server_deleted`, `stray_server_stuck`, `stray_disk_deleted`, `stray_disk_stuck`, `delete_failing`, `disk_delete_failing`, `preempted`, `vm_broken`, `window_overrun`, `outage_extra_cost` (с оценкой лишнего расхода), `window_gone`, `hard_cap`, `cloud_window_hard_cap`, `ownership_mismatch`, `late_create`, `late_disk`, `reprice_growth`, `prepare_failed`. Каждый выпускаемый код обязан рендериться в заголовок и текст (тест обходит весь список). Без `[notify.gotify]` пуша нет, но запись в журнале (`cloud_alert`, код без значений) остаётся.
 
 ### 7.7 Тесты
 

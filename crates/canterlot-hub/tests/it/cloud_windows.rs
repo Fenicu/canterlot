@@ -164,6 +164,20 @@ impl Rig {
         self.try_create(cap).await.expect("window created")
     }
 
+    /// Окно, созданное посреди сценария с модельным временем: заявка появляется по часам
+    /// базы, а проходы идут по модельным, поэтому её момент подводится к ним. Иначе заявка
+    /// выглядела бы старше срока годности.
+    async fn create_at(&self, cap: u32, at: DateTime<Utc>) -> WindowId {
+        let id = self.create(cap).await;
+        sqlx::query("update cloud_windows set created_at = $2 where id = $1")
+            .bind(id)
+            .bind(at)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        id
+    }
+
     async fn try_create(&self, cap: u32) -> Result<WindowId, CreateRefusal> {
         self.try_create_with(cap, None).await
     }
@@ -2680,8 +2694,8 @@ async fn a_failed_or_partial_listing_changes_nothing() -> TestResult {
 
     // Живое окно, чья машина пропала: при плохом списке остаётся живым, без пуша.
     rig.fake.control().create = CreateMode::Accept;
-    let id = rig.create(60).await;
     let t1 = t0 + TimeDelta::minutes(40);
+    let id = rig.create_at(60, t1).await;
     rig.tick(t1).await;
     assert_eq!(rig.state(id).await, "identified");
     rig.tick(t1 + TimeDelta::seconds(1)).await;
@@ -4512,7 +4526,7 @@ async fn the_cloud_row_is_reused_reactivated_on_attach_and_revoked_at_the_end() 
     assert_eq!(refused, Err(RunnerRefusal::Revoked));
 
     // Следующее окно переиспользует ту же строку и оживляет её при подключении.
-    let next = rig.create(60).await;
+    let next = rig.create_at(60, t0 + TimeDelta::minutes(20)).await;
     rig.tick(t0 + TimeDelta::minutes(20)).await;
     assert_eq!(rig.state(next).await, "identified");
     assert_eq!(

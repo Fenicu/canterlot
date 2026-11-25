@@ -64,6 +64,10 @@ const PRICE_QUOTE_TTL: TimeDelta = TimeDelta::minutes(10);
 const OVERRUN_SLACK: TimeDelta = TimeDelta::minutes(10);
 /// Сколько заявка без вызова создания ждёт образ у провайдера.
 const IMAGE_WAIT: TimeDelta = TimeDelta::minutes(15);
+/// Срок годности заявки до вызова создания, от её появления. Она ждёт сверку каталога и
+/// свежую цену; пока провайдер не отвечает, машины нет. Позже этого срока работа могла быть
+/// сделана или отменена, и машину уже не создаём.
+const INTENT_WAIT: TimeDelta = TimeDelta::minutes(15);
 /// Метка машины раннера у провайдера.
 const LABEL_KEY: &str = "canterlot";
 const LABEL_VALUE: &str = "runner";
@@ -594,6 +598,22 @@ impl CloudService {
             .execute(&self.pool)
             .await?;
             return Ok(());
+        }
+        if now - window.created_at > INTENT_WAIT {
+            // Об автоматическом окне владельцу расскажет пуш `auto_failed` с той же причиной.
+            if window.trigger != windows::Trigger::Auto.as_str() {
+                crate::notify::enqueue_cloud_alert(
+                    &self.pool,
+                    &format!("cloud:intent_expired:{}", window.id),
+                    &json!({
+                        "code": "intent_expired",
+                        "window_id": window.id,
+                        "name": window.name,
+                    }),
+                )
+                .await?;
+            }
+            return self.fail(window.id, "expired").await;
         }
         if !runtime.reconciled {
             return Ok(());
