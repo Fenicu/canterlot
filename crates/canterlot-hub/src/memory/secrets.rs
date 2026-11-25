@@ -38,6 +38,9 @@ pub fn scan(text: &str) -> Option<SecretClass> {
     if text
         .split(|c: char| !is_entropy_char(c))
         .any(is_high_entropy)
+        || text
+            .split(|c: char| !is_base64_char(c))
+            .any(is_base64_with_slashes)
     {
         return Some(SecretClass::HighEntropy);
     }
@@ -212,8 +215,78 @@ fn has_sshpass_password(line: &str) -> bool {
     false
 }
 
+/// Слова, которые стоят на месте пароля в примерах: `postgres://user:password@host`.
+const PASSWORD_STAND_INS: [&str; 6] = ["password", "passwd", "pass", "pwd", "secret", "token"];
+
+/// Пароль, названный прямо, без ключевого слова: в адресе или в опции команды. Значение
+/// любой длины; не считаются подстановки (`$PASS`, `<password>`, `{{ … }}`) и заглушки.
+fn is_literal_password(value: &str) -> bool {
+    let value = value.trim_matches(['"', '\'', '`']);
+    if value.is_empty() || value.starts_with(['<', '$', '{', '%', '*']) {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    !PASSWORD_STAND_INS.contains(&lower.as_str()) && !PLACEHOLDERS.iter().any(|p| lower.contains(p))
+}
+
+/// `scheme://user:ЗНАЧЕНИЕ@host`: пароль в адресе. Часть до `@` берётся только из адреса
+/// хоста, до первого `/`, `?` или `#`, поэтому `@` в пути адреса паролем не делает.
+fn has_url_password(line: &str) -> bool {
+    line.match_indices("://").any(|(at, _)| {
+        let authority = line[at + 3..]
+            .split(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '"' | '\'' | '`'))
+            .next()
+            .unwrap_or("");
+        authority
+            .rsplit_once('@')
+            .and_then(|(userinfo, _)| userinfo.split_once(':'))
+            .is_some_and(|(_, password)| is_literal_password(password))
+    })
+}
+
+/// `curl -u user:ЗНАЧЕНИЕ` и `curl --user user:ЗНАЧЕНИЕ`. Разбирается только строка с
+/// `curl`: у других команд `-u` значит другое (`docker run -u 1000:1000`, `git push -u`).
+fn has_curl_user_password(line: &str) -> bool {
+    let Some(at) = line.find("curl") else {
+        return false;
+    };
+    let mut tokens = line[at + "curl".len()..].split_whitespace();
+    while let Some(token) = tokens.next() {
+        let value = if token == "-u" || token == "--user" {
+            // Значение в кавычках может содержать пробел: берётся до закрывающей кавычки.
+            let first = tokens.next().unwrap_or("");
+            match first.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+                Some(quote) if !first[1..].contains(quote) => {
+                    let mut value = first.to_owned();
+                    for next in tokens.by_ref() {
+                        value.push(' ');
+                        value.push_str(next);
+                        if next.contains(quote) {
+                            break;
+                        }
+                    }
+                    value
+                }
+                _ => first.to_owned(),
+            }
+        } else if let Some(glued) = token.strip_prefix("--user=") {
+            glued.to_owned()
+        } else {
+            continue;
+        };
+        let value = value.trim_matches(['"', '\'', '`']);
+        if value
+            .split_once(':')
+            .is_some_and(|(_, password)| is_literal_password(password))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn line_has_assignment(line: &str) -> bool {
-    if has_sshpass_password(line) {
+    if has_sshpass_password(line) || has_url_password(line) || has_curl_user_password(line) {
         return true;
     }
     let lower = lower_same_len(line);
@@ -327,6 +400,26 @@ fn is_high_entropy(token: &str) -> bool {
         return false;
     }
     entropy(token) >= 4.0
+}
+
+fn is_base64_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=')
+}
+
+/// Ключ в обычном base64 с косой чертой внутри. Основной проход режет строку по `/`, чтобы
+/// пути не считались токенами, и такой ключ распадался на куски короче порога. Здесь `/`
+/// остаётся в токене, а путь отсекается иначе: в пути из слов заглавных букв мало, в base64
+/// их около половины. `-`, `_` и `.` токен по-прежнему режут.
+fn is_base64_with_slashes(token: &str) -> bool {
+    if token.len() < 32 || !token.contains('/') {
+        return false;
+    }
+    let upper = token.chars().filter(char::is_ascii_uppercase).count();
+    let lower = token.chars().filter(char::is_ascii_lowercase).count();
+    let has_digit = token.chars().any(|c| c.is_ascii_digit());
+    // От четверти до 85 % заглавных среди букв: ни слова, ни константа.
+    let mixed = upper * 4 >= upper + lower && upper * 20 <= (upper + lower) * 17;
+    has_digit && lower > 0 && mixed && entropy(token) >= 4.0
 }
 
 /// Слаг с датой («autonomy-lease-watchdog-2026-11-08»): от трёх сегментов по `-`/`_`,
@@ -517,6 +610,76 @@ mod tests {
             "sshpass -pHunter2x ssh h",
         ] {
             assert_eq!(scan(text), Some(SecretClass::Assignment), "{text}");
+        }
+    }
+
+    #[test]
+    fn passwords_in_urls_are_secrets() {
+        for text in [
+            "Staging DB: postgres://app:Tr0ub4dor&3xyz@db.internal:5432/app",
+            "Clone with https://deploy:9f8e7d6c5b4a@git.example.org/team/repo.git",
+            "redis://:hunter2hunter@cache.internal:6379/0",
+            "`amqp://svc:Zq8Wv3Lp@mq.internal`",
+        ] {
+            assert_eq!(scan(text), Some(SecretClass::Assignment), "{text}");
+        }
+    }
+
+    #[test]
+    fn urls_without_a_real_password_pass() {
+        for text in [
+            "ssh://git@git.example.org:22/team/repo.git",
+            "postgres://app:<password>@db.internal/app",
+            "https://user:${TOKEN}@git.example.org/team/repo.git",
+            "postgres://user:password@localhost:5432/db",
+            "https://example.org/@user:matrix.org",
+            "https://build-runner-01.internal.example.net:8443/jobs",
+            "напиши admin@example.org: срочно",
+            "http://user:@host/пустой пароль",
+        ] {
+            assert_eq!(scan(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn curl_user_password_is_a_secret() {
+        for text in [
+            "curl -u admin:S3cr3tPass! https://grafana.internal/api/health",
+            "curl -s --user admin:S3cr3tPass! https://grafana.internal/api/health",
+            "curl --user=admin:S3cr3tPass https://grafana.internal/api/health",
+            "curl -u 'admin:r00t pass' https://grafana.internal",
+        ] {
+            assert_eq!(scan(text), Some(SecretClass::Assignment), "{text}");
+        }
+    }
+
+    #[test]
+    fn curl_and_other_user_options_without_a_password_pass() {
+        for text in [
+            "curl -u \"$USER:$PASS\" https://grafana.internal",
+            "curl -u admin https://grafana.internal",
+            "curl -u admin:<password> https://grafana.internal",
+            "curl -u admin: https://grafana.internal",
+            "docker run -u 1000:1000 image",
+            "git push -u origin main",
+            "sort -u names:list",
+        ] {
+            assert_eq!(scan(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn base64_with_slashes_is_high_entropy() {
+        assert_eq!(
+            scan("key wJalrXUtnFEMI/K7MDENG/bPxRfiCYzzzzzzKEY1 for the bucket"),
+            Some(SecretClass::HighEntropy)
+        );
+        // Путь из слов в CamelCase с цифрой остаётся путём: заглавных в нём мало.
+        for text in [
+            "src/main/java/com/example/billing/InvoiceService2/Handler",
+            "каталог /srv/Builds/Release2026/Artifacts/LinuxAmd64/Installer",
+        ] {
+            assert_eq!(scan(text), None, "{text}");
         }
     }
 
