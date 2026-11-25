@@ -538,7 +538,7 @@ fn instructions_name_only_tools_served_to_that_provider() {
         for word in words.filter(|word| word.contains('_') && !word.starts_with('_')) {
             // У OpenCode клиент зовёт инструмент с префиксом сервера: `canterlot_<имя>`.
             let name = if provider == "opencode" {
-                word.strip_prefix("canterlot_").unwrap_or(word)
+                word.trim_prefix("canterlot_")
             } else {
                 word
             };
