@@ -17,6 +17,11 @@ pub fn rendition_etag(sha256: &str) -> String {
     format!("\"{sha256}-{RENDITION_ETAG_SUFFIX}\"")
 }
 
+/// Тип, у которого бывает уменьшенный показ; остальное отдаётся как есть.
+pub fn scalable(mime: &str) -> bool {
+    matches!(mime, "image/png" | "image/jpeg")
+}
+
 pub enum Rendition {
     /// Уменьшенный JPEG для показа.
     Scaled { bytes: Vec<u8>, mime: &'static str },
