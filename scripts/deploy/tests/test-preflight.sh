@@ -490,6 +490,30 @@ cc_require "${FAKE_ROOT}/check/require.rs" Root "${FAKE_ROOT}/check/require-miss
     && case_fail "--require passed without the required keys" || case_ok "--require: missing keys fail"
 assert_contains "${FAKE_ROOT}/check/require.log" "missing required key 'must'" "the missing root key is named"
 assert_contains "${FAKE_ROOT}/check/require.log" "missing required key 'inner.needed'" "the missing key of a multi-line derive struct is named"
+# Обязательные ключи внутри элементов массива таблиц ([[list]]) и значений карты структур: раньше
+# --require туда не спускался, и неполный [[runners.ssh]] проходил предпроверку.
+cat >"${FAKE_ROOT}/check/require-nested.rs" <<'EOF'
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Top {
+    #[serde(default)]
+    pub list: Vec<Item>,
+    #[serde(default)]
+    pub named: BTreeMap<String, Item>,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Item {
+    pub machine: String,
+    pub ssh: String,
+}
+EOF
+printf '[[list]]\nmachine = "m"\nssh = "s"\n[[list]]\nmachine = "m2"\n[named.one]\nssh = "s"\n' >"${FAKE_ROOT}/check/require-nested.toml"
+cc_require "${FAKE_ROOT}/check/require-nested.rs" Top "${FAKE_ROOT}/check/require-nested.toml" \
+    && case_fail "--require passed incomplete array and map elements" || case_ok "--require: incomplete array and map elements fail"
+assert_contains "${FAKE_ROOT}/check/require.log" "missing required key 'list[1].ssh'" "the missing key of an array element is named"
+assert_contains "${FAKE_ROOT}/check/require.log" "missing required key 'named.one.machine'" "the missing key of a map value is named"
+assert_not_contains "${FAKE_ROOT}/check/require.log" "list[0]" "a complete array element is not reported"
 # Настоящие структуры: минимальные конфиги стенда проходят, [runners.cloud] без ключей с
 # умолчаниями и с ключами прежнего провайдера не объявляется неполным (RunnersConfig разбирает
 # таблицу сам), а конфиг без обязательного ключа отвергается с его именем.

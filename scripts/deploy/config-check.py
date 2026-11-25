@@ -281,9 +281,19 @@ def check_required(node, struct_name, structs, path, errors):
             continue
         kind = classify(spec["type"], structs)
         value = node[present[0]]
+        here = f"{path}.{present[0]}" if path else present[0]
         if kind[0] == "struct" and isinstance(value, dict):
-            here = f"{path}.{present[0]}" if path else present[0]
             check_required(value, kind[1], structs, here, errors)
+        # Элементы массива таблиц ([[runners.ssh]]) и значения карты известной структуры
+        # разбирает тот же derive: их обязательные ключи нужны так же.
+        elif kind[0] == "vec_struct" and isinstance(value, list):
+            for i, item in enumerate(value):
+                if isinstance(item, dict):
+                    check_required(item, kind[1], structs, f"{here}[{i}]", errors)
+        elif kind[0] == "open_map" and kind[1] and isinstance(value, dict):
+            for subkey, subval in value.items():
+                if isinstance(subval, dict):
+                    check_required(subval, kind[1], structs, f"{here}.{subkey}", errors)
 
 
 def check_hex64(doc, key, errors):
