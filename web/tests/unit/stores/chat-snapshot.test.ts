@@ -307,6 +307,64 @@ describe("лента дальше 3000 записей", () => {
   });
 });
 
+describe("хвост, который не стыкуется со старым окном", () => {
+  const seqs = (chat: ChatStore): number[] => chat.timeline.entries.map((entry) => Number(entry.seq));
+  const holes = (list: number[]): number =>
+    list.length === 0 ? 0 : list.at(-1)! - list[0]! + 1 - list.length;
+
+  it("снимок после долгого отсутствия заменяет окно хвостом, а не оставляет дыру", async () => {
+    const chat = chatOf({ history: longHistory(400) });
+    snapshot(chat, { history: await longHistory(100)(CONV, {}) });
+    expect(seqs(chat)).toHaveLength(100);
+
+    // Пока подписка была отпущена, агент написал больше страницы.
+    snapshot(chat, { history: await longHistory(400)(CONV, {}) });
+    expect(holes(seqs(chat))).toBe(0);
+    expect(chat.timeline.oldestSeq()).toBe("301");
+    expect(chat.timeline.newestSeq()).toBe("400");
+    expect(chat.timeline.hasOlder).toBe(true);
+
+    // Пропущенная середина догружается обычной страницей старых.
+    await chat.loadOlder();
+    expect(holes(seqs(chat))).toBe(0);
+    expect(seqs(chat)).toContain(250);
+  });
+
+  it("перечитанный хвост при живом окне тоже не оставляет дыру", async () => {
+    const chat = chatOf({ history: longHistory(400) });
+    snapshot(chat, { history: await longHistory(100)(CONV, {}) });
+    await chat.reloadTail();
+    expect(holes(seqs(chat))).toBe(0);
+    expect(chat.timeline.oldestSeq()).toBe("301");
+    expect(chat.timeline.hasOlder).toBe(true);
+  });
+
+  it("хвост, который перекрывает окно, старые записи оставляет", async () => {
+    const chat = chatOf({ history: longHistory(250) });
+    snapshot(chat, { history: await longHistory(200)(CONV, {}) });
+    await chat.loadOlder();
+    expect(seqs(chat)).toHaveLength(200);
+
+    snapshot(chat, { history: await longHistory(250)(CONV, {}) });
+    expect(holes(seqs(chat))).toBe(0);
+    expect(chat.timeline.oldestSeq()).toBe("1");
+    expect(chat.timeline.newestSeq()).toBe("250");
+
+    await chat.reloadTail();
+    expect(chat.timeline.oldestSeq()).toBe("1");
+    expect(seqs(chat)).toHaveLength(250);
+  });
+
+  it("короткая история целиком в снимке: окно не сбрасывается", async () => {
+    const chat = chatOf();
+    snapshot(chat, { history: await longHistory(40)(CONV, {}) });
+    const version = chat.timeline.windowVersion;
+    snapshot(chat, { history: await longHistory(60)(CONV, {}) });
+    expect(seqs(chat)).toHaveLength(60);
+    expect(chat.timeline.windowVersion).toBe(version);
+  });
+});
+
 describe("финал блока за окном снимка", () => {
   const CALL = "00000000-0000-4000-8000-0000000000c1";
   const history = (state: string): HistoryItem => ({

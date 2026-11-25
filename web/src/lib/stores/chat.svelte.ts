@@ -783,7 +783,7 @@ export class ChatStore {
       const costClock = this.#costClock;
       const page = await this.deps.api.history(this.id, {});
       if (epoch !== this.#epoch) return;
-      if (this.timeline.tailDetached) {
+      if (this.timeline.tailDetached || !this.#joinsTail(page.items, Boolean(page.next_before))) {
         // Окно далеко от хвоста: склеенные, они дали бы ленту с дырой посередине.
         this.timeline.markReplaced();
         this.timeline.applyHistoryPage([], "tail");
@@ -1718,7 +1718,9 @@ export class ChatStore {
       : [];
     // Оторванное окно с хвостом снимка не стыкуется: между ними дыра.
     const keepOlder =
-      !this.timeline.tailDetached && older.every((entry) => terminalEntry(entry));
+      !this.timeline.tailDetached &&
+      older.every((entry) => terminalEntry(entry)) &&
+      this.#joinsTail(items, Boolean(data.history?.next_before));
     if (!keepOlder) {
       this.timeline.markReplaced();
       this.timeline.applyHistoryPage([], "tail");
@@ -1738,6 +1740,22 @@ export class ChatStore {
     }
     if (data.queue?.queued) this.#adoptQueued(data.queue.queued);
     this.#reconcileCompactRequest(items);
+  }
+
+  /**
+   * Стыкуется ли окно с хвостом истории. Хвост — одна страница последних записей: если всё
+   * окно старше её начала, между ними могли остаться записи, которых нет ни там, ни там,
+   * и ни страница старых, ни новый хвост их уже не вернут.
+   */
+  #joinsTail(items: HistoryItem[], hasOlder: boolean): boolean {
+    // Раньше хвоста на хабе ничего нет: пропустить нечего.
+    if (!hasOlder || items.length === 0) return true;
+    const floor = items.map(seqOf).sort(cmpSeq)[0]!;
+    // Локальные и секретные записи в истории не лежат и о стыке ничего не говорят.
+    const window = this.timeline.entries.filter(
+      (entry) => entry.seq !== LOCAL_SEQ && entry.kind !== "secret_request",
+    );
+    return window.length === 0 || window.some((entry) => cmpSeq(entry.seq, floor) >= 0);
   }
 
   /** Вводы без места в ленте есть только в очереди снимка: полоса сходится с ней в обе стороны. */
