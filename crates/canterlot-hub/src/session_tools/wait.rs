@@ -50,6 +50,10 @@ pub async fn wait(
         return Err(ToolError::new(ToolErrorCode::InvalidArguments));
     }
     check_visible(context, caller, args.session_id).await?;
+    let turn = {
+        let mut conn = context.pool.acquire().await?;
+        caller_turn(&mut conn, caller.conversation_id).await?
+    };
     let deadline = Instant::now() + Duration::from_secs(seconds as u64);
     loop {
         // Домен цели мог измениться, пока вызов ждал: итог показывается только при
@@ -66,7 +70,7 @@ pub async fn wait(
         }
         match poll(context, caller.owner_id, args.session_id).await? {
             Poll::Settled(current) => {
-                return settled(context, caller, args.session_id, &current).await;
+                return settled(context, caller, &turn, args.session_id, &current).await;
             }
             Poll::Deleted => {
                 return Ok(json!({
@@ -140,11 +144,76 @@ async fn activity_state(conn: &mut PgConnection, target: Uuid) -> Result<String,
     Ok(state.unwrap_or_else(|| "idle".to_owned()))
 }
 
+/// Ход вызывающего на момент вызова: ввод в слоте очереди и номер его попытки. Свободный слот
+/// тоже ход: агент может звать инструмент из фоновой работы, когда хаб хода не видит.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CallerTurn {
+    input_id: Option<Uuid>,
+    attempt: Option<i32>,
+}
+
+pub async fn caller_turn(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+) -> Result<CallerTurn, sqlx::Error> {
+    let slot: Option<(Option<Uuid>, Option<i32>)> = sqlx::query_as(
+        "select run_slot_input_id, run_slot_attempt from queue_state where conversation_id=$1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(conn)
+    .await?;
+    let (input_id, attempt) = slot.unwrap_or_default();
+    Ok(CallerTurn { input_id, attempt })
+}
+
+/// Ожидание забирает событие подписки себе: ставит отпечаток и, если итог конечный, закрывает
+/// подписку. Условие в самом `update` решает гонку с проектором: кто первым взял строку, тот и
+/// говорит.
+///
+/// Забирать можно, только пока ответ вызова есть кому прочитать. Воркер вызов не отменяет:
+/// после прерывания хода или смерти CLI хаб продолжает ждать, а ответ уходит в никуда. Поэтому
+/// исполнение вызывающего должно быть живым, а слот его очереди занят тем же вводом, что в
+/// начале вызова; иначе событие остаётся проектору и приходит сообщением.
+pub async fn claim_event(
+    conn: &mut PgConnection,
+    caller: &Caller,
+    turn: &CallerTurn,
+    target: Uuid,
+    current: &subs::Current,
+) -> Result<bool, sqlx::Error> {
+    let hit = sqlx::query(
+        "update session_subscriptions set last_fingerprint=$3,
+           closed_at=case when $4 then clock_timestamp() end,
+           closed_reason=case when $4 then $5 end
+         where subscriber_id=$1 and target_id=$2 and closed_at is null
+           and last_fingerprint is distinct from $3
+           and exists(select 1 from executions e
+                       where e.id=$6 and e.conversation_id=$1
+                         and e.state not in ('stopped','failed'))
+           and (select q.run_slot_input_id from queue_state q where q.conversation_id=$1)
+               is not distinct from $7
+           and (select q.run_slot_attempt from queue_state q where q.conversation_id=$1)
+               is not distinct from $8",
+    )
+    .bind(caller.conversation_id)
+    .bind(target)
+    .bind(&current.fingerprint)
+    .bind(current.closes)
+    .bind(current.state.as_str())
+    .bind(caller.execution_id)
+    .bind(turn.input_id)
+    .bind(turn.attempt)
+    .execute(conn)
+    .await?
+    .rows_affected();
+    Ok(hit > 0)
+}
+
 /// Результат увиден здесь: если проектор ещё не отправил событие, оно больше не нужно.
-/// Условие в самом `update` решает гонку: кто первым взял строку, тот и говорит.
 async fn settled(
     context: &ToolContext,
     caller: &Caller,
+    turn: &CallerTurn,
     target: Uuid,
     current: &subs::Current,
 ) -> Result<Value, ToolError> {
@@ -167,22 +236,7 @@ async fn settled(
     let text = summary::event_text(&mut conn, caller.owner_id, target, state.as_str(), armed_at)
         .await?
         .unwrap_or_else(|| DELETED_TEXT.to_owned());
-    let hit = sqlx::query(
-        "update session_subscriptions set last_fingerprint=$3,
-           closed_at=case when $4 then clock_timestamp() end,
-           closed_reason=case when $4 then $5 end
-         where subscriber_id=$1 and target_id=$2 and closed_at is null
-           and last_fingerprint is distinct from $3",
-    )
-    .bind(caller.conversation_id)
-    .bind(target)
-    .bind(&current.fingerprint)
-    .bind(current.closes)
-    .bind(state.as_str())
-    .execute(&mut *conn)
-    .await?
-    .rows_affected()
-        > 0;
+    let hit = claim_event(&mut conn, caller, turn, target, current).await?;
     Ok(json!({
         "state": state.as_str(),
         "summary": text,

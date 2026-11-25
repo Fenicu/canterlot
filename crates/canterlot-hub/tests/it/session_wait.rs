@@ -13,6 +13,7 @@ use canterlot_hub::{
     model::ExecutionState,
     session_tools::{
         self, Caller, ToolContext, ToolError, ToolErrorCode as Code, settle::SettleConfig, subs,
+        wait,
     },
     testkit,
 };
@@ -28,6 +29,8 @@ struct Fx {
     owner: Uuid,
     machine: Uuid,
     waiter: Uuid,
+    /// Живое исполнение ожидающего: вызов инструмента приходит только от него.
+    execution: Uuid,
     target: Uuid,
 }
 
@@ -51,7 +54,13 @@ impl Fx {
             .execute(&pool)
             .await
             .unwrap();
+        let execution =
+            executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
+                .await
+                .unwrap()
+                .execution_id;
         Self {
+            execution,
             context: ToolContext {
                 memory: Default::default(),
                 pool: pool.clone(),
@@ -86,7 +95,7 @@ impl Fx {
         Caller {
             owner_id: self.owner,
             conversation_id: self.waiter,
-            execution_id: Uuid::now_v7(),
+            execution_id: self.execution,
             machine_id: self.machine,
             call_id: Uuid::now_v7(),
         }
@@ -535,4 +544,72 @@ async fn event_for_an_open_state_is_not_suppressed_by_a_later_wait() {
         .unwrap();
     assert_eq!(again["event_suppressed"], false);
     assert_eq!(f.event_jobs().await, 1);
+}
+
+/// Исполнение ожидающего умерло, пока вызов ждал: ответ вызова читать некому, поэтому итог
+/// обязан прийти событием подписки.
+#[tokio::test]
+async fn wait_leaves_the_event_when_the_calling_execution_is_gone() {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fx::new(pool).await;
+    f.settle_target().await;
+    f.subscribe().await;
+    sqlx::query("update executions set state='stopped' where id=$1")
+        .bind(f.execution)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let result = f
+        .wait(json!({"session_id": f.target, "timeout_seconds": 30}))
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "idle");
+    assert_eq!(result["event_suppressed"], false, "{result}");
+    let subscription = f.subscription().await;
+    assert!(subscription["closed_at"].is_null(), "{subscription}");
+    assert!(subscription["last_fingerprint"].is_null(), "{subscription}");
+
+    f.refresh(Utc::now()).await;
+    assert_eq!(f.event_jobs().await, 1, "the result arrives as an event");
+}
+
+/// Ход, который позвал `session_wait`, прерван, и слот занят уже другим вводом: событие
+/// остаётся за подпиской.
+#[tokio::test]
+async fn wait_leaves_the_event_when_the_callers_turn_changed() {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fx::new(pool).await;
+    f.settle_target().await;
+    f.subscribe().await;
+    let slot = |input: Uuid| {
+        sqlx::query(
+            "update queue_state set run_slot='running', run_slot_input_id=$2, run_slot_attempt=1
+             where conversation_id=$1",
+        )
+        .bind(f.waiter)
+        .bind(input)
+        .execute(&f.pool)
+    };
+    slot(Uuid::now_v7()).await.unwrap();
+    let mut conn = f.pool.acquire().await.unwrap();
+    let turn = wait::caller_turn(&mut conn, f.waiter).await.unwrap();
+    let current = subs::current_in_tx(&mut conn, f.target, Utc::now(), &f.context.settle)
+        .await
+        .unwrap()
+        .expect("the target is settled");
+    // Ход прерван, в работу ушёл следующий ввод.
+    slot(Uuid::now_v7()).await.unwrap();
+    let claimed = wait::claim_event(&mut conn, &f.caller(), &turn, f.target, &current)
+        .await
+        .unwrap();
+    assert!(!claimed, "a call nobody reads must not take the event");
+    assert!(f.subscription().await["last_fingerprint"].is_null());
+
+    // Тот же ход на месте: ожидание забирает событие, как раньше.
+    let turn = wait::caller_turn(&mut conn, f.waiter).await.unwrap();
+    let claimed = wait::claim_event(&mut conn, &f.caller(), &turn, f.target, &current)
+        .await
+        .unwrap();
+    assert!(claimed);
+    assert_eq!(f.subscription().await["closed_reason"], "idle");
 }
