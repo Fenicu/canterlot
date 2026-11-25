@@ -45,6 +45,11 @@
   --radius-pill: 999px;
   --radius-round: 50%;
   --target: 44px;
+  /* Строка вызова, разрешения и группы шагов под мышью: плотнее цели касания, но выше нижней
+     границы WCAG 2.5.8 (24 px). На сенсорном экране строка остаётся --target. */
+  --row: 30px;
+  /* Подпись карточки ответа с кнопками закладки и сведений под мышью. */
+  --row-footer: 32px;
   /* Тонкая строка над полем ввода (полоса плана): ниже цели касания, зато во всю ширину ленты. */
   --strip-slim: 36px;
   --mark: 8px;
@@ -1723,7 +1728,7 @@
     --radius-sm: calc(18px * var(--ui-scale)); --radius: calc(20px * var(--ui-scale));
     --radius-card: calc(22px * var(--ui-scale)); --radius-sheet: calc(28px * var(--ui-scale));
     --radius-composer: calc(32px * var(--ui-scale));
-    --target: calc(44px * var(--ui-scale)); --strip-slim: calc(36px * var(--ui-scale)); --mark: calc(8px * var(--ui-scale)); --mark-large: calc(10px * var(--ui-scale));
+    --target: calc(44px * var(--ui-scale)); --row: calc(30px * var(--ui-scale)); --row-footer: calc(32px * var(--ui-scale)); --strip-slim: calc(36px * var(--ui-scale)); --mark: calc(8px * var(--ui-scale)); --mark-large: calc(10px * var(--ui-scale));
     --caret-width: calc(2px * var(--ui-scale));
     --icon: calc(20px * var(--ui-scale)); --icon-small: calc(16px * var(--ui-scale));
     --handle-width: calc(32px * var(--ui-scale)); --handle-height: calc(4px * var(--ui-scale));

@@ -12,7 +12,7 @@
   const view = $derived(open ? folds.view(group.key, group.entries, false) : null);
 </script>
 
-<div class="steps">
+<div class="steps" data-open={open ? '' : undefined}>
   <div class="surface">
     <StepHead
       name={group.label}
@@ -44,4 +44,10 @@
   .rows { display: flex; flex-direction: column; gap: var(--s2); min-height: 0; min-width: 0; overflow: hidden; padding-top: var(--s2); }
   .rows > div { min-width: 0; }
   .more { align-self: flex-start; min-height: var(--target); padding-inline: var(--s6); color: var(--accent-link); font-size: var(--fs-sm); }
+  /* Под мышью закрытая группа без плашки, шаги раскрытой стоят вплотную, как строки карточки. */
+  @media (hover: hover) and (pointer: fine) {
+    .steps:not([data-open]) .surface { background: var(--transparent); }
+    .rows { gap: var(--s0); }
+    .more { min-height: var(--row); }
+  }
 </style>

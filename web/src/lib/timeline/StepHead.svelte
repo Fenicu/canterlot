@@ -51,4 +51,9 @@
   .name { flex: 0 1 auto; min-width: 0; max-width: 70%; overflow: hidden; font-family: var(--font-mono); font-weight: var(--weight-semibold); text-overflow: ellipsis; white-space: nowrap; }
   .dir { margin-left: var(--s3); color: var(--muted); }
   .summary { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--secondary); font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+  /* Под мышью строка плотнее цели касания; плашку строки при наведении даёт сама шапка. */
+  @media (hover: hover) and (pointer: fine) {
+    .head { min-height: var(--row); }
+    .head:hover { background: var(--hover); }
+  }
 </style>

@@ -336,6 +336,10 @@
 
   .applied { display: flex; flex-direction: column; min-width: 0; border-radius: var(--radius-card); background: var(--raised); }
   .applied-body { padding: var(--s2) var(--s6) var(--s4); }
+  /* Под мышью решённый запрос — строка без своей плашки, как вызов; раскрытый стоит на плашке. */
+  @media (hover: hover) and (pointer: fine) {
+    .applied[data-collapsed] { background: var(--transparent); }
+  }
 
   .track-wrapper {
     padding-bottom: var(--s2);
