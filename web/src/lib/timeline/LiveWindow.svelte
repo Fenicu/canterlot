@@ -23,7 +23,7 @@
   /** Под шапкой видно только последние строки вывода: выше всё равно срезано верхом окна. */
   const OUT_LINES = 4;
   const head = $derived(view.head);
-  const name = $derived(`${head.count} ${fmt.plural(head.count, ['шаг', 'шага', 'шагов'])}`);
+  const name = $derived(head.count > 0 ? `${head.count} ${fmt.plural(head.count, ['шаг', 'шага', 'шагов'])}` : 'Шаги');
   const elapsed = $derived(head.startedAt > 0 ? fmt.duration(liveElapsed(now - head.startedAt)) : '');
   const status = $derived([elapsed, head.failed > 0 ? `Ошибка ${head.failed}` : ''].filter(Boolean).join(' · '));
 

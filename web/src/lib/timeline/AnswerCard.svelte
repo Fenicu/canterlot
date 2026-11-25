@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { blockEndLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
   import { cacheHintText, costLine } from '#lib/format/cost.js';
@@ -11,8 +12,11 @@
   import { liveLineQuiet } from '#lib/timeline/reasoning.js';
   import { apiErrorView } from '#lib/timeline/system.js';
   import { shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
-  import { foldSteps } from '#lib/timeline/steps.js';
+  import { foldSteps, type CardItem } from '#lib/timeline/steps.js';
+  import { liveWindow } from '#lib/timeline/liveWindow.js';
+  import LiveWindow from '#lib/timeline/LiveWindow.svelte';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
+  import { blockFold } from '#lib/ui/fold.js';
   import type { InterruptControl } from '#lib/composer/interrupt.svelte.js';
   import type { LeaseWait } from '#lib/format/lease.js';
   import NoticeBlock from '#lib/timeline/NoticeBlock.svelte';
@@ -99,8 +103,30 @@
   const quietLiveLine = $derived(liveLineQuiet(phase, ownReasoning));
   const report = (block: BlockModel) => block.parentId === laneRoot && block.kind === 'tool_result' && isMainAgent(block.agent);
   // Карточки делегирования, плана и файлов не прячутся в свёрнутые шаги: реестр говорит, какие.
-  const items = $derived(foldSteps(blocks, { links, working, live, folds, stays: (block) => report(block) || cardStays(block), quiet: cardQuiet, label: cardLabel, fold: cardFold }));
+  const stays = (block: BlockModel) => report(block) || cardStays(block);
+  const items = $derived(foldSteps(blocks, { links, working, live, folds, stays, quiet: cardQuiet, label: cardLabel, fold: cardFold }));
   const view = $derived(folds.view(cardKey, items, live));
+  // Живое окно: пока ход идёт, шаги текут хвостом, а не сворачиваются на глазах.
+  const windowState = $derived(liveWindow(blocks, { links, working, stays, label: cardLabel, harness }));
+  const windowFull = $derived(folds.isOpen(`window:${cardKey}`));
+  const windowShown = $derived(live && windowState.stream.length > 0);
+  const beforeKeys = $derived(new Set(windowState.before.map((entry) => entry.key)));
+  // В полном списке вступление уже стоит над окном: из списка его строки уходят, место то же.
+  const windowRest = $derived(view.shown.filter((item) => !beforeKeys.has(item.key)));
+  // Ход кончился: окно уступает сегодняшнему виду, а лента у хвоста остаётся прижатой.
+  let wasLive = untrack(() => live);
+  $effect.pre(() => {
+    if (live) {
+      wasLive = true;
+      return;
+    }
+    if (!wasLive) return;
+    wasLive = false;
+    folds.autoChange(true);
+  });
+  function toggleWindow(): void {
+    folds.toggle(`window:${cardKey}`, windowFull);
+  }
   const topBlocks = $derived(all.filter((block) => block.parentId === null));
   const anchor = $derived(bookmarkAnchor(topBlocks));
   // Отмеченным карточка считается по любому верхнему блоку, а снимает все такие отметки.
@@ -132,21 +158,43 @@
   {/if}
 {/snippet}
 
-<article class="card">
-  {#each view.shown as item (item.key)}
-    {#if item.key === view.seam}
-      <button type="button" class="more" onclick={() => folds.reveal(cardKey)}>Показать ещё {view.hidden} {fmt.plural(view.hidden, ['шаг', 'шага', 'шагов'])}</button>
+{#snippet itemRow(item: CardItem)}
+  <div class="entry" data-key={item.key}>
+    {#if item.kind === 'group'}
+      <StepGroupRow group={item} {folds} row={entryRow} />
+    {:else if item.kind === 'quiet'}
+      <QuietRow group={item} {folds} row={entryRow} />
+    {:else}
+      {@render entryRow(item.entry)}
     {/if}
-    <div class="entry" data-key={item.key}>
-      {#if item.kind === 'group'}
-        <StepGroupRow group={item} {folds} row={entryRow} />
-      {:else if item.kind === 'quiet'}
-        <QuietRow group={item} {folds} row={entryRow} />
-      {:else}
-        {@render entryRow(item.entry)}
-      {/if}
+  </div>
+{/snippet}
+
+<article class="card">
+  {#if windowShown}
+    {#each windowState.before as entry (entry.key)}
+      <div class="entry" data-key={entry.key}>{@render entryRow(entry)}</div>
+    {/each}
+    <div class="live-fold" out:blockFold>
+      <LiveWindow view={windowState} {now} open={windowFull} onToggle={toggleWindow} />
     </div>
-  {/each}
+    {#if windowFull}
+      {#each windowRest as item (item.key)}
+        {@render itemRow(item)}
+      {/each}
+    {:else}
+      {#each windowState.requests as entry (entry.key)}
+        <div class="entry" data-key={entry.key}>{@render entryRow(entry)}</div>
+      {/each}
+    {/if}
+  {:else}
+    {#each view.shown as item (item.key)}
+      {#if item.key === view.seam}
+        <button type="button" class="more" onclick={() => folds.reveal(cardKey)}>Показать ещё {view.hidden} {fmt.plural(view.hidden, ['шаг', 'шага', 'шагов'])}</button>
+      {/if}
+      {@render itemRow(item)}
+    {/each}
+  {/if}
   {#if live && head}
     <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} {interrupt} waiting={working ? leaseWait : null} quiet={quietLiveLine} />
   {/if}
@@ -207,6 +255,9 @@
   .hint { display: block; max-width: 100%; margin-top: var(--s0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .footer-actions { display: flex; align-items: center; gap: var(--s1); }
   .entry { min-width: 0; }
+  /* Окно хода складывается тем же движением, что раскрытая строка ленты. */
+  .live-fold { display: grid; grid-template-rows: 1fr; min-width: 0; }
+  .live-fold > :global(*) { min-height: 0; overflow: hidden; }
   .entry:has(> :global(.text)) { margin-block: var(--s2); }
   .report { display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s2); }
   h3 { margin: var(--s0); font-size: var(--fs-body); font-weight: var(--weight-semibold); }
