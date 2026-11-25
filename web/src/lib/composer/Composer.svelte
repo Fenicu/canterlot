@@ -169,6 +169,64 @@
       runSlotFree: !slot || slot === 'free'
     });
   });
+  // Поле в покое — одна строка: не в фокусе, пустое, без вложений, диктовки, подсказки и открытых окон.
+  // Решает только раскладка и набор кнопок: само поле не пересоздаётся, фокус и курсор остаются на месте.
+  let focused = $state(false);
+  const hasAttachments = $derived.by(() => {
+    void ticker.now;
+    return uploads.list(chat.id).some((item) => item.phase !== 'cancelled');
+  });
+  const idle = $derived(
+    !focused && model.text.length === 0 && !hasAttachments && !dictationView && !suggestion && !snippetsOpen && !later
+  );
+
+  $effect(() => {
+    if (node && document.activeElement === node) focused = true;
+  });
+
+  function focusIn(event: FocusEvent) {
+    if (event.target === node) focused = true;
+  }
+
+  // Касание кнопки поля: Safari не даёт кнопке фокус, и поле теряет его до щелчка.
+  // Пока касание не кончилось щелчком, строка не сворачивается, и кнопка не уходит из-под пальца.
+  let pressing = false;
+
+  /** Только наблюдает за касаниями поля: своих действий у области нет, их ведут кнопки внутри. */
+  function watchPress(section: HTMLElement) {
+    const down = (event: PointerEvent) => {
+      pressing = event.target !== node;
+    };
+    const cancel = () => {
+      pressing = false;
+    };
+    const done = () => {
+      if (!pressing) return;
+      pressing = false;
+      if (!section.contains(document.activeElement)) focused = false;
+    };
+    section.addEventListener('pointerdown', down);
+    section.addEventListener('pointercancel', cancel);
+    // Всплытие: решение принимается после обработчика самой кнопки.
+    section.addEventListener('click', done);
+    return {
+      destroy() {
+        section.removeEventListener('pointerdown', down);
+        section.removeEventListener('pointercancel', cancel);
+        section.removeEventListener('click', done);
+      }
+    };
+  }
+
+  function focusOut(event: FocusEvent) {
+    const next = event.relatedTarget;
+    // Tab или касание, отдавшее фокус кнопке того же поля, тоже не сворачивает строку.
+    if (next instanceof Node && (event.currentTarget as HTMLElement).contains(next)) return;
+    if (pressing) return;
+    focused = false;
+  }
+
+
   const notice = $derived.by(() => {
     void ticker.now;
     if (model.errorMessage) return model.errorMessage;
@@ -628,13 +686,16 @@
   ondragover={dragOver}
   ondragleave={dragLeave}
   ondrop={dropped}
+  onfocusin={focusIn}
+  onfocusout={focusOut}
+  use:watchPress
 >
   {#if notice && !dictationView}
     <p class="reason" id={reasonId}>{notice}</p>
   {:else}
     <p class="sr-only" id={reasonId}>{model.gate.ok ? '' : EMPTY_DRAFT_REASON}</p>
   {/if}
-  <div class="capsule" class:receiving class:dictating={dictationView}>
+  <div class="capsule" class:receiving class:dictating={dictationView} class:idle data-idle={idle ? '' : undefined}>
     {#if dictationView}
       <DictationPanel
         view={dictationView}
@@ -673,7 +734,7 @@
       {#if !(touch && suggestion)}
         <ContextIndicator {chat} />
       {/if}
-      {#if goalSupported}
+      {#if goalSupported && !idle}
         <button type="button" class="goal" class:off={!model.text.trim() || model.sending}
           aria-label="Отправить как цель" title="Отправить как цель"
           onclick={() => void model.sendAsGoal()}><Icon name="rocket" /></button>
@@ -684,7 +745,7 @@
       {#if touch && suggestion}
         <button type="button" class="accept" data-suggestion-accept onmousedown={(event) => event.preventDefault()} onclick={acceptSuggestion}>Подставить</button>
       {/if}
-      {#if !(touch && suggestion)}
+      {#if !(touch && suggestion) && !idle}
       <span class="tools">
         <IconButton icon="list" label="Заготовки" expanded={snippetsOpen} onclick={() => (snippetsOpen = !snippetsOpen)} />
         {#if !touch}
@@ -702,7 +763,7 @@
         {/if}
       </span>
       {/if}
-      {#if canSteer}
+      {#if canSteer && !idle}
         <button
           type="button"
           class="steer"
@@ -738,7 +799,7 @@
       {/if}
   </div>
   {#if dictationNotice}<p class="notice" role="status" data-dictation-notice>{dictationNotice}</p>{/if}
-  {#if !touch && !dictationView}<p class="hint">{suggestion ? 'Tab: подставить подсказку · ' : ''}Enter: отправить · Shift+Enter: новая строка · Ctrl+Shift+Enter: отправить позже</p>{/if}
+  {#if !touch && !dictationView && !idle}<p class="hint">{suggestion ? 'Tab: подставить подсказку · ' : ''}Enter: отправить · Shift+Enter: новая строка · Ctrl+Shift+Enter: отправить позже</p>{/if}
   {#if SnippetsSheet}
     <SnippetsSheet
       open={snippetsOpen}
@@ -861,4 +922,19 @@
   .reason, .hint, .notice { margin: 0; padding-inline: var(--s5); color: var(--muted); font-size: var(--fs-sm); }
   .reason { color: var(--danger); }
   .capsule.dictating { grid-template-areas: 'dictation'; grid-template-columns: minmax(0, 1fr); padding: var(--s1); }
+  /* Поле в покое — одна строка: скрепка, поле, остаток контекста, микрофон и отправка. Раскрытые
+     подробности контекста и лоток возвращают обычную раскладку, их места есть только там. */
+  .capsule.idle:not(:has([data-details])):not(:has(:global(.tray))) {
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+    grid-template-areas: 'attach input context mic send';
+    padding: var(--s1) var(--s3);
+  }
+  /* Ячейка контекста меряет себя по своей ширине: в строке ей хватает места на одно число. */
+  .capsule.idle:not(:has([data-details])) :global(.cell) { width: var(--s14); }
+  .capsule.idle textarea {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .capsule.idle textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
