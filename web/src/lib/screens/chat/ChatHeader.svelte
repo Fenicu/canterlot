@@ -443,7 +443,8 @@
 
 				<!-- Откуда сессия и как её ведут: родитель, маршрут и автопинок ушли сюда из шапки. -->
 				{#if parentId}
-					<MenuItem icon="up" href={resolve(`c/${parentId}`)} onclick={() => { menuOpen = false; }}>
+					<!-- Стрелка вверх — к сессии, которая запустила эту; ветка остаётся у маршрута, булавка — у названия. -->
+				<MenuItem icon="send" href={resolve(`c/${parentId}`)} onclick={() => { menuOpen = false; }}>
 						<span data-role="menu-parent">Запущена сессией {parentTitle || 'без названия'}</span>
 					</MenuItem>
 				{/if}
@@ -453,7 +454,8 @@
 					</MenuItem>
 				{/if}
 				{#if nudgeText && onOpenNudge}
-					<MenuItem icon="pin" onclick={() => { menuOpen = false; onOpenNudge(); }}>
+					<!-- Автопинок ждёт простоя и толкает агента: песочные часы, круговая стрелка занята очередью. -->
+					<MenuItem icon="hourglass" onclick={() => { menuOpen = false; onOpenNudge(); }}>
 						<span data-role="menu-nudge">{nudgeText}</span>
 					</MenuItem>
 				{/if}

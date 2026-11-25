@@ -136,6 +136,19 @@ describe("chat/ChatHeader", () => {
     expect(onOpenNudge).toHaveBeenCalledOnce();
   });
 
+  it("parent_route_and_nudge_items_have_icons_of_their_own", async () => {
+    const target = show(delegated(), { parentTitle: "Кантерлот", onOpenRoute: vi.fn(), onOpenNudge: vi.fn(), onOpenSheet: vi.fn() });
+    await vi.waitFor(() => {
+      openMenu(target);
+      expect(target.querySelector('[data-role="menu-route"]')).not.toBeNull();
+    });
+    const icons = [...target.querySelectorAll<HTMLElement>('[role="menuitem"]')].map((item) => [...item.querySelectorAll("svg path")].map((path) => path.getAttribute("d")).join("|"));
+    // Родитель, маршрут, автопинок и «Название, цвет и группы» не делят значок.
+    expect(new Set(icons.slice(0, 4)).size).toBe(4);
+    expect(icons.slice(4)).not.toContain(icons[0]);
+    expect(icons.slice(3)).not.toContain(icons[2]);
+  });
+
   it("menu_has_no_parent_route_or_nudge_items_when_they_do_not_apply", () => {
     const target = show(chatWith(), { onOpenRoute: vi.fn(), onOpenNudge: vi.fn() });
     const menu = openMenu(target);
