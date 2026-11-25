@@ -52,6 +52,10 @@ case "${OUT}" in
     *SECRET-MARKER-9f3a*|*time.sleep*) case_fail "proc_ticks leaked arguments: ${OUT}" ;;
     *) case_ok "arguments beyond argv[1] not printed" ;;
 esac
+# Стенда у кейса нет, зачистка его процесс не знает: гасим сами, по своему pid.
+kill -KILL "${HARNESS_PIDS[@]}" 2>/dev/null || true
+wait "${HARNESS_PIDS[@]}" 2>/dev/null || true
+HARNESS_PIDS=()
 case_end
 
 # G4: сама проверка не вакуумна: плохой скрипт ловится теми же шаблонами.
@@ -76,6 +80,50 @@ for script in cutover.sh preflight.sh stage.sh verify.sh retain.sh rollback-db.s
         case_fail "source ${script}: output or exit was [${out}]"
     fi
 done
+case_end
+
+# G6: зачистка кейса гасит всё, что кейс запустил, и только это: сессию spawn_session с циклом
+# инструментов целиком (CLI с exe /bin/bash, вызовы — /bin/sleep) и приманку с exe вне стенда;
+# чужой процесс без метки стенда остаётся жить. Процесс кейса, который возвращается после каждого
+# SIGKILL, зачистка называет и валит набор. Кейс последний: setup_case меняет TMPDIR и PATH.
+running() {
+    local st
+    st="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')" || return 1
+    [ -n "${st}" ] && [ "${st:0:1}" != "Z" ]
+}
+case_begin "the teardown reaps every process of the case, only those, and reports survivors"
+setup_case reap
+REAP_EXEC="$(new_exec_id)"
+SESSION_TOOL_CHURN=1 spawn_session "${REAP_EXEC}" bbbbbbbbbbbb 100
+REAP_SUP="$(sup_pid_of "${REAP_EXEC}")"
+REAP_LOOP="$(cli_pid_of "${REAP_EXEC}" "${REAP_SUP}")"
+[ -n "${REAP_SUP}" ] && [ -n "${REAP_LOOP}" ] && case_ok "a churning session is up (supervisor ${REAP_SUP}, tool loop ${REAP_LOOP})" || case_fail "setup: supervisor [${REAP_SUP}] loop [${REAP_LOOP}]"
+assert_eq "${#HARNESS_SIDS[@]}" "1" "the session of spawn_session is recorded"
+setsid bash -c "exec -a 'stray-holder ${REAP_EXEC}' sleep 1000" >/dev/null 2>&1 <&- &
+REAP_STRAY=$!
+env -u FAKE_ROOT sleep 1000 &
+REAP_OUTSIDER=$!
+command sleep 0.3
+LEFT=""
+harness_reap_case "${FAKE_ROOT}" >"${FAKE_ROOT}/reap.out" && LEFT=none || LEFT="$(cat "${FAKE_ROOT}/reap.out")"
+assert_eq "${LEFT}" "none" "nothing of the case is left after the reap"
+running "${REAP_LOOP}" && case_fail "the tool loop survived (exe outside the stand)" || case_ok "the tool loop of the session is gone"
+running "${REAP_SUP}" && case_fail "the supervisor survived" || case_ok "the supervisor is gone"
+running "${REAP_STRAY}" && case_fail "the stray with the stand marker survived" || case_ok "the stray started by the case is gone"
+running "${REAP_OUTSIDER}" && case_ok "a process without the stand marker is left alone" || case_fail "the teardown killed a process outside the case"
+# Процесс кейса, который возвращается: родитель без метки снова и снова запускает помеченного ребёнка.
+# shellcheck disable=SC2016 # $1 и $! раскрывает дочерний bash
+env -u FAKE_ROOT bash -c 'while :; do FAKE_ROOT="$1" sleep 1000 & wait $!; done' _ "${FAKE_ROOT}" 2>/dev/null &
+REAP_RESPAWN=$!
+command sleep 0.3
+OUT="$( (harness_cleanup normal) 2>&1 )" || true
+case "${OUT}" in
+    *"outlived the teardown of ${FAKE_ROOT}"*sleep*) case_ok "a survivor is named and fails the case" ;;
+    *) case_fail "a survivor went unreported: [${OUT}]" ;;
+esac
+kill -KILL "${REAP_RESPAWN}" "${REAP_OUTSIDER}" 2>/dev/null || true
+{ wait "${REAP_RESPAWN}" "${REAP_OUTSIDER}" || true; } 2>/dev/null
+teardown_case
 case_end
 
 printf 'guardrails: %s passed, %s failed\n' "${PASS_COUNT}" "${FAIL_COUNT}"

@@ -11,6 +11,9 @@ REPO_ROOT="$(cd "${HARNESS_DIR}/../../.." && pwd)"
 
 FAKE_ROOT=""
 HARNESS_PIDS=()
+# Сессии setsid, начатые spawn_session в текущем кейсе (их гасит зачистка целиком).
+HARNESS_SIDS=()
+HARNESS_SUP_PID=""
 
 harness_log() { printf '[harness] %s\n' "$*"; }
 
@@ -121,6 +124,7 @@ setup_case() {
     FAKE_ROOT="$(mktemp -d /tmp/canterlot-deploy-test.XXXXXX)"
     export FAKE_ROOT
     HARNESS_PIDS=()
+    HARNESS_SIDS=()
     mkdir -p "${FAKE_ROOT}/fake-bin" "${FAKE_ROOT}/state" "${FAKE_ROOT}/tmp"
     cp "${HARNESS_DIR}"/fake-bin/* "${FAKE_ROOT}/fake-bin/" 2>/dev/null || true
     chmod +x "${FAKE_ROOT}"/fake-bin/*
@@ -325,6 +329,11 @@ spawn_session() {
     # образце не совпадал никогда и стоил полные 5 с на сессию; к тому же pgrep -f
     # ловит обёртку bash -c, в чьей командной строке тот же текст.
     harness_wait_supervisor "${WORKER_DATA}/executions/${exec_id}"
+    # Сессия setsid целиком принадлежит кейсу: зачистка гасит её всю, вместе с CLI, чей exe
+    # лежит вне FAKE_ROOT (цикл SESSION_TOOL_CHURN — /bin/bash, его вызовы — /bin/sleep).
+    local sid
+    sid="$(ps -o sid= -p "${HARNESS_SUP_PID}" 2>/dev/null | tr -d ' ')" || sid=""
+    if [ -n "${sid}" ]; then HARNESS_SIDS+=("${sid}"); fi
     # Сокет сессии, как у настоящего воркера (проверка обслуживания ждёт его).
     mkdir -p "${WORKER_SOCKET_DIR}"
     python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()' \
@@ -339,6 +348,7 @@ harness_wait_supervisor() {
             argv=()
             mapfile -d '' -t argv 2>/dev/null <"${d}/cmdline" || continue
             if [ "${argv[1]:-}" = "supervise" ] && [ "${argv[3]:-}" = "${want}" ]; then
+                HARNESS_SUP_PID="${d#/proc/}"
                 return 0
             fi
         done
@@ -383,26 +393,99 @@ teardown_case() {
 # никогда не совпадут с текущими и не попадут в proc-скан.
 new_exec_id() { python3 -c "import uuid; print(uuid.uuid4())"; }
 
-# Финальная зачистка на любом выходе: убиваем ТОЛЬКО процессы, чей exe лежит
-# внутри FAKE_ROOT (прод-сессии этой VM никогда не трогаем: их exe — в
-# ~/.local/opt/canterlot). Без этого упавший тест оставлял живых слипов.
+# Процессы кейса со стендом $1, по одному pid в строке (зомби не в счёт):
+#   - каждый процесс сессий setsid из spawn_session (HARNESS_SIDS), если в сессии есть процесс
+#     с меткой стенда: так сессия, чей номер уже занял чужой процесс, не тронется;
+#   - процессы с exe внутри стенда (воркеры, поднятые cutover, приманки из fake-bin);
+#   - процессы с FAKE_ROOT=<стенд> в окружении: всё, что кейс запустил после setup_case,
+#     в том числе крючки сценариев со своим setsid и CLI с exe вне стенда.
+# Ни имён, ни образцов командной строки: стенд — свой mktemp-каталог, сессии — записанные номера.
+# Скан идёт в подоболочке без экспорта FAKE_ROOT: сами grep, find и ps метки не несут.
+harness_case_pids() {
+    local root="$1"
+    [ -n "${root}" ] || return 0
+    (
+        export -n FAKE_ROOT
+        declare -A pick=() stat_of=() sid_of=() marked_sid=()
+        local pid sid stat exe f
+        while read -r pid sid stat; do
+            stat_of[${pid}]="${stat}"
+            sid_of[${pid}]="${sid}"
+        done < <(ps -eo pid=,sid=,stat= 2>/dev/null)
+        while IFS= read -r f; do
+            f="${f#/proc/}"
+            pick[${f%/environ}]=1
+        done < <(grep -lsxzF "FAKE_ROOT=${root}" /proc/[0-9]*/environ 2>/dev/null || true)
+        while IFS=' ' read -r pid exe; do
+            case "${exe}" in "${root}"/*) pick[${pid}]=1 ;; esac
+        done < <(find /proc -mindepth 2 -maxdepth 2 -name exe -printf '%h %l\n' 2>/dev/null | sed 's|^/proc/||')
+        if [ "${#HARNESS_SIDS[@]}" -gt 0 ]; then
+            for pid in "${!pick[@]}"; do
+                [ -n "${sid_of[${pid}]:-}" ] && marked_sid[${sid_of[${pid}]}]=1
+            done
+            for sid in "${HARNESS_SIDS[@]}"; do
+                [ -n "${marked_sid[${sid}]:-}" ] || continue
+                for pid in "${!sid_of[@]}"; do
+                    if [ "${sid_of[${pid}]}" = "${sid}" ]; then pick[${pid}]=1; fi
+                done
+            done
+        fi
+        for pid in "${!pick[@]}"; do
+            stat="${stat_of[${pid}]:-}"
+            # Нет в ps — процесс уже ушёл; Z — зомби, он не работает.
+            [ -n "${stat}" ] || continue
+            case "${stat}" in Z*) continue ;; esac
+            [ "${pid}" = "$$" ] && continue
+            printf '%s\n' "${pid}"
+        done
+    )
+}
+
+# Погасить процессы кейса и убедиться, что их нет: SIGKILL (воркеры, поднятые из обработчика
+# cutover, унаследовали SIG_IGN для INT/TERM), затем повторный скан — до 3 с, с новым SIGKILL на
+# каждом круге: цикл инструментов успевает породить ещё один вызов между сканом и kill.
+# Печатает pid и argv[0] тех, кто пережил все круги; код 1, если такие есть.
+harness_reap_case() {
+    local root="$1" round pid left=""
+    for round in $(seq 1 30); do
+        left="$(harness_case_pids "${root}")"
+        [ -n "${left}" ] || return 0
+        for pid in ${left}; do
+            kill -KILL "${pid}" 2>/dev/null || true
+        done
+        for pid in ${left}; do
+            # Свои дети снимаются с учёта сразу, чужих (переданных init) забирает их родитель.
+            wait "${pid}" 2>/dev/null || true
+        done
+        command sleep 0.1
+    done
+    left="$(harness_case_pids "${root}")"
+    [ -n "${left}" ] || return 0
+    for pid in ${left}; do
+        printf '%s %s\n' "${pid}" "$(tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null | cut -d' ' -f1)"
+    done
+    return 1
+}
+
+# Финальная зачистка на любом выходе: гасим ТОЛЬКО процессы кейса (harness_case_pids). Прод-сессии
+# этой VM не трогаются: их exe — в ~/.local/opt/canterlot, метки стенда в окружении у них нет, а
+# их сессии кейс не открывал. Самопроверка: если процесс кейса пережил зачистку, набор падает.
 harness_cleanup() {
     # $1 = normal при явном вызове из teardown_case; из ловушки EXIT — авария.
-    local mode="${1:-trap}"
+    local mode="${1:-trap}" survivors=""
     if [ -n "${FAKE_ROOT:-}" ]; then
-        # Один find на всю таблицу процессов (а не readlink на процесс): цели
-        # /proc/*/exe, лежащие внутри FAKE_ROOT.
-        while IFS=' ' read -r pid exe; do
-            case "${exe}" in
-                # SIGKILL: воркеры, поднятые из обработчика cutover, унаследовали
-                # SIG_IGN для INT/TERM и обычным kill не умирают.
-                "${FAKE_ROOT}"/*)
-                    kill -KILL "${pid}" 2>/dev/null || true
-                    wait "${pid}" 2>/dev/null || true ;;
-            esac
-        done < <(find /proc -mindepth 2 -maxdepth 2 -name exe -printf '%h %l\n' 2>/dev/null | sed 's|^/proc/||')
+        survivors="$(harness_reap_case "${FAKE_ROOT}")" || true
+        if [ -n "${survivors}" ]; then
+            case_fail "processes started by the case outlived the teardown of ${FAKE_ROOT}: $(printf '%s' "${survivors}" | tr '\n' ';')"
+            if [ "${mode}" = "trap" ]; then
+                # Из ловушки EXIT код набора уже выбран: утечка меняет его на провал.
+                harness_log "keeping failed case dir ${FAKE_ROOT}"
+                exit 1
+            fi
+        fi
     fi
     HARNESS_PIDS=()
+    HARNESS_SIDS=()
     # Упавший кейс не трогаем: каталог остаётся для разбора. Из ловушки EXIT
     # сохраняем только если умерли посреди кейса (IN_CASE); штатный конец файла
     # при IN_CASE=0 чистит как обычно.
