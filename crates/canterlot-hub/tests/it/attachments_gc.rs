@@ -233,6 +233,7 @@ async fn gc_removes_orphan_blobs_and_staging_without_a_row() {
             orphan_blobs: 2,
             orphan_staging: 3,
             unreferenced_media: 0,
+            stale_locks: 0,
         }
     );
     for gone in [
@@ -398,6 +399,51 @@ async fn gc_skips_locked_rows_and_is_safe_to_run_twice() {
     assert_eq!(f.events("attachment_state_changed").await.len(), events);
     assert_eq!(f.state_of(ready).await, "released");
     assert_eq!(f.state_of(uploading).await, "failed");
+}
+
+/// Lock-файл вложения, от которого не осталось ни строки, ни файлов, убирается после
+/// отсрочки. Живое вложение, свежий файл и занятый захват остаются; файл без строки
+/// уходит вместе со своим lock-файлом; убранный ID снова берёт захват на новом файле.
+#[tokio::test]
+async fn gc_removes_lock_files_of_vanished_attachments() {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fixture::new(pool).await;
+    let lock = |id: Uuid| f.config.blob_dir.join("locks").join(id.to_string());
+    let touch = |id: Uuid| drop(f.blobs().try_lock(id).unwrap().expect("free lock"));
+    let data = content(512, 5);
+    let live = f.ready("live.bin", "application/octet-stream", &data).await;
+    assert_eq!(f.submit("keep", "t", &[live]).await.status, 201);
+    assert!(lock(live).exists(), "the upload created the lock file");
+    let (gone, fresh, busy, orphan) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    for id in [gone, fresh, busy, orphan] {
+        touch(id);
+    }
+    std::fs::create_dir_all(f.blob_path(orphan).parent().unwrap()).unwrap();
+    std::fs::write(f.blob_path(orphan), &data).unwrap();
+    set_mtime(&f.blob_path(orphan), 30);
+    for id in [live, gone, busy, orphan] {
+        set_mtime(&lock(id), 30);
+    }
+    let held = f.blobs().try_lock(busy).unwrap().expect("free lock");
+    let report = gc::run_once(&f.pool, f.blobs(), Utc::now(), DAY)
+        .await
+        .unwrap();
+    assert_eq!((report.orphan_blobs, report.stale_locks), (1, 2));
+    assert!(!lock(gone).exists());
+    assert!(!lock(orphan).exists());
+    assert!(lock(live).exists(), "a cataloged attachment keeps its lock");
+    assert!(lock(fresh).exists(), "a young lock may belong to an upload");
+    assert!(lock(busy).exists(), "a held lock is never removed");
+    assert!(f.blob_path(live).exists());
+    drop(held);
+    touch(gone);
+    assert!(lock(gone).exists());
+    assert_eq!(f.state_of(live).await, "ready");
 }
 
 /// Обёртка, которая видит состояние строки в момент удаления blob и может сорвать удаление.

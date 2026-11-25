@@ -98,6 +98,15 @@ pub trait BlobStore: Send + Sync {
     async fn delete_staging(&self, id: Uuid) -> io::Result<()>;
     async fn delete_blob(&self, id: Uuid) -> io::Result<()>;
     async fn scan(&self) -> io::Result<Vec<StoredFile>>;
+    /// Lock-файлы тома с временем создания: сборщик убирает те, за которыми ничего не осталось.
+    async fn scan_locks(&self) -> io::Result<Vec<(Uuid, DateTime<Utc>)>> {
+        Ok(Vec::new())
+    }
+    /// Удаляет lock-файл, захват которого держит этот драйвер. Следующий захват того же
+    /// ID создаст новый файл; захват на удалённом файле `try_lock` не принимает.
+    async fn delete_lock(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Локальный том: `staging/<id>.part` и `blobs/<последние 2 hex>/<id>` в одном `blob_dir` на одной ФС.
@@ -108,6 +117,16 @@ pub struct LocalBlobStore {
     trace: Arc<dyn PublishTrace>,
     locks: PathBuf,
     held: Option<(Uuid, Arc<fs::File>)>,
+}
+
+/// Итог попытки захвата на открытом lock-файле.
+#[derive(Debug, PartialEq, Eq)]
+enum LockAttempt {
+    Held,
+    /// Захват держит другой драйвер.
+    Busy,
+    /// Файл успели удалить: по пути его нет или лежит новый.
+    Replaced,
 }
 
 fn create_private_dir(path: &Path) -> io::Result<()> {
@@ -291,6 +310,34 @@ impl LocalBlobStore {
         .map_err(|_| io::Error::other("blob delete failed"))?
     }
 
+    fn open_lock(&self, id: Uuid) -> io::Result<fs::File> {
+        fs::File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(self.locks.join(id.to_string()))
+    }
+
+    /// Захват на уже открытом lock-файле с проверкой, что по пути лежит он же.
+    fn lock_opened(&self, id: Uuid, file: &fs::File) -> io::Result<LockAttempt> {
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Ok(LockAttempt::Busy),
+            Err(fs::TryLockError::Error(error)) => return Err(error),
+        }
+        let opened = file.metadata()?;
+        match fs::metadata(self.locks.join(id.to_string())) {
+            Ok(current) if (current.dev(), current.ino()) == (opened.dev(), opened.ino()) => {
+                Ok(LockAttempt::Held)
+            }
+            Ok(_) => Ok(LockAttempt::Replaced),
+            Err(error) if not_found(&error) => Ok(LockAttempt::Replaced),
+            Err(error) => Err(error),
+        }
+    }
+
     fn scan_blocking(&self) -> io::Result<Vec<StoredFile>> {
         let mut found = Vec::new();
         let mtime = |path: &Path| -> io::Result<DateTime<Utc>> {
@@ -359,22 +406,53 @@ impl BlobStore for LocalBlobStore {
         if self.held.is_some() {
             return Err(io::Error::other("blob store already locked"));
         }
-        let file = fs::File::options()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(self.locks.join(id.to_string()))?;
-        match file.try_lock() {
-            Ok(()) => {
-                let mut store = self.clone();
-                store.held = Some((id, Arc::new(file)));
-                Ok(Some(Box::new(store)))
+        // Сборщик удаляет lock-файлы, за которыми ничего не осталось. Файл, открытый до
+        // такого удаления, — уже не тот, что лежит по пути: захват на нём никого не
+        // исключает. Тогда открываем заново; три подряд удаления под рукой не бывает.
+        for _ in 0..3 {
+            let file = self.open_lock(id)?;
+            match self.lock_opened(id, &file)? {
+                LockAttempt::Held => {
+                    let mut store = self.clone();
+                    store.held = Some((id, Arc::new(file)));
+                    return Ok(Some(Box::new(store)));
+                }
+                LockAttempt::Busy => return Ok(None),
+                LockAttempt::Replaced => {}
             }
-            Err(fs::TryLockError::WouldBlock) => Ok(None),
-            Err(fs::TryLockError::Error(error)) => Err(error),
         }
+        Ok(None)
+    }
+    async fn scan_locks(&self) -> io::Result<Vec<(Uuid, DateTime<Utc>)>> {
+        let locks = self.locks.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut found = Vec::new();
+            for entry in fs::read_dir(&locks)? {
+                let entry = entry?;
+                let Some(id) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| Uuid::parse_str(name).ok())
+                else {
+                    continue;
+                };
+                // Lock-файл не пишется, поэтому время изменения — время его создания.
+                match entry.metadata().and_then(|meta| meta.modified()) {
+                    Ok(created) => found.push((id, DateTime::<Utc>::from(created))),
+                    Err(error) if not_found(&error) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(found)
+        })
+        .await
+        .map_err(|_| io::Error::other("lock scan failed"))?
+    }
+    async fn delete_lock(&self) -> io::Result<()> {
+        let Some((id, _)) = &self.held else {
+            return Err(io::Error::other("blob store is not locked"));
+        };
+        self.remove_file(self.locks.join(id.to_string())).await
     }
     async fn staging_len(&self, id: Uuid) -> io::Result<Option<u64>> {
         match tokio::fs::metadata(self.staging_path(id)).await {
@@ -465,5 +543,64 @@ impl BlobStore for LocalBlobStore {
         tokio::task::spawn_blocking(move || store.scan_blocking())
             .await
             .map_err(|_| io::Error::other("blob scan failed"))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store(dir: &tempfile::TempDir) -> LocalBlobStore {
+        let config = AttachmentsConfig {
+            blob_dir: dir.path().join("blobs"),
+            ..Default::default()
+        };
+        LocalBlobStore::open(&config, Arc::new(NoTrace)).unwrap()
+    }
+
+    /// Процесс открыл lock-файл, а сборщик успел его удалить и отпустить. Захват на таком
+    /// файле не принимается: другой процесс уже взял бы захват на новом файле того же ID.
+    #[tokio::test]
+    async fn a_lock_on_a_removed_lock_file_is_not_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let id = Uuid::now_v7();
+        let opened_before = store.open_lock(id).unwrap();
+        let collector = store.try_lock(id).unwrap().expect("free lock");
+        assert_eq!(
+            store.lock_opened(id, &opened_before).unwrap(),
+            LockAttempt::Busy
+        );
+        collector.delete_lock().await.unwrap();
+        drop(collector);
+        assert!(store.scan_locks().await.unwrap().is_empty());
+        // Пути нет вовсе.
+        assert_eq!(
+            store.lock_opened(id, &opened_before).unwrap(),
+            LockAttempt::Replaced
+        );
+        opened_before.unlock().unwrap();
+        // По пути уже новый файл: его захват и захват на старом друг друга не исключают,
+        // поэтому старый обязан быть отвергнут.
+        let fresh = store.try_lock(id).unwrap().expect("a new lock file");
+        assert_eq!(
+            store.lock_opened(id, &opened_before).unwrap(),
+            LockAttempt::Replaced
+        );
+        assert!(
+            store.try_lock(id).unwrap().is_none(),
+            "the new lock is held"
+        );
+        drop(fresh);
+        assert!(store.try_lock(id).unwrap().is_some());
+        let listed = store.scan_locks().await.unwrap();
+        assert_eq!(listed.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [id]);
+    }
+
+    #[tokio::test]
+    async fn only_a_locked_driver_deletes_its_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        assert!(store.delete_lock().await.is_err());
     }
 }
