@@ -1100,6 +1100,16 @@ impl ExecutionManager {
                     .collect())
             })
             .await?;
+        // Команды старта, на которые хаб ещё ждёт ответа: нужны записям, оставшимся в `Spawning`.
+        let mut pending_starts: HashMap<Uuid, Command> = self
+            .shared
+            .store
+            .call(|store| Ok(open(store)?.stored_commands()?))
+            .await?
+            .into_iter()
+            .filter(|command| matches!(command.kind, Some(Kind::StartExecution(_))))
+            .filter_map(|command| Some((Uuid::parse_str(&command.execution_id).ok()?, command)))
+            .collect();
         let mut attached = Vec::new();
         let mut reclaimed = HashMap::new();
         for record in records {
@@ -1147,6 +1157,14 @@ impl ExecutionManager {
                     lost_journal: false,
                 },
             );
+            if !rebooted
+                && record.phase == canterlot_proto::worker::ipc::OwnershipPhase::Spawning as i32
+            {
+                tracing::warn!(execution_id = %id, kind = "start_unfinished", "ownership was left before the supervisor attached");
+                let start = pending_starts.remove(&id);
+                manager::close_never_started(&self.shared, record, lost, start).await?;
+                continue;
+            }
             match verified {
                 Ok(linked) => {
                     if lost {

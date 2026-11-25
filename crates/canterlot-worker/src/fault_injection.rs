@@ -210,11 +210,49 @@ pub struct StoreProbe {
     duplicates: Arc<AtomicU64>,
     scanned_inbox: Arc<AtomicU64>,
     crash: Arc<Mutex<Option<StoreAppendPoint>>>,
+    hold: Arc<Mutex<Option<Held>>>,
+}
+
+struct Held {
+    point: StoreAppendPoint,
+    reached: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+/// Поток хранилища, остановленный сразу после записи: тест дожидается точки по сигналу,
+/// делает своё и сам отпускает поток. Так проверяется порядок событий без пауз.
+pub struct StoreHold {
+    reached: tokio::sync::oneshot::Receiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+}
+
+impl StoreHold {
+    pub async fn reached(&mut self) {
+        (&mut self.reached)
+            .await
+            .expect("the store never reached the held point");
+    }
+
+    pub fn release(self) {
+        let _ = self.release.send(());
+    }
 }
 
 impl StoreProbe {
     pub fn crash_after(&self, point: StoreAppendPoint) {
         *self.crash.lock().unwrap_or_else(|error| error.into_inner()) = Some(point);
+    }
+
+    /// Останавливает поток хранилища после следующей записи `point`.
+    pub fn hold_after(&self, point: StoreAppendPoint) -> StoreHold {
+        let (reached_tx, reached) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *self.hold.lock().unwrap_or_else(|error| error.into_inner()) = Some(Held {
+            point,
+            reached: reached_tx,
+            release: release_rx,
+        });
+        StoreHold { reached, release }
     }
 
     pub fn scanned_inbox_records(&self) -> u64 {
@@ -228,6 +266,19 @@ impl StoreProbe {
     pub(crate) fn appended(&self, point: StoreAppendPoint) {
         let crash = *self.crash.lock().unwrap_or_else(|error| error.into_inner());
         assert_ne!(crash, Some(point), "simulated crash");
+        let held = {
+            let mut hold = self.hold.lock().unwrap_or_else(|error| error.into_inner());
+            if hold.as_ref().is_some_and(|held| held.point == point) {
+                hold.take()
+            } else {
+                None
+            }
+        };
+        if let Some(held) = held {
+            let _ = held.reached.send(());
+            // Тест бросил ручку без `release`: поток идёт дальше.
+            let _ = held.release.recv();
+        }
     }
 
     pub fn snapshots(&self) -> Vec<StoreSnapshot> {

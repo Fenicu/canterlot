@@ -500,7 +500,17 @@ impl Env {
     }
 
     fn reopen(&mut self) {
-        let thread = open_store(self.root.path());
+        self.reopen_on(open_store(self.root.path()));
+    }
+
+    /// Хранилище с пробой: тест останавливает его поток в нужной точке записи.
+    #[cfg(feature = "fault-injection")]
+    fn reopen_with_probe(&mut self, probe: canterlot_worker::fault_injection::StoreProbe) {
+        let store = WorkerStore::open_with_probe(&self.root.path().join("store"), probe).unwrap();
+        self.reopen_on(StoreThread::new(store));
+    }
+
+    fn reopen_on(&mut self, thread: StoreThread) {
         let (sender, relay) = mpsc::channel(64);
         self.manager = Some(ExecutionManager::new_with_runtime_dir(
             self.config.clone(),
@@ -1291,6 +1301,178 @@ async fn ownership_not_verified_logs_the_reason() {
             && logs.contains("supervisor verification failed: spec"),
         "{logs}"
     );
+}
+
+/// Остановка воркера (SIGTERM при выкатке) приходит, когда запись принадлежности `Spawning`
+/// уже на диске, а сопровождение ещё не запущено. Запуск обязан дойти до конца: брошенная
+/// запись после рестарта означала `owner_lost` у сессии, у которой не было ни одного процесса.
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn shutdown_after_the_ownership_record_finishes_the_spawn() {
+    use canterlot_worker::fault_injection::{StoreAppendPoint, StoreProbe};
+    use std::{future::Future, task::Poll};
+
+    let mut env = Env::new().await;
+    env.close_manager().await;
+    let probe = StoreProbe::default();
+    env.reopen_with_probe(probe.clone());
+    assert!(env.manager().startup_verify().await.unwrap().is_empty());
+    let mut hold = probe.hold_after(StoreAppendPoint::Ownership);
+    env.start(1).await;
+    // Запись `Spawning` сделана, актор ждёт ответа потока хранилища.
+    hold.reached().await;
+    let manager = env.manager.take().unwrap();
+    let mut stopping = Box::pin(manager.shutdown());
+    // Первый опрос поднимает флаг остановки; дальше остановка ждёт акторов.
+    std::future::poll_fn(|cx| {
+        assert!(stopping.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    hold.release();
+    stopping.await;
+    env.thread.take().unwrap().close().await.unwrap();
+
+    env.reopen();
+    let record = env.ownership(env.execution).await.unwrap();
+    assert_eq!(record.phase, OwnershipPhase::Attached as i32);
+    assert!(alive(record.supervisor_pid));
+    assert_eq!(
+        env.manager().startup_verify().await.unwrap(),
+        [env.execution]
+    );
+    assert_eq!(owner_lost(&env.cj().await, env.execution), 0);
+    env.hub_session();
+    env.wait_running().await;
+    env.stop().await;
+}
+
+fn current_boot_id() -> String {
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+impl Env {
+    /// Состояние диска после жёсткой смерти воркера между записью принадлежности и запуском
+    /// сопровождения: команда старта сохранена, запись в фазе `Spawning`, процесса нет.
+    async fn leave_a_spawning_record(&mut self) -> Command {
+        let start = start_command(
+            self.execution,
+            1,
+            self.conversation,
+            "synthetic",
+            &self.work,
+        );
+        let (copy, dir) = (start.clone(), self.exec_dir());
+        let record = Ownership {
+            execution_id: self.execution.to_string(),
+            conversation_id: self.conversation.to_string(),
+            generation: 1,
+            boot_id: current_boot_id(),
+            exec_dir: dir.to_string_lossy().into_owned(),
+            ipc_socket: dir.join("ipc.sock").to_string_lossy().into_owned(),
+            secret_sha256: vec![7; 32],
+            phase: OwnershipPhase::Spawning as i32,
+            ..Default::default()
+        };
+        self.thread()
+            .call(move |store| {
+                let store = store.as_mut().unwrap();
+                store.accept_command(&copy)?;
+                store.ownership_mut()?.append(record)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        self.close_manager().await;
+        self.reopen();
+        start
+    }
+}
+
+/// `StartCli` уходит сопровождению только после фазы `Attached`: при записи `Spawning` CLI
+/// не запускался. Запуск закрывается как неудавшийся, а не уходит в `owner_lost` до ручного
+/// решения владельца.
+#[tokio::test]
+async fn spawning_record_without_a_supervisor_fails_the_start() {
+    let mut env = Env::new().await;
+    let start = env.leave_a_spawning_record().await;
+    assert!(env.manager().startup_verify().await.unwrap().is_empty());
+    let cj = env.cj().await;
+    assert_eq!(owner_lost(&cj, env.execution), 0);
+    assert_eq!(rejected_reasons(&cj), ["supervisor_start_failed"]);
+    assert!(env.terminal(&start).await);
+    let record = env.ownership(env.execution).await.unwrap();
+    assert_eq!(record.phase, OwnershipPhase::Released as i32);
+    assert_eq!(record.released_reason, "spawn_failed");
+    let observations = env.manager().observations();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].state, "failed");
+    assert!(supervisors_of(env.root.path()).is_empty());
+    // Разговор не заблокирован: следующее исполнение запускается как обычно.
+    env.hub_session();
+    env.execution = Uuid::now_v7();
+    env.start(2).await;
+    env.wait_running().await;
+    env.stop().await;
+}
+
+/// Сессия, которая уже ушла в `owner_lost` из-за брошенной записи `Spawning`, выходит из
+/// него сама: команда старта погашена прежним запуском воркера, решать владельцу нечего.
+#[tokio::test]
+async fn reported_spawning_record_exits_owner_lost_by_itself() {
+    let mut env = Env::new().await;
+    let start = env.leave_a_spawning_record().await;
+    let (id, attempt) = (start.command_id.clone(), start.dispatch_attempt);
+    env.thread()
+        .call(move |store| Ok(store.as_mut().unwrap().mark_terminal(&id, attempt)?))
+        .await
+        .unwrap();
+    assert!(env.manager().startup_verify().await.unwrap().is_empty());
+    assert_eq!(owner_lost(&env.cj().await, env.execution), 1);
+    env.hub_session();
+    env.wait_exit("supervisor_died").await;
+    env.assert_released("supervisor_died").await;
+}
+
+/// Воркер убит после запуска сопровождения, но до записи `Attached`: сопровождение живёт
+/// без владельца. Оно отвечает на сокете из записи, поэтому находится и останавливается.
+#[tokio::test]
+async fn stray_supervisor_of_a_spawning_record_is_stopped() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let mut record = env.ownership(env.execution).await.unwrap();
+    let supervisor = record.supervisor_pid;
+    env.close_manager().await;
+    env.reopen();
+    // Запись возвращается к тому, что лежало бы на диске при смерти воркера в окне запуска.
+    record.phase = OwnershipPhase::Spawning as i32;
+    record.supervisor_pid = 0;
+    record.supervisor_start_ticks = 0;
+    record.sj_journal_id = String::new();
+    record.cli_pid = 0;
+    record.cli_start_ticks = 0;
+    env.thread()
+        .call(move |store| {
+            store.as_mut().unwrap().ownership_mut()?.append(record)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(alive(supervisor));
+    assert!(env.manager().startup_verify().await.unwrap().is_empty());
+    assert!(
+        !alive(supervisor),
+        "the supervisor nobody owns is stopped during startup"
+    );
+    assert!(supervisors_of(env.root.path()).is_empty());
+    env.hub_session();
+    env.wait_exit("supervisor_died").await;
+    env.assert_released("supervisor_died").await;
 }
 
 #[tokio::test]

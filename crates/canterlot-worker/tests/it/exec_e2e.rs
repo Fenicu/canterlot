@@ -2495,8 +2495,10 @@ async fn wave_w_pre_attach_timeout_kills_own_child_and_rejects_start() {
     fixture.stop_worker().await;
 }
 
+/// Запись `Spawning` без сохранённой команды старта: CLI при ней не запускался, поэтому
+/// исполнение проходит `owner_lost` и само выходит в `failed(supervisor_died)`.
 #[tokio::test]
-async fn wave_w_spawning_ownership_reports_owner_lost_from_created() {
+async fn wave_w_spawning_ownership_leaves_owner_lost_without_the_owner() {
     let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new_with(&pool, "synthetic", &[], false, false).await;
     fixture.stop_worker().await;
@@ -2518,7 +2520,8 @@ async fn wave_w_spawning_ownership_reports_owner_lost_from_created() {
         .unwrap();
     drop(store);
     fixture.start_worker().await;
-    fixture.wait_state("owner_lost").await;
+    fixture.wait_state("failed").await;
+    assert_eq!(fixture.outcome().await.as_deref(), Some("supervisor_died"));
     assert!(fixture.guard.members().is_empty());
     fixture.finish().await;
 }

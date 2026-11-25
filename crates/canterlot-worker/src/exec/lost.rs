@@ -45,7 +45,7 @@ pub(super) struct Exit {
     outcome: &'static str,
 }
 
-const SUPERVISOR_DIED: Exit = Exit {
+pub(super) const SUPERVISOR_DIED: Exit = Exit {
     state: "failed",
     outcome: "supervisor_died",
 };

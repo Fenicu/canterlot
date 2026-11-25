@@ -588,6 +588,110 @@ pub(super) async fn report_owner_lost(
     Ok(())
 }
 
+/// Запись `Spawning` текущей загрузки: воркер умер между записью принадлежности и
+/// подтверждением сопровождения. `StartCli` уходит только после фазы `Attached`, поэтому
+/// CLI при такой записи не запускался, и ждать решения владельца в `owner_lost` незачем.
+/// Сопровождение, которое успело подняться, останавливается; запуск закрывается как
+/// неудавшийся. `reported` — хаб уже знает исполнение как `owner_lost`.
+pub(super) async fn close_never_started(
+    shared: &Arc<Shared>,
+    record: Ownership,
+    reported: bool,
+    start: Option<Command>,
+) -> Result<(), ExecError> {
+    let id = Uuid::parse_str(&record.execution_id).map_err(|_| ExecError::Verify("id"))?;
+    if let Some(stray) = stray_supervisor(&record).await {
+        tracing::warn!(
+            execution_id = %id,
+            supervisor_pid = stray.supervisor_pid,
+            kind = "stray_supervisor",
+            "supervisor of an unfinished start is stopped"
+        );
+        let grace = shared.config.supervisor.stop_grace;
+        if super::group::terminate(&stray, grace).await != super::group::Group::Empty {
+            // Остановить не вышло: дальше как с любым потерянным исполнением.
+            if !reported {
+                report_owner_lost(shared, id, record.generation).await?;
+            }
+            lost::watch(shared, stray, None);
+            return Ok(());
+        }
+    }
+    match start {
+        // Хаб ещё ждёт ответа на команду старта: отказ запуска, как при неудавшемся `spawn`.
+        Some(command) if !reported => {
+            reject(shared, &command, "supervisor_start_failed").await?;
+            ownership_update(shared, id, |record| {
+                record.phase = OwnershipPhase::Released as i32;
+                record.released_reason = "spawn_failed".into();
+            })
+            .await?;
+            let path = |text: &String| (!text.is_empty()).then(|| PathBuf::from(text));
+            remove_failed_spawn(path(&record.ipc_socket), path(&record.exec_dir)).await;
+        }
+        // Команда старта уже погашена: исполнение выходит через `owner_lost`.
+        _ => {
+            if !reported {
+                report_owner_lost(shared, id, record.generation).await?;
+            }
+            lost::watch(shared, record, Some(lost::SUPERVISOR_DIED));
+        }
+    }
+    Ok(())
+}
+
+/// Живое сопровождение записи `Spawning`: оно отвечает на сокете из записи тем же секретом.
+/// Возвращает запись с его PID и временем старта.
+async fn stray_supervisor(record: &Ownership) -> Option<Ownership> {
+    if record.exec_dir.is_empty() || record.ipc_socket.is_empty() {
+        return None;
+    }
+    let id = Uuid::parse_str(&record.execution_id).ok()?;
+    let secret = fs::read(Path::new(&record.exec_dir).join("secret")).ok()?;
+    if sha256(&secret) != record.secret_sha256 {
+        return None;
+    }
+    let linked = spawn::connect_attach(
+        Path::new(&record.ipc_socket),
+        &secret,
+        id,
+        record.generation,
+        None,
+        None,
+    )
+    .await
+    .ok()?;
+    let mut found = record.clone();
+    found.supervisor_pid = linked.attached.pid;
+    found.supervisor_start_ticks = linked.attached.start_ticks;
+    Some(found)
+}
+
+/// Неудачный запуск не оставляет каталог и сокет до следующего старта воркера: уборка
+/// находит их только по записи без владельца.
+async fn remove_failed_spawn(socket: Option<PathBuf>, dir: Option<PathBuf>) {
+    if let Some(socket) = socket
+        && let Err(error) = tokio::fs::remove_file(&socket).await
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            path = %socket.display(),
+            reason = %error,
+            "failed spawn socket removal failed"
+        );
+    }
+    if let Some(dir) = dir
+        && let Err(error) = tokio::fs::remove_dir_all(&dir).await
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            path = %dir.display(),
+            reason = %error,
+            "failed spawn directory removal failed"
+        );
+    }
+}
+
 /// `verify` снова доказал то же живое сопровождение: хаб получает факт раньше записей `SJ`,
 /// потому что `CJ` доигрывается до сверки. Сбой между записями только повторит доказательство.
 pub(super) async fn reclaim_owner(
@@ -1574,6 +1678,13 @@ impl Actor {
         self.exec_dir = Some(dir.clone());
         self.ipc_socket = Some(prepared.socket.clone());
         let boot_id = self.shared.boot_id().await?.clone();
+        // Последняя точка, где остановка воркера ещё отменяет запуск без следа: команда
+        // старта остаётся в хранилище и доиграется после рестарта. После записи
+        // принадлежности запуск идёт до конца, иначе на диске осталась бы запись `Spawning`
+        // без процесса.
+        if *self.shutdown.borrow() {
+            return Ok(false);
+        }
         let record = Ownership {
             execution_id: id.to_string(),
             generation,
@@ -1604,9 +1715,6 @@ impl Actor {
                 (exe, bin)
             }
         };
-        if *self.shutdown.borrow() {
-            return Ok(false);
-        }
         self.drain_mailbox();
         if self.stop_pending() {
             self.cancel_start().await?;
@@ -1717,28 +1825,7 @@ impl Actor {
                 record.released_reason = "spawn_failed".into();
             })
             .await?;
-            // Неудачный запуск не оставляет каталог и сокет до следующего старта
-            // воркера: уборка находит их только по записи без владельца.
-            if let Some(socket) = self.ipc_socket.clone()
-                && let Err(error) = tokio::fs::remove_file(&socket).await
-                && error.kind() != io::ErrorKind::NotFound
-            {
-                tracing::warn!(
-                    path = %socket.display(),
-                    reason = %error,
-                    "failed spawn socket removal failed"
-                );
-            }
-            if let Some(dir) = self.exec_dir.clone()
-                && let Err(error) = tokio::fs::remove_dir_all(&dir).await
-                && error.kind() != io::ErrorKind::NotFound
-            {
-                tracing::warn!(
-                    path = %dir.display(),
-                    reason = %error,
-                    "failed spawn directory removal failed"
-                );
-            }
+            remove_failed_spawn(self.ipc_socket.clone(), self.exec_dir.clone()).await;
         }
         self.released = true;
         Ok(false)
