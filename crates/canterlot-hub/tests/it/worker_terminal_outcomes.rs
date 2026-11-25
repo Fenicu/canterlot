@@ -24,6 +24,8 @@ const WORKER_TERMINALS: &[(&[ExecutionState], ExecutionState, &str)] = &[
     (&[Starting, Stopping], Failed, "cli_incompatible"),
     (&[Starting, Stopping], Failed, "context_exhausted"),
     (&[Starting, Stopping], Failed, "protocol_incompatible"),
+    (&[Starting, Stopping], Failed, "storage_failure"),
+    (&[Starting, Running, Stopping], Failed, "storage_failure"),
     (&[Starting, Stopping], Failed, "crashed"),
     // exec/manager.rs: отмена до запуска сопровождения.
     (&[], Stopped, "start_cancelled"),
