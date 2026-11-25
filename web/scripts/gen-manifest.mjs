@@ -1,4 +1,7 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import postcss from 'postcss';
 
@@ -17,6 +20,16 @@ export function darkTokens(css, palette) {
   return tokens;
 }
 
+/**
+ * Адрес значка с хэшем содержимого: прежний адрес Chrome держал в кеше, и установка
+ * показывала значок старой версии. Новый файл — новый адрес.
+ */
+function versioned(src) {
+  // Путь собирается без new URL(…, import.meta.url): Vite переписывает такой шаблон в адрес ассета.
+  const body = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'static', src));
+  return `${src}?v=${createHash('sha256').update(body).digest('hex').slice(0, 12)}`;
+}
+
 export function manifest(css) {
   // Заставка установленного приложения совпадает с фоном палитры по умолчанию.
   const tokens = darkTokens(css);
@@ -24,9 +37,9 @@ export function manifest(css) {
     id: '/', start_url: '/', scope: '/', name: 'Canterlot', short_name: 'Canterlot', lang: 'ru', display: 'standalone',
     theme_color: tokens.bg, background_color: tokens.bg,
     icons: [
-      { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
-      { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-      { src: '/icons/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+      { src: versioned('/icons/icon-192.png'), sizes: '192x192', type: 'image/png', purpose: 'any' },
+      { src: versioned('/icons/icon-512.png'), sizes: '512x512', type: 'image/png', purpose: 'any' },
+      { src: versioned('/icons/icon-maskable-512.png'), sizes: '512x512', type: 'image/png', purpose: 'maskable' }
     ],
     shortcuts: [{ name: 'Новая сессия', url: '/new' }]
   };

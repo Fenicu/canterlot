@@ -26,8 +26,11 @@ test('manifest_is_generated_from_tokens_and_valid', async () => {
   expect(m).not.toHaveProperty('share_target');
   expect(m.icons).toHaveLength(3);
   for (const icon of m.icons) {
-    const png = readFileSync(`static${icon.src}`);
+    const [path, query] = icon.src.split('?');
+    const png = readFileSync(`static${path}`);
     expect(`${png.readUInt32BE(16)}x${png.readUInt32BE(20)}`).toBe(icon.sizes);
+    // Адрес значка меняется с содержимым: Chrome не берёт из кеша значок прежней версии.
+    expect(query).toBe(`v=${createHash('sha256').update(png).digest('hex').slice(0, 12)}`);
   }
 });
 
