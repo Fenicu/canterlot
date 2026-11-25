@@ -583,6 +583,8 @@ export class BlockSync {
       offset = next;
     }
     if (block.ticket !== mine) return;
+    // Прочитанное с начала тело целое, даже если история показывала только его начало.
+    if (fromBytes === 0) block.truncated = false;
     await this.#replay(block);
     if (block.ticket === mine) trimFinalBody(block);
   }

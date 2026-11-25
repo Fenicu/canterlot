@@ -1908,15 +1908,21 @@ export class ChatStore {
         height: file.height,
       }));
     }
-    block.truncated = item.content_truncated;
+    // У идущего вывода инструмента история отдаёт только начало, но ревизию всего текста:
+    // следующая дельта легла бы прямо на это начало, и середина пропала бы.
+    const prefixOnly = item.state === "streaming" && item.content_truncated;
+    // Живое тело той же или более новой ревизии полнее начала из истории.
+    const ahead =
+      prefixOnly && block.state === "streaming" && block.body !== "" && block.rev >= item.rev;
+    if (!ahead) block.truncated = item.content_truncated;
     block.contentBytes = item.content_bytes;
-    if (
-      !block ||
-      wholesale ||
-      block.state === "streaming" ||
-      block.state === "stale" ||
-      block.body === ""
-    ) {
+    const replace =
+      !ahead &&
+      (wholesale ||
+        block.state === "streaming" ||
+        block.state === "stale" ||
+        block.body === "");
+    if (replace) {
       block.body = item.content;
       block.bytes = utf8Length(item.content);
       block.rev = item.rev;
@@ -1936,6 +1942,12 @@ export class ChatStore {
       block.state = item.state;
     }
     block.incompleteReason = item.incomplete_reason ?? block.incompleteReason;
+    if (replace && prefixOnly) {
+      // Тело читается с хаба целиком; дельты до его прихода ждут в очереди блока.
+      block.state = "stale";
+      block.sawGap = true;
+      this.#sync.handle([{ type: "refetch", blockId: block.id, fromBytes: 0 }]);
+    }
     return block;
   }
 
