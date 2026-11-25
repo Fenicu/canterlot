@@ -3191,6 +3191,21 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Барьер перед прерыванием не лёг на диск, и CLI не прерван. Намерение
+    /// `SentToAgent` могло уже стоять в очереди или даже на диске, поэтому за ним
+    /// встаёт явный терминальный исход «не передано» (`Superseded`): исполнение уходит
+    /// в остановку по отказу хранения. Ключ остаётся в `known_interrupts`, и повтор той
+    /// же команды агенту не уйдёт.
+    fn interrupt_not_transmitted(
+        &mut self,
+        id: &str,
+        attempt: u32,
+        error: SupervisorError,
+    ) -> Result<(), SupervisorError> {
+        self.interrupt_record(id, attempt, InterruptState::Superseded)?;
+        Err(error)
+    }
+
     #[cfg(test)]
     async fn on_interrupt(&mut self, id: String, attempt: u32) -> Result<(), SupervisorError> {
         self.on_interrupt_guarded(id, attempt, String::new(), 0)
@@ -3226,7 +3241,9 @@ impl Supervisor {
                 // который мог ожить, прерывать нельзя. Охрана закрывается отказом.
                 budget_exhausted = drained == GUARD_DRAIN_BUDGET;
             }
-            self.sj.flush()?;
+            if let Err(error) = self.sj.flush() {
+                return self.interrupt_not_transmitted(&id, attempt, error);
+            }
             if budget_exhausted {
                 return self.interrupt_record(&id, attempt, InterruptState::TurnMismatch);
             }
@@ -3246,8 +3263,10 @@ impl Supervisor {
             return self.interrupt_record(&id, attempt, InterruptState::NotApplicable);
         }
         self.interrupt_record(&id, attempt, InterruptState::SentToAgent)?;
+        if let Err(error) = self.sj.flush() {
+            return self.interrupt_not_transmitted(&id, attempt, error);
+        }
         self.aborting_turn = true;
-        self.sj.flush()?;
         let Some(adapter) = self.adapter.as_mut() else {
             return Ok(());
         };
@@ -4815,6 +4834,77 @@ mod tests {
             Body::ExecutionState(fact) if fact.outcome == "storage_failure"
         )));
         assert!(matches!(bodies.last(), Some(Body::JournalClosed(_))));
+    }
+
+    /// Запись в SJ отказывает, чтение работает (как при заполненном диске).
+    fn set_sj_writable(exec_dir: &std::path::Path, writable: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let sj = exec_dir.join("sj");
+        let (dir_mode, file_mode) = if writable {
+            (0o700, 0o600)
+        } else {
+            (0o500, 0o400)
+        };
+        for entry in std::fs::read_dir(&sj).unwrap().flatten() {
+            if entry.file_name().to_string_lossy().starts_with("seg-") {
+                std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(file_mode))
+                    .unwrap();
+            }
+        }
+        std::fs::set_permissions(&sj, std::fs::Permissions::from_mode(dir_mode)).unwrap();
+    }
+
+    fn interrupt_states(bodies: &[Body], id: &str) -> Vec<i32> {
+        bodies
+            .iter()
+            .filter_map(|body| match body {
+                Body::InterruptStatus(status) if status.command_id == id => Some(status.state),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Барьер перед прерыванием (запись намерения `SentToAgent` либо сверка охраны)
+    /// не лёг на диск, и CLI не прерван. Команда получает явный терминальный исход
+    /// «не передано» (`Superseded`), а повтор того же ключа агенту не уходит.
+    #[tokio::test]
+    async fn a_failed_interrupt_barrier_ends_the_command_as_not_transmitted() {
+        for guarded in [false, true] {
+            let (dir, mut supervisor, state) = test_supervisor();
+            state.lock().unwrap().ack_interrupt = true;
+            let first = queue_owner(&mut supervisor);
+            supervisor.try_transmit().await.unwrap();
+            supervisor.sj.flush().unwrap();
+            let id = Uuid::now_v7().to_string();
+            let (turn, checkpoint) = if guarded {
+                (first.0.to_string(), supervisor.sj.progress_seq())
+            } else {
+                (String::new(), 0)
+            };
+            set_sj_writable(dir.path(), false);
+            let result = supervisor
+                .on_interrupt_guarded(id.clone(), 1, turn.clone(), checkpoint)
+                .await;
+            assert!(
+                result.is_err_and(|error| error.is_storage_failure()),
+                "guarded {guarded}"
+            );
+            assert_eq!(state.lock().unwrap().interrupt_calls, 0);
+            assert!(!supervisor.aborting_turn);
+            set_sj_writable(dir.path(), true);
+            supervisor
+                .on_interrupt_guarded(id.clone(), 1, turn, checkpoint)
+                .await
+                .unwrap();
+            assert_eq!(state.lock().unwrap().interrupt_calls, 0, "no retry");
+            let bodies = shipped_bodies(&mut supervisor);
+            let states = interrupt_states(&bodies, &id);
+            assert_eq!(
+                states.last().copied(),
+                Some(InterruptState::Superseded as i32),
+                "guarded {guarded}: {states:?}"
+            );
+        }
     }
 
     #[tokio::test]
