@@ -347,7 +347,8 @@ pub async fn hibernate_in_tx(
 /// есть отложенный ввод. Вызывается и при приёме сообщения, и при завершении остановки:
 /// сообщение, пришедшее во время остановки, дождётся её конца и будет доставлено ровно
 /// один раз новым исполнением. Прочие остановки — `user_stop`, `force_stopped` и сбои —
-/// ждут владельца и сами не возобновляются.
+/// ждут владельца и сами не возобновляются. `Ok(false)` — сессию не разбудили: будить
+/// нечего либо старт отказал, и ввод остаётся в очереди.
 pub async fn wake_in_tx(
     conn: &mut PgConnection,
     conversation_id: Uuid,
@@ -397,19 +398,19 @@ pub async fn wake_in_tx(
         .await?;
     match executions::start_in_tx(&mut *conn, owner_id, conversation_id, correlation_id).await {
         Ok(_) => {}
-        // Остановленную перезагрузкой сессию поднять не всегда можно (раннер, снятая
-        // рабочая копия): тогда ввод остаётся в очереди и ждёт владельца, но не теряется.
-        Err(
-            executions::ExecutionError::MachineIsRunner
-            | executions::ExecutionError::WorktreeRemoved
-            | executions::ExecutionError::ConversationNotFound
-            | executions::ExecutionError::ConversationClosed,
-        ) if rebooted && !hibernated => return Ok(false),
         Err(executions::ExecutionError::Db(error)) => return Err(error),
-        Err(other) => {
-            return Err(sqlx::Error::InvalidArgument(format!(
-                "hibernate wake failed: {other}"
-            )));
+        // Поднять сессию можно не всегда (раннер, снятая рабочая копия, закрытый разговор).
+        // Это не сбой вызывающего: ввод остаётся в очереди и ждёт владельца, как у любой
+        // остановленной сессии. Ошибка здесь откатила бы приём сообщения, а на пути
+        // журнала — остановила бы приём записей всей машины. Старт отказывает раньше, чем
+        // что-либо меняет в разговоре, откатывать нечего.
+        Err(refused) => {
+            tracing::warn!(
+                conversation_id = %conversation_id,
+                reason = %refused,
+                "hibernate wake refused; the input stays queued"
+            );
+            return Ok(false);
         }
     }
     if hibernated || rebooted {

@@ -1001,3 +1001,110 @@ async fn self_started_turn_blocks_despite_a_stale_idle_projection() -> TestResul
     assert!(stop_command(&pool, seed.conversation_id).await.is_none());
     Ok(())
 }
+
+async fn set_worktree(pool: &PgPool, seed: &Seed, state: &str) {
+    sqlx::query("update conversations set worktree=$2 where id=$1")
+        .bind(seed.conversation_id)
+        .bind(
+            json!({"state": state, "source_workdir": "/src", "branch": "b", "base": "main",
+                     "path": "/wt"}),
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn live_executions(pool: &PgPool, conversation: Uuid) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "select count(*) from executions where conversation_id=$1
+         and state not in ('stopped','failed')",
+    )
+    .bind(conversation)
+    .fetch_one(pool)
+    .await
+}
+
+async fn input_state(pool: &PgPool, input: Uuid) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar("select state from inputs where id=$1")
+        .bind(input)
+        .fetch_one(pool)
+        .await
+}
+
+/// Усыплённую сессию приняли, рабочая копия убрана. Следующее сообщение разбудить её не
+/// может, но и теряться не должно: ввод встаёт в очередь, как у любой остановленной сессии.
+#[tokio::test]
+async fn message_to_a_hibernated_session_without_worktree_stays_queued() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let (seed, run) = setup(&pool).await;
+    assert_eq!(hibernate::sweep(&pool, &Presence::default()).await?, 1);
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                Uuid::now_v7(),
+                vec![
+                    execution_fact(&run, "stopping", ""),
+                    execution_fact(&run, "stopped", "user_stop"),
+                ],
+            ),
+        )
+        .await?;
+    set_worktree(&pool, &seed, "removed").await;
+    let submitted = owner_input(&pool, seed.conversation_id, "ещё одно").await?;
+    assert_eq!(input_state(&pool, submitted.input_id).await?, "queued");
+    assert_eq!(live_executions(&pool, seed.conversation_id).await?, 0);
+    assert_eq!(
+        queued_pauses(&pool, seed.conversation_id).await?,
+        json!([{"reason":"hibernated"}]),
+        "nothing woke up, so the pause stays"
+    );
+    Ok(())
+}
+
+/// Остановка усыпления в полёте, в сессию пришёл ввод, и её приняли: рабочая копия уже
+/// убирается. Запись `stopped` обязана примениться — иначе встаёт журнал всей машины.
+#[tokio::test]
+async fn stop_fact_applies_when_the_wake_cannot_start() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let (seed, run) = setup(&pool).await;
+    assert_eq!(hibernate::sweep(&pool, &Presence::default()).await?, 1);
+    let submitted = owner_input(&pool, seed.conversation_id, "wake").await?;
+    set_worktree(&pool, &seed, "removing").await;
+    let journal = Uuid::now_v7();
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                journal,
+                vec![
+                    execution_fact(&run, "stopping", ""),
+                    execution_fact(&run, "stopped", "user_stop"),
+                ],
+            ),
+        )
+        .await?;
+    let (state, outcome, committed): (String, Option<String>, i64) = sqlx::query_as(
+        "select e.state, e.outcome, j.committed_seq from executions e, journal_cursors j
+         where e.id=$1 and j.journal_id=$2",
+    )
+    .bind(run.execution_id)
+    .bind(journal)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (state.as_str(), outcome.as_deref(), committed),
+        ("stopped", Some("hibernated"), 2)
+    );
+    assert_eq!(live_executions(&pool, seed.conversation_id).await?, 0);
+    assert_eq!(input_state(&pool, submitted.input_id).await?, "queued");
+    let stops: i64 = sqlx::query_scalar("select count(*) from journal_stops")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(stops, 0, "the journal went on without a stop");
+    Ok(())
+}
