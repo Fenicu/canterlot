@@ -221,7 +221,22 @@ async fn branch_exists(source: &Path, branch: &str) -> bool {
     git_ok(source, args!["show-ref", "--verify", "--quiet", name]).await
 }
 
+/// Запись операции подготовки в её каталоге: ветка и коммит, от которого `add` её создаёт.
+const STAGING_RECORD: &str = "operation";
+
+/// Каталог подготовки копии `target`: распаковка идёт в `<каталог>/<имя копии>`, поэтому
+/// метаданные git получают то же имя, что и опубликованная копия. Каталог принадлежит только
+/// операции подготовки: до успешного `add` копия на месте `target` не появляется.
+fn staging_dir(target: &Path) -> Option<PathBuf> {
+    let name = target.file_name()?.to_str()?;
+    Some(target.parent()?.join(format!(".canterlot-prepare-{name}")))
+}
+
 /// Готовит копию `target`; повтор над готовой копией того же репозитория ничего не меняет.
+/// Копия распаковывается в каталоге подготовки и переносится на место после успешного
+/// `git worktree add`. Поэтому восстановление убирает только недоделанную копию из каталога
+/// подготовки и только ветку, которую создала сама операция; опубликованную копию и чужие
+/// ветки оно не трогает.
 pub async fn prepare(
     target: &Path,
     source: &Path,
@@ -233,7 +248,7 @@ pub async fn prepare(
         Ok(Ok(())) => Ok(()),
         failure => {
             if created.load(Ordering::Relaxed) {
-                let _ = timeout(ROLLBACK_DEADLINE, rollback(target, source, &spec.branch)).await;
+                let _ = timeout(ROLLBACK_DEADLINE, recover_staging(target, source)).await;
             }
             match failure {
                 Ok(Err(reason)) => Err(reason),
@@ -250,26 +265,30 @@ async fn prepare_inner(
     created: &AtomicBool,
 ) -> Result<(), &'static str> {
     let common = common_dir(source).await.ok_or("worktree_not_git")?;
+    let staging = staging_dir(target).ok_or("worktree_failed")?;
+    if fs::symlink_metadata(&staging).is_ok() {
+        // Прошлая подготовка не дошла до конца (перезагрузка, убитый git).
+        tracing::warn!(
+            kind = "worktree_add_interrupted",
+            "unfinished worktree preparation is rolled back"
+        );
+        recover_staging(target, source).await?;
+    }
     if fs::symlink_metadata(target).is_ok() {
         if !is_worktree_of(target, &common).await {
             return Err("worktree_failed");
         }
-        if !add_interrupted(target).await {
-            return Ok(());
-        }
-        // Прошлый `git worktree add` не дошёл до конца (перезагрузка, убитый git): в копии
-        // часть файлов. Она наша и пустая по смыслу, поэтому убирается и создаётся заново.
-        if !valid_branch(&spec.branch).await {
+        if add_interrupted(target).await {
+            // Опубликованную копию готовил успешный `add`, и этот замок не его: копию запер
+            // владелец или оборвался `add` прежней версии прямо на месте. Есть ли в ней
+            // правки, неизвестно, поэтому копия и ветка остаются.
+            tracing::warn!(
+                kind = "worktree_origin_unknown",
+                "worktree locked as initializing is kept"
+            );
             return Err("worktree_failed");
         }
-        tracing::warn!(
-            kind = "worktree_add_interrupted",
-            "unfinished worktree is rebuilt"
-        );
-        rollback(target, source, &spec.branch).await;
-        if fs::symlink_metadata(target).is_ok() {
-            return Err("worktree_failed");
-        }
+        return Ok(());
     }
     if !valid_branch(&spec.branch).await {
         return Err("worktree_failed");
@@ -300,6 +319,9 @@ async fn prepare_inner(
     if branch_exists(source, &spec.branch).await {
         return Err("worktree_failed");
     }
+    // Запись операции устойчива до `add`: после сбоя по ней видно, что ветку создала она.
+    let staged =
+        begin_staging(&staging, target, &spec.branch, &commit).map_err(|_| "worktree_failed")?;
     created.store(true, Ordering::Relaxed);
     let mut add = git_command(
         source,
@@ -311,21 +333,130 @@ async fn prepare_inner(
             "-b",
             spec.branch,
             "--",
-            target,
+            staged,
             commit
         ],
     );
     add.stdout(Stdio::null());
-    if run_group(add).await.is_some_and(|status| status.success()) {
-        Ok(())
-    } else {
-        Err("worktree_failed")
+    if !run_group(add).await.is_some_and(|status| status.success()) {
+        return Err("worktree_failed");
     }
+    publish(&staged, target).map_err(|_| "worktree_failed")?;
+    let _ = git_ok(source, args!["worktree", "repair", "--", target]).await;
+    if !is_worktree_of(target, &common).await {
+        return Err("worktree_failed");
+    }
+    finish_staging(&staging).map_err(|_| "worktree_failed")
+}
+
+fn begin_staging(
+    staging: &Path,
+    target: &Path,
+    branch: &str,
+    commit: &str,
+) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    fs::create_dir(staging)?;
+    let mut record = fs::File::create_new(staging.join(STAGING_RECORD))?;
+    record.write_all(format!("{branch}\n{commit}\n").as_bytes())?;
+    record.sync_all()?;
+    fs::File::open(staging)?.sync_all()?;
+    sync_parent(staging)?;
+    Ok(staging.join(target.file_name().unwrap_or_default()))
+}
+
+/// Перенос без замены: появившийся тем временем каталог `target` не затирается.
+fn publish(staged: &Path, target: &Path) -> std::io::Result<()> {
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        staged,
+        rustix::fs::CWD,
+        target,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )?;
+    sync_parent(target)
+}
+
+fn finish_staging(staging: &Path) -> std::io::Result<()> {
+    match fs::remove_file(staging.join(STAGING_RECORD)) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    fs::remove_dir(staging)?;
+    sync_parent(staging)
+}
+
+fn sync_parent(path: &Path) -> std::io::Result<()> {
+    fs::File::open(path.parent().unwrap_or(Path::new("/")))?.sync_all()
+}
+
+/// Откат прерванной подготовки. Недоделанная копия в каталоге подготовки наша: на место её
+/// ещё не переносили, работать в ней никто не мог. Ветка удаляется, только если запись
+/// операции её называет (до `add` её не было) и она всё ещё указывает на исходный коммит без
+/// чужой рабочей копии. Без записи или при расхождении ветка остаётся, и повторный запуск
+/// откажет на занятой ветке.
+async fn recover_staging(target: &Path, source: &Path) -> Result<(), &'static str> {
+    let staging = staging_dir(target).ok_or("worktree_failed")?;
+    let staged = staging.join(target.file_name().ok_or("worktree_failed")?);
+    let record = fs::read_to_string(staging.join(STAGING_RECORD)).ok();
+    let operation = record.as_deref().and_then(|text| {
+        let mut lines = text.lines();
+        let branch = lines.next()?;
+        let commit = lines.next()?;
+        Some((branch.to_owned(), commit.to_owned()))
+    });
+    let staged_present = fs::symlink_metadata(&staged).is_ok();
+    if staged_present && operation.is_none() {
+        // Запись пишется до `add`: копия без неё не от этой операции.
+        tracing::warn!(
+            kind = "worktree_origin_unknown",
+            "preparation directory without its record is kept"
+        );
+        return Err("worktree_failed");
+    }
+    if staged_present
+        && !git_ok(
+            source,
+            args!["worktree", "remove", "--force", "--force", "--", staged],
+        )
+        .await
+    {
+        let _ = fs::remove_dir_all(&staged);
+    }
+    if fs::symlink_metadata(&staged).is_ok() {
+        return Err("worktree_failed");
+    }
+    forget_missing(source, &staged).await;
+    if fs::symlink_metadata(target).is_ok() {
+        // Сбой между переносом и уборкой: копия уже на месте, её ветку не трогаем.
+        let _ = git_ok(source, args!["worktree", "repair", "--", target]).await;
+    } else if let Some((branch, commit)) = &operation {
+        delete_created_branch(source, branch, commit).await;
+    }
+    finish_staging(&staging).map_err(|_| "worktree_failed")
+}
+
+async fn delete_created_branch(source: &Path, branch: &str, commit: &str) {
+    if !valid_branch(branch).await || !branch_exists(source, branch).await {
+        return;
+    }
+    let name = format!("refs/heads/{branch}");
+    let checked_out = git_text(source, args!["worktree", "list", "--porcelain"])
+        .await
+        .is_none_or(|list| {
+            list.lines()
+                .any(|line| line.strip_prefix("branch ") == Some(name.as_str()))
+        });
+    if checked_out {
+        return;
+    }
+    // Удаление со сверкой значения: ветку, сдвинутую после `add`, git не тронет.
+    let _ = git_ok(source, args!["update-ref", "-d", name, commit]).await;
 }
 
 /// `git worktree add` держит в метаданных копии замок `initializing` и снимает его последним
-/// шагом. Замок с этой причиной значит, что распаковка не закончилась. Замок владельца
-/// (`git worktree lock`) несёт другую причину и готовой копии не мешает.
+/// шагом. Замок владельца (`git worktree lock`) может нести ту же причину, поэтому сам по себе
+/// замок не доказывает, что копия недоделана.
 async fn add_interrupted(target: &Path) -> bool {
     let Some(git_dir) = git_text(
         target,
@@ -337,21 +468,6 @@ async fn add_interrupted(target: &Path) -> bool {
     };
     fs::read_to_string(Path::new(&git_dir).join("locked"))
         .is_ok_and(|reason| reason.trim() == "initializing")
-}
-
-/// Откат недоделанной копии: каталога и ветки до начала не было, они наши. Двойной `--force`
-/// снимает и запертую копию: прерванный `add` оставляет замок `initializing`.
-async fn rollback(target: &Path, source: &Path, branch: &str) {
-    if !git_ok(
-        source,
-        args!["worktree", "remove", "--force", "--force", "--", target],
-    )
-    .await
-    {
-        let _ = fs::remove_dir_all(target);
-    }
-    forget_missing(source, target).await;
-    let _ = git_ok(source, args!["branch", "-D", "--", branch]).await;
 }
 
 /// Метаданные пропавшей копии убирает только её собственная запись: `prune` чистил бы
@@ -384,6 +500,10 @@ async fn remove_inner(root: &Path, source: &Path, request: &RemoveWorktree) -> R
     let Some(target) = resolve_target(root, Path::new(&request.path)) else {
         return Removed::failed("path_outside_root");
     };
+    if staging_dir(&target).is_some_and(|staging| fs::symlink_metadata(staging).is_ok()) {
+        // Подготовка этой копии оборвалась: её каталог и ветку убирает тот же откат.
+        let _ = recover_staging(&target, source).await;
+    }
     let present = fs::symlink_metadata(&target).is_ok();
     // Копии нет, а исходный каталог не git: убирать нечего и git звать не за чем.
     if !present && !inside_git_worktree(source) {
@@ -510,6 +630,146 @@ mod tests {
     use std::io::{BufRead, BufReader, Read};
 
     use super::*;
+
+    fn sh_git(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.test"])
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    struct Repo {
+        _dir: tempfile::TempDir,
+        source: PathBuf,
+        target: PathBuf,
+        commit: String,
+        spec: WorktreeSpec,
+    }
+
+    fn repo() -> Repo {
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = fs::canonicalize(dir.path()).unwrap();
+        let source = base.join("source");
+        fs::create_dir_all(source.join("src")).unwrap();
+        fs::create_dir_all(base.join("worktrees")).unwrap();
+        sh_git(&source, &["init", "-q", "-b", "main"]);
+        fs::write(source.join("src/a.txt"), "alpha\n").unwrap();
+        fs::write(source.join("b.txt"), "beta\n").unwrap();
+        sh_git(&source, &["add", "-A"]);
+        sh_git(&source, &["commit", "-q", "-m", "first"]);
+        let commit = sh_git(&source, &["rev-parse", "HEAD"]);
+        let spec = WorktreeSpec {
+            source_workdir: source.to_string_lossy().into_owned(),
+            branch: "canterlot/0190abc9".into(),
+            base: "HEAD".into(),
+        };
+        Repo {
+            _dir: dir,
+            target: base.join("worktrees/c1"),
+            source,
+            commit,
+            spec,
+        }
+    }
+
+    /// Состояние, которое оставляет подготовка, оборванная посреди `git worktree add`:
+    /// запись операции, замок `initializing`, часть файлов и брошенный `index.lock`.
+    fn interrupt_a_staged_add(repo: &Repo) -> PathBuf {
+        let staging = staging_dir(&repo.target).unwrap();
+        let staged =
+            begin_staging(&staging, &repo.target, &repo.spec.branch, &repo.commit).unwrap();
+        sh_git(
+            &repo.source,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &repo.spec.branch,
+                staged.to_str().unwrap(),
+                &repo.commit,
+            ],
+        );
+        let meta = repo.source.join(".git/worktrees/c1");
+        fs::write(meta.join("locked"), "initializing\n").unwrap();
+        fs::write(meta.join("index.lock"), "").unwrap();
+        fs::remove_file(staged.join("b.txt")).unwrap();
+        staging
+    }
+
+    #[tokio::test]
+    async fn an_add_interrupted_in_its_staging_directory_is_rebuilt() {
+        let repo = repo();
+        let staging = interrupt_a_staged_add(&repo);
+        prepare(&repo.target, &repo.source, &repo.spec)
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(repo.target.join("b.txt")).unwrap(),
+            "beta\n"
+        );
+        assert!(!staging.exists());
+        let list = sh_git(&repo.source, &["worktree", "list", "--porcelain"]);
+        assert_eq!(list.matches("worktree ").count(), 2, "{list}");
+        assert!(!list.contains("locked"), "{list}");
+        assert!(!list.contains(".canterlot-prepare"), "{list}");
+        assert_eq!(sh_git(&repo.target, &["status", "--porcelain"]), "");
+        assert_eq!(
+            sh_git(&repo.target, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            repo.spec.branch
+        );
+    }
+
+    /// Ветка, сдвинутая после оборванного `add`, уже не только наша: она остаётся,
+    /// а запуск отказывает на занятой ветке.
+    #[tokio::test]
+    async fn a_branch_moved_after_an_interrupted_add_is_kept() {
+        let repo = repo();
+        interrupt_a_staged_add(&repo);
+        fs::write(repo.source.join("b.txt"), "second\n").unwrap();
+        sh_git(&repo.source, &["commit", "-q", "-am", "second"]);
+        let moved = sh_git(&repo.source, &["rev-parse", "HEAD"]);
+        sh_git(
+            &repo.source,
+            &[
+                "update-ref",
+                &format!("refs/heads/{}", repo.spec.branch),
+                &moved,
+            ],
+        );
+        assert_eq!(
+            prepare(&repo.target, &repo.source, &repo.spec)
+                .await
+                .unwrap_err(),
+            "worktree_failed"
+        );
+        assert_eq!(
+            sh_git(&repo.source, &["rev-parse", &repo.spec.branch]),
+            moved
+        );
+        assert!(!repo.target.exists());
+    }
+
+    /// Каталог подготовки без записи операции не её: копия в нём остаётся.
+    #[tokio::test]
+    async fn a_staged_copy_without_the_operation_record_is_kept() {
+        let repo = repo();
+        let staging = interrupt_a_staged_add(&repo);
+        fs::remove_file(staging.join(STAGING_RECORD)).unwrap();
+        assert_eq!(
+            prepare(&repo.target, &repo.source, &repo.spec)
+                .await
+                .unwrap_err(),
+            "worktree_failed"
+        );
+        assert!(staging.join("c1/src/a.txt").exists());
+        assert!(branch_exists(&repo.source, &repo.spec.branch).await);
+    }
 
     /// Срок вышел посреди `git worktree add`: вместе с верхним процессом уходит и его
     /// потомок, который распаковывает файлы. Канал закрывается, только когда мертвы оба.

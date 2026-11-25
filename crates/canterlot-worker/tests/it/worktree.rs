@@ -193,31 +193,52 @@ fn interrupt_the_add(fixture: &Fixture, target: &Path) {
     fs::remove_file(target.join("b.txt")).unwrap();
 }
 
+/// Опубликованную копию готовит только успешный `add`, поэтому замок `initializing` на ней
+/// не доказывает, что распаковка оборвалась: так запер её владелец (или оборвался `add`
+/// прежней версии). Неизвестно, чьи в ней правки, поэтому копия, её файлы и ветка остаются,
+/// а запуск отказывает.
 #[tokio::test]
-async fn prepare_rebuilds_a_copy_whose_add_was_interrupted() {
+async fn prepare_keeps_a_published_copy_locked_as_initializing() {
     let fixture = Fixture::new();
     let target = fixture.target("c2i");
     let spec = fixture.spec("canterlot/0190abc1");
     prepare(&target, &fixture.source, &spec).await.unwrap();
-    interrupt_the_add(&fixture, &target);
+    fs::write(target.join("work.txt"), "uncommitted\n").unwrap();
+    git(
+        &fixture.source,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "initializing",
+            target.to_str().unwrap(),
+        ],
+    );
+    git(&fixture.source, &["branch", "canterlot/0190abc1-side"]);
 
-    prepare(&target, &fixture.source, &spec).await.unwrap();
-    assert_eq!(
-        fs::read_to_string(target.join("b.txt")).unwrap(),
-        "beta\n",
-        "the half-unpacked copy must not be taken for a finished one"
-    );
-    let meta = fixture.source.join(".git/worktrees/c2i");
-    assert!(!meta.join("locked").exists());
-    assert!(!meta.join("index.lock").exists());
-    let list = git(&fixture.source, &["worktree", "list", "--porcelain"]);
-    assert_eq!(list.matches("worktree ").count(), 2, "{list}");
-    assert!(!list.contains("locked"), "{list}");
-    assert_eq!(git(&target, &["status", "--porcelain"]), "");
-    assert_eq!(
-        git(&target, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        spec.branch
-    );
+    let mut other = spec.clone();
+    other.branch = "canterlot/0190abc1-side".into();
+    for spec in [&spec, &other] {
+        assert_eq!(
+            prepare(&target, &fixture.source, spec).await.unwrap_err(),
+            "worktree_failed"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("work.txt")).unwrap(),
+            "uncommitted\n"
+        );
+    }
+    for branch in ["canterlot/0190abc1", "canterlot/0190abc1-side"] {
+        assert!(git_ok(
+            &fixture.source,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}")
+            ]
+        ));
+    }
 }
 
 /// Копия, которую владелец запер сам, готова к работе: её замок запуску не мешает.
