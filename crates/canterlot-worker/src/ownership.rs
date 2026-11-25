@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -136,7 +137,10 @@ impl OwnershipStore {
                         .get(record.conversation_id.as_str())
                         .is_some_and(|generation| record.generation < *generation)
                     && !record.exec_dir.is_empty()
-                    && !Path::new(&record.exec_dir).exists()
+                    // Каталог убран, только если это подтверждено: ошибка проверки (например,
+                    // нет прав на родителя) оставляет запись для уборки.
+                    && fs::symlink_metadata(&record.exec_dir)
+                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
             })
             .map(|(id, _)| *id)
             .collect();
@@ -284,6 +288,30 @@ mod tests {
         check(&store);
         drop(store);
         check(&OwnershipStore::open(&path).unwrap());
+    }
+
+    /// Каталог исполнения нельзя проверить (нет прав на родительский каталог): это не значит,
+    /// что его нет. Запись остаётся, она ещё понадобится уборке.
+    #[test]
+    fn a_record_whose_directory_cannot_be_checked_survives_compaction() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("ownership");
+        let locked = root.path().join("locked");
+        let exec_dir = locked.join("exec");
+        std::fs::create_dir_all(&exec_dir).unwrap();
+        let gone = root.path().join("executions/gone");
+        let mut store = OwnershipStore::open(&path).unwrap();
+        let conversation = Uuid::now_v7().to_string();
+        let old = released(&conversation, 1, &exec_dir);
+        store.append(old.clone()).unwrap();
+        store.append(released(&conversation, 2, &gone)).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let compacted = store.compact();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        compacted.unwrap();
+        let id = Uuid::parse_str(&old.execution_id).unwrap();
+        assert_eq!(store.get(id), Some(&old));
     }
 
     /// Старшее поколение разговора остаётся и освобождённым: без него следующий запуск
