@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015 # assert pattern: both branches always exit 0
-# Прогон всей обвязки scripts/deploy/tests: shellcheck, синтаксис python,
-# статическая проверка pipe-lint, затем тестовые наборы ПАРАЛЛЕЛЬНО (каждый в
-# своём FAKE_ROOT, процессы и /proc-сканы изолированы по корню и exec id).
+# Прогон всей обвязки scripts/deploy/tests: юнит-проверки lib.sh и контракт фейкового
+# pg_restore, затем тестовые наборы ПАРАЛЛЕЛЬНО (каждый в своём FAKE_ROOT, процессы и
+# /proc-сканы изолированы по корню и exec id), а рядом с ними фоном — shellcheck,
+# синтаксис python и статическая проверка pipe-lint. Провал любой из них валит прогон.
 # Ничего не трогает прод: harness ходит только в temp-каталоги через fake-ssh
 # (настоящие хосты — отказ).
 # RUN_JOBS=N — сколько наборов одновременно (по умолчанию все); RUN_SUITES="a b" —
@@ -19,20 +20,36 @@ lease_self_wrap build "deploy tests" bash "$PWD/scripts/deploy/tests/run.sh" "$@
 
 log() { printf '[harness-run %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 STARTED="$(date +%s)"
+RUN_LOG_DIR="${RUN_LOG_DIR:-$(mktemp -d /tmp/canterlot-deploy-run.XXXXXX)}"
+mkdir -p "${RUN_LOG_DIR}"
 
-log "shellcheck"
-shellcheck scripts/check-proxy.sh scripts/release.sh scripts/deploy/*.sh scripts/deploy/tests/*.sh scripts/deploy/tests/fake-bin/*
-log "shellcheck clean"
-
-log "python syntax"
-for py in scripts/deploy/config-check.py scripts/deploy/ownership-check.py scripts/deploy/spec-shape.py scripts/deploy/tests/pipe-lint.py; do
-    python3 -I -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "${py}"
-done
-log "python OK"
-
-log "pipe-lint (SIGPIPE, wait loops, && break, source, self-match, run_write)"
-python3 -I scripts/deploy/tests/pipe-lint.py
-log "pipe-lint clean"
+# Статические проверки идут фоном рядом с наборами, а не перед ними: последовательно они
+# стоили 88–120 с стенного времени. Их провал валит прогон так же, как провал набора.
+# Итог каждой — в static-<имя>.status, не в .rc: .rc гейт читает как упавший набор.
+STATIC_NAMES=()
+STATIC_PIDS=()
+static_check() {
+    local name="$1"
+    shift
+    (
+        s="$(date +%s)"
+        rc=0
+        "$@" >"${RUN_LOG_DIR}/static-${name}.log" 2>&1 || rc=$?
+        printf '%s %s\n' "${rc}" "$(( $(date +%s) - s ))" >"${RUN_LOG_DIR}/static-${name}.status"
+    ) &
+    STATIC_PIDS+=("$!")
+    STATIC_NAMES+=("${name}")
+}
+python_syntax() {
+    local py
+    for py in scripts/deploy/config-check.py scripts/deploy/ownership-check.py scripts/deploy/spec-shape.py scripts/deploy/tests/pipe-lint.py; do
+        python3 -I -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "${py}" || return 1
+    done
+}
+log "static checks in the background: shellcheck, python syntax, pipe-lint (SIGPIPE, wait loops, && break, source, self-match, run_write)"
+static_check shellcheck shellcheck scripts/check-proxy.sh scripts/release.sh scripts/deploy/*.sh scripts/deploy/tests/*.sh scripts/deploy/tests/fake-bin/*
+static_check python-syntax python_syntax
+static_check pipe-lint python3 -I scripts/deploy/tests/pipe-lint.py
 
 log "lib unit checks (in a child bash: lib.sh sets -e and must not leak into this runner)"
 bash -c '
@@ -87,8 +104,6 @@ log "fake pg_restore contract OK"
 
 ALL_SUITES="changed lint token fastpath fastcutover fastbaseline fastguards guardrails invariants site-env preflight stage retain verify dryrun rehearse rollback-db cutover cutover-signals cutover-guarantees geoip speech check-proxy release release-fast"
 SUITES="${RUN_SUITES:-${ALL_SUITES}}"
-RUN_LOG_DIR="${RUN_LOG_DIR:-$(mktemp -d /tmp/canterlot-deploy-run.XXXXXX)}"
-mkdir -p "${RUN_LOG_DIR}"
 JOBS="${RUN_JOBS:-0}"
 log "suites: ${SUITES} (logs in ${RUN_LOG_DIR}, jobs ${JOBS:-all})"
 
@@ -131,5 +146,21 @@ for t in ${SUITES}; do
         grep -E '^FAIL' "${RUN_LOG_DIR}/${t}.log" | sed 's/^/    /' || tail -5 "${RUN_LOG_DIR}/${t}.log" | sed 's/^/    /'
     fi
 done
-log "suites passed: ${pass}, failed: ${fail}; total $(( $(date +%s) - STARTED ))s"
-[ "${fail}" = "0" ]
+static_fail=0
+for i in "${!STATIC_NAMES[@]}"; do
+    name="${STATIC_NAMES[${i}]}"
+    wait "${STATIC_PIDS[${i}]}" || true
+    rc=missing secs=0
+    if [ -f "${RUN_LOG_DIR}/static-${name}.status" ]; then
+        read -r rc secs <"${RUN_LOG_DIR}/static-${name}.status"
+    fi
+    if [ "${rc}" = "0" ]; then
+        log "static ${name}: clean in ${secs}s"
+    else
+        static_fail=$((static_fail + 1))
+        log "STATIC CHECK FAILED: ${name} (rc ${rc}, ${secs}s); output:"
+        tail -n 40 "${RUN_LOG_DIR}/static-${name}.log" | sed 's/^/    /'
+    fi
+done
+log "suites passed: ${pass}, failed: ${fail}; static checks failed: ${static_fail}; total $(( $(date +%s) - STARTED ))s"
+[ "${fail}" = "0" ] && [ "${static_fail}" = "0" ]
