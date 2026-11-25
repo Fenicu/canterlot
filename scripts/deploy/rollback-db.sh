@@ -302,7 +302,7 @@ case "${RESTORE_PHASE}" in
     restored)
         [ "${MAIN_OID}" = "${REC_OID}" ] \
             || rollback_stop "the phase is restored, but ${HUB_PG_DB} has oid ${MAIN_OID:-none}, not the restored ${REC_OID}" "${UNTOUCHED}"
-        rollback_stop "the restore already finished (phase restored): nothing is restored again" "${UNTOUCHED}" ;;
+        NEXT=finish ;;
 esac
 
 # Старт хаба после восстановления и проверка: общая для обычного прогона и для повтора после
@@ -337,6 +337,16 @@ finish_hub() {
     fi
     log "rollback-db done: hub on ${HUB_NOW}, worker stays stopped (start it by hand); speech: ${SPEECH_SUMMARY} (speech soft issues ${SPEECH_ISSUES})"
 }
+
+if [ "${NEXT}" = "finish" ]; then
+    log "phase restored: ${HUB_PG_DB} already holds the restored database (oid ${REC_OID}); this run only starts the hub and checks it: no stop, no flip, no dropdb, no pg_restore"
+    LINK_NOW="$(ssh_hub "readlink '${HUB_CURRENT}'")" || rollback_stop "cannot read the hub link" "${UNTOUCHED}"
+    if [ "${FLIP_REQUESTED}" = "1" ] && [ "${LINK_NOW}" != "releases/${TO_RELEASE}" ]; then
+        rollback_stop "the restore finished, but the hub link is ${LINK_NOW}, not releases/${TO_RELEASE}: not flipping over a restored database that may already hold new writes" "${UNTOUCHED}"
+    fi
+    finish_hub
+    exit 0
+fi
 
 log "rollback-db: refusing unless the worker is provably stopped"
 assert_worker_stopped "before any change"

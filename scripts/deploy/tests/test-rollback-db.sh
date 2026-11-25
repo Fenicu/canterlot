@@ -743,6 +743,44 @@ grep -q 'stop canterlot-hub' "${FAKE_ROOT}/state/calls.log" && case_fail "hub st
 teardown_case
 case_end
 
+# R30: после restored хаб принял записи владельца, а ответ о readyz потерялся. Повтор той же команды
+# только поднимает и проверяет хаб: без stop, flip, dropdb и pg_restore.
+case_begin "rollback rerun after restored keeps writes accepted since"
+setup_rollback rerunrestored
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" stop canterlot-worker >/dev/null
+rollback_expect
+assert_restored "run 1"
+printf 'owner-write-after-restore\n' >>"${FAKE_ROOT}/state/db.txt"
+: >"${FAKE_ROOT}/state/calls.log"
+rollback_expect
+assert_eq "${RC}" "0" "the rerun finishes"
+assert_contains "${FAKE_ROOT}/rb.log" "this run only starts the hub and checks it" "the rerun says what it does"
+no_db_changes "the rerun"
+grep -q 'owner-write-after-restore' "${FAKE_ROOT}/state/db.txt" && case_ok "the owner's writes survive" || case_fail "the owner's writes are lost"
+grep -q 'stop canterlot-hub' "${FAKE_ROOT}/state/calls.log" && case_fail "hub stopped by the rerun" || case_ok "hub not stopped"
+FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub \
+    && case_ok "hub active" || case_fail "hub not active"
+assert_eq "$(phase_now)" "restored" "the phase stays restored"
+teardown_case
+case_end
+
+# R30b: restored, но ссылка хаба уже не на --to: повтор не переключает её поверх восстановленной
+# базы (там могут быть новые записи), а останавливается с STOP.
+case_begin "rollback rerun after restored refuses a moved hub link"
+setup_rollback rerunmoved
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" stop canterlot-worker >/dev/null
+rollback_expect
+assert_restored "run 1"
+ln -sfn "releases/${SHA_NEW}" "${HUB_CURRENT}"
+: >"${FAKE_ROOT}/state/calls.log"
+rollback_expect
+assert_eq "${RC}" "1" "the rerun refuses"
+assert_contains "${FAKE_ROOT}/rb.log" "not flipping over a restored database" "the moved link is named"
+no_db_changes "the rerun"
+[ "$(readlink "${HUB_CURRENT}")" = "releases/${SHA_NEW}" ] && case_ok "the link is not flipped" || case_fail "the link was flipped"
+teardown_case
+case_end
+
 # R33: без --expect-* чтение .identity или файла фазы оборвалось. Это не «записи нет»: отказ до
 # остановки хаба (прежде сбой ssh молча отключал всю сверку, включая записанный oid фазы).
 for rec in identity restore-phase; do
