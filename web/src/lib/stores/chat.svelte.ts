@@ -240,10 +240,11 @@ export interface SnapshotData {
   routine_reports?: RoutineReport[];
 }
 
+/** Слот очереди: `input_id` — ввод (`inputs.id`), `command_id` — его команда, под которой идут блоки хода. */
 export type RunSlot =
   | "free"
-  | { dispatching: { input_id: string; attempt: number } }
-  | { running: { input_id: string } };
+  | { dispatching: { input_id: string; attempt: number; command_id?: string } }
+  | { running: { input_id: string; command_id?: string } };
 
 type Clock = {
   now(): number;
