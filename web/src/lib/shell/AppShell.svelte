@@ -18,6 +18,7 @@
   import Nav from './Nav.svelte';
   import { applyMotion } from '#lib/screens/settings/preferences.js';
   import { trackViewport } from './viewport';
+  import { trackTypedText } from './unsaved';
   import { installation, register } from '#lib/pwa/register.js';
   import type { UpdateController } from '#lib/pwa/update.js';
   import { announce } from '#lib/a11y/announce.js';
@@ -232,10 +233,11 @@
     window.addEventListener('focus', checkUpdate);
     window.addEventListener('pageshow', checkUpdate);
     window.addEventListener('online', checkUpdate);
+    const typed = trackTypedText(document);
     void register({
       isSafe: () => !runtime?.drafts.pending && !(document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest('[data-composer]') && document.activeElement.value.length > 0),
-      // Правка пузыря живёт только на экране: черновик её не сохраняет.
-      editing: () => document.querySelector('[data-unsaved-edit]') !== null,
+      // Правка пузыря и текст в формах живут только на экране: черновик их не сохраняет.
+      editing: () => document.querySelector('[data-unsaved-edit]') !== null || typed.pending(),
       flushDrafts: async () => {
         await runtime?.drafts.flush();
       },
@@ -279,6 +281,7 @@
       stopSignout();
       update?.removeEventListener('change', changed);
       update?.destroy();
+      typed.destroy();
       window.removeEventListener('online', retryRuntime);
       window.removeEventListener('pageshow', retryRuntime);
       document.removeEventListener('visibilitychange', retryRuntime);
