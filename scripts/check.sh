@@ -314,5 +314,23 @@ if [[ "$mode" == fast ]] && ((!all)); then
     fi
 fi
 
+# --- гейт ---
+# scripts/gate/test.sh (около 20 с, без сети и docker) — когда diff затронул scripts/gate*:
+# scripts/gate.sh, gate-coverage.sh, gate-remote.sh или каталог scripts/gate/; при неизвестном
+# diff — всегда. В --all его нет: сам гейт его не гоняет, правку гейта проверяет check.sh автора.
+if ((!all)); then
+    want_gate=$unknown
+    while IFS= read -r path; do
+        case "$path" in scripts/gate*) want_gate=1 ;; esac
+    done <<<"$changed"
+    if ((want_gate)); then
+        stage "gate tests"
+        bash scripts/gate/test.sh
+        stage_done "gate tests"
+    else
+        printf 'gate tests: skipped (no scripts/gate* changes)\n'
+    fi
+fi
+
 bash scripts/list-quarantine.sh
 printf '\nготово за %ds\n' $((SECONDS - started))
