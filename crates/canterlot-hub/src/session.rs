@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    mem::DropGuard,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -109,21 +110,14 @@ struct SessionEntry {
     clock_samples: VecDeque<chrono::Duration>,
 }
 
-type SuggestWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<String>>>>>;
-type ClaudeHistoryWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<ClaudeHistory>>>>>;
-type PathProbeWaiters =
-    Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::PathProbe>>>>;
-type PrecheckWaiters = Arc<
-    Mutex<
-        HashMap<
-            (Uuid, Uuid),
-            (
-                Uuid,
-                oneshot::Sender<canterlot_proto::worker::v1::PrecheckResult>,
-            ),
-        >,
-    >,
->;
+type Waiters<V> = Arc<Mutex<HashMap<(Uuid, Uuid), V>>>;
+type SuggestWaiters = Waiters<oneshot::Sender<Vec<String>>>;
+type ClaudeHistoryWaiters = Waiters<oneshot::Sender<Vec<ClaudeHistory>>>;
+type PathProbeWaiters = Waiters<oneshot::Sender<canterlot_proto::worker::v1::PathProbe>>;
+type PrecheckWaiters = Waiters<(
+    Uuid,
+    oneshot::Sender<canterlot_proto::worker::v1::PrecheckResult>,
+)>;
 
 /// Прикладная проба живости после просроченной квитанции команды.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,19 +156,10 @@ impl Drop for AppProbeReservation {
         }
     }
 }
-type OwnerOverviewWaiters = Arc<
-    Mutex<
-        HashMap<
-            (Uuid, Uuid),
-            oneshot::Sender<canterlot_proto::worker::v1::OwnerInstructionsOverview>,
-        >,
-    >,
->;
-type OwnerFileWaiters = Arc<
-    Mutex<
-        HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::OwnerInstructionsFile>>,
-    >,
->;
+type OwnerOverviewWaiters =
+    Waiters<oneshot::Sender<canterlot_proto::worker::v1::OwnerInstructionsOverview>>;
+type OwnerFileWaiters =
+    Waiters<oneshot::Sender<canterlot_proto::worker::v1::OwnerInstructionsFile>>;
 
 #[derive(Clone)]
 pub struct Registry {
@@ -191,88 +176,14 @@ pub struct Registry {
 }
 
 /// Снимает ожидание и на сроке, и при обрыве HTTP-запроса.
-struct SuggestSlot {
-    waiters: SuggestWaiters,
+fn waiter_slot<V>(
+    waiters: Waiters<V>,
     key: (Uuid, Uuid),
-}
-
-impl Drop for SuggestSlot {
-    fn drop(&mut self) {
-        self.waiters
-            .lock()
-            .expect("suggest waiters lock")
-            .remove(&self.key);
-    }
-}
-
-struct ClaudeHistorySlot {
-    waiters: ClaudeHistoryWaiters,
-    key: (Uuid, Uuid),
-}
-
-impl Drop for ClaudeHistorySlot {
-    fn drop(&mut self) {
-        self.waiters
-            .lock()
-            .expect("history waiters lock")
-            .remove(&self.key);
-    }
-}
-
-struct PathProbeSlot {
-    waiters: PathProbeWaiters,
-    key: (Uuid, Uuid),
-}
-
-impl Drop for PathProbeSlot {
-    fn drop(&mut self) {
-        self.waiters
-            .lock()
-            .expect("probe waiters lock")
-            .remove(&self.key);
-    }
-}
-
-struct PrecheckSlot {
-    waiters: PrecheckWaiters,
-    key: (Uuid, Uuid),
-}
-
-impl Drop for PrecheckSlot {
-    fn drop(&mut self) {
-        self.waiters
-            .lock()
-            .expect("precheck waiters lock")
-            .remove(&self.key);
-    }
-}
-
-struct OwnerOverviewSlot {
-    waiters: OwnerOverviewWaiters,
-    key: (Uuid, Uuid),
-}
-
-impl Drop for OwnerOverviewSlot {
-    fn drop(&mut self) {
-        self.waiters
-            .lock()
-            .expect("owner overview waiters lock")
-            .remove(&self.key);
-    }
-}
-
-struct OwnerFileSlot {
-    waiters: OwnerFileWaiters,
-    key: (Uuid, Uuid),
-}
-
-impl Drop for OwnerFileSlot {
-    fn drop(&mut self) {
-        self.waiters
-            .lock()
-            .expect("owner file waiters lock")
-            .remove(&self.key);
-    }
+    lock: &'static str,
+) -> DropGuard<Waiters<V>, impl FnOnce(Waiters<V>)> {
+    DropGuard::new(waiters, move |waiters| {
+        waiters.lock().expect(lock).remove(&key);
+    })
 }
 
 /// Тестовое подключение к реестру: держит слот, пока живёт guard.
@@ -648,10 +559,7 @@ impl Registry {
             }
             waiters.insert(key, answer);
         }
-        let _slot = SuggestSlot {
-            waiters: self.suggests.clone(),
-            key,
-        };
+        let _slot = waiter_slot(self.suggests.clone(), key, "suggest waiters lock");
         let message = ControlDown {
             msg: Some(control_down::Msg::SuggestWorkdirs(SuggestWorkdirs {
                 request_id: request_id.to_string(),
@@ -710,10 +618,7 @@ impl Registry {
             }
             waiters.insert(key, answer);
         }
-        let _slot = ClaudeHistorySlot {
-            waiters: self.histories.clone(),
-            key,
-        };
+        let _slot = waiter_slot(self.histories.clone(), key, "history waiters lock");
         let message = ControlDown {
             msg: Some(control_down::Msg::ListClaudeHistories(
                 ListClaudeHistories {
@@ -858,10 +763,7 @@ impl Registry {
             }
             waiters.insert(key, answer);
         }
-        let _slot = PathProbeSlot {
-            waiters: self.probes.clone(),
-            key,
-        };
+        let _slot = waiter_slot(self.probes.clone(), key, "probe waiters lock");
         let message = ControlDown {
             msg: Some(control_down::Msg::ProbePath(ProbePath {
                 request_id: request_id.to_string(),
@@ -951,10 +853,7 @@ impl Registry {
             }
             waiters.insert(key, (connection_id, answer));
         }
-        let _slot = PrecheckSlot {
-            waiters: self.prechecks.clone(),
-            key,
-        };
+        let _slot = waiter_slot(self.prechecks.clone(), key, "precheck waiters lock");
         let message = ControlDown {
             msg: Some(control_down::Msg::SchedulePrecheck(request)),
         };
@@ -1033,10 +932,11 @@ impl Registry {
             }
             waiters.insert(key, answer);
         }
-        let _slot = OwnerOverviewSlot {
-            waiters: self.owner_overview.clone(),
+        let _slot = waiter_slot(
+            self.owner_overview.clone(),
             key,
-        };
+            "owner overview waiters lock",
+        );
         let message = ControlDown {
             msg: Some(control_down::Msg::ReadOwner(ReadOwnerInstructions {
                 request_id: request_id.to_string(),
@@ -1076,10 +976,7 @@ impl Registry {
             }
             waiters.insert(key, answer);
         }
-        let _slot = OwnerFileSlot {
-            waiters: self.owner_files.clone(),
-            key,
-        };
+        let _slot = waiter_slot(self.owner_files.clone(), key, "owner file waiters lock");
         let message = ControlDown {
             msg: Some(control_down::Msg::ReadOwner(ReadOwnerInstructions {
                 request_id: request_id.to_string(),
@@ -1553,6 +1450,122 @@ mod tests {
         assert!(!registry.is_reconciled(machine));
         registry.mark_reconciled(machine, replacement);
         assert!(registry.is_reconciled(machine));
+    }
+
+    #[tokio::test]
+    async fn waiter_slots_are_released_when_the_request_ends() {
+        let registry = Registry::new(HubTimers::default());
+        let machine = Uuid::now_v7();
+        let connection = Uuid::now_v7();
+        let (_lease, _commands) = registry.register(machine, connection, vec![]).unwrap();
+        registry.mark_accepted(
+            machine,
+            connection,
+            &[
+                CAPABILITY_WORKDIR_SUGGEST_V1.to_owned(),
+                CAPABILITY_CLAUDE_HISTORIES_V1.to_owned(),
+                CAPABILITY_PATH_PROBE_V1.to_owned(),
+                CAPABILITY_SCHEDULE_PRECHECK_V1.to_owned(),
+                CAPABILITY_OWNER_INSTRUCTIONS_V1.to_owned(),
+            ],
+        );
+        let wait = std::time::Duration::from_millis(20);
+        assert!(
+            registry
+                .suggest_workdirs(machine, "/tmp", wait)
+                .await
+                .is_empty(),
+            "a silent worker leaves the form empty"
+        );
+        assert!(
+            registry
+                .claude_histories(machine, "/tmp", wait)
+                .await
+                .is_empty()
+        );
+        assert!(matches!(
+            registry.ask_path_probe(machine, "/", 0, wait).await,
+            Err(ProbeFailure::NoAnswer)
+        ));
+        assert!(matches!(
+            registry
+                .ask_precheck(machine, precheck_request(), wait)
+                .await,
+            Err(PrecheckFailure::NoAnswer)
+        ));
+        assert_eq!(
+            registry.owner_overview(machine, wait).await.unwrap_err(),
+            OwnerReadError::Unavailable
+        );
+        assert_eq!(
+            registry
+                .owner_file(machine, "user", "", "AGENTS.md", wait)
+                .await
+                .unwrap_err(),
+            OwnerReadError::Unavailable
+        );
+        assert!(registry.suggests.lock().unwrap().is_empty());
+        assert!(registry.histories.lock().unwrap().is_empty());
+        assert!(registry.probes.lock().unwrap().is_empty());
+        assert!(registry.prechecks.lock().unwrap().is_empty());
+        assert!(registry.owner_overview.lock().unwrap().is_empty());
+        assert!(registry.owner_files.lock().unwrap().is_empty());
+
+        // Оборванный HTTP-запрос бросает будущее: слот уходит вместе с ним.
+        let asking = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                registry
+                    .suggest_workdirs(machine, "/tmp", std::time::Duration::from_secs(30))
+                    .await
+            }
+        });
+        for _ in 0..1000 {
+            if !registry.suggests.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !registry.suggests.lock().unwrap().is_empty(),
+            "a request in flight holds a slot"
+        );
+        asking.abort();
+        assert!(asking.await.unwrap_err().is_cancelled());
+        assert!(
+            registry.suggests.lock().unwrap().is_empty(),
+            "an aborted request releases the slot"
+        );
+
+        // Слот с парой в значении (предпроверка) снимается так же.
+        let asking_precheck = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                registry
+                    .ask_precheck(
+                        machine,
+                        precheck_request(),
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await
+            }
+        });
+        for _ in 0..1000 {
+            if !registry.prechecks.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !registry.prechecks.lock().unwrap().is_empty(),
+            "a precheck in flight holds a slot"
+        );
+        asking_precheck.abort();
+        assert!(asking_precheck.await.unwrap_err().is_cancelled());
+        assert!(
+            registry.prechecks.lock().unwrap().is_empty(),
+            "an aborted precheck releases the slot"
+        );
     }
 
     fn precheck_request() -> canterlot_proto::worker::v1::SchedulePrecheck {
