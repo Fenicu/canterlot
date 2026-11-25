@@ -116,6 +116,10 @@ describe("AnswerCard live window", () => {
     expect(head?.textContent).toContain("Команда 2 · Чтение 1");
     expect(target.querySelector(".steps")).toBeNull();
     expect(target.textContent).toContain("I'll start by reading the brief.");
+    // В окне рассуждение идёт строкой без своей подписи: фазу называет строка хода.
+    const line = target.querySelector("[data-working]");
+    expect(line?.hasAttribute("data-quiet")).toBe(false);
+    expect(line?.textContent).toContain("Рассуждает");
   });
 
   it("a_card_opened_with_the_window_choice_renders_todays_live_list", () => {
@@ -127,6 +131,8 @@ describe("AnswerCard live window", () => {
     expect(target.querySelector('[data-role="live-window-head"]')).not.toBeNull();
     expect(target.querySelector(".steps")).not.toBeNull();
     expect(target.textContent?.match(/I'll start by reading the brief\./g)).toHaveLength(1);
+    // В полном списке «Рассуждает» говорит сам блок рассуждения: строка хода молчит, как и раньше.
+    expect(target.querySelector("[data-working]")?.hasAttribute("data-quiet")).toBe(true);
   });
 
   it("the_end_of_a_turn_switches_to_the_finished_view_and_keeps_the_feed_pinned", () => {
@@ -179,5 +185,7 @@ describe("AnswerCard live window", () => {
 
     expect(target.querySelector('[data-role="live-window"]')).toBeNull();
     expect(target.textContent).toContain("Отвечаю");
+    // Без окна поведение прежнее: здесь идёт текст, и строка хода называет свою фазу.
+    expect(target.querySelector("[data-working]")?.hasAttribute("data-quiet")).toBe(false);
   });
 });

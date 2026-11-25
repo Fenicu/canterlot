@@ -202,7 +202,8 @@
     </div>
   {/each}
   {#if live && head}
-    <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} {interrupt} waiting={working ? leaseWait : null} quiet={quietLiveLine} />
+    <!-- В окне рассуждение идёт строкой без своей подписи: фазу называет строка хода. -->
+    <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} {interrupt} waiting={working ? leaseWait : null} quiet={windowShown && !windowFull ? false : quietLiveLine} />
   {/if}
   {#if head}
     <footer class="byline" data-role="answer-footer">
