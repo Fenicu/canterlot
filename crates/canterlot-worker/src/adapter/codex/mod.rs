@@ -651,7 +651,9 @@ impl CodexAdapter {
                 }
             }
             Translated::TurnStarted { turn_id } => {
-                if self.compact_pending.is_some() && !self.turn_running() {
+                // Ход, начатый при открытой команде сжатия, — ход самого сжатия.
+                let compaction = self.compact_pending.is_some() && !self.turn_running();
+                if compaction {
                     self.compact_turn = true;
                 }
                 self.outbox.on_turn_started(&turn_id);
@@ -661,6 +663,10 @@ impl CodexAdapter {
                 {
                     self.outbox.adopt(&turn_id, command_id);
                     self.begin_turn(&turn_id, command_id);
+                } else if compaction {
+                    // Ход сжатия последней команде не приписывается: он должен кончиться
+                    // как неотслеживаемый, только там закрывается команда сжатия.
+                    // Приписанный ход держал бы её и ввод владельца до срока сжатия.
                 } else if self.outbox.active().is_none() && self.pending_turn.is_none() {
                     // Ход начат самим app-server: цель продолжает работать без нашего
                     // turn/start. Приписываем его последней команде владельца и открываем

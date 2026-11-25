@@ -3716,6 +3716,12 @@ async fn compact_starts_thread_compaction_and_marks_the_episode_manual() {
 /// Ручное сжатие ходом: `turn/started`, затем кадры элемента и конец хода.
 fn compaction_turn(item: bool, status: &str) -> Vec<String> {
     let mut lines = handshake("thread-main");
+    lines.extend(compaction_turn_frames(item, status));
+    lines
+}
+
+fn compaction_turn_frames(item: bool, status: &str) -> Vec<String> {
+    let mut lines = Vec::new();
     lines.push(w_in(10, "thread/compact/start", json!({})));
     lines.push(w_out(json!({"id": 10, "result": {}})));
     lines.push(w_out(json!({"method": "turn/started",
@@ -3776,6 +3782,51 @@ async fn compaction_turn_releases_the_command_at_its_end() {
         matches!(events.last(), Some(AdapterEvent::Compacted { ok: true }))
             && idle + 1 < events.len(),
         "{events:?}"
+    );
+}
+
+/// Сжатие после обычного хода: у адаптера уже есть последняя команда владельца,
+/// но ход сжатия ей не приписывается — иначе его конец не закрыл бы команду
+/// сжатия, и ввод владельца стоял бы до срока сжатия.
+#[tokio::test]
+async fn compaction_turn_after_an_owner_turn_is_not_adopted_and_releases_the_command() {
+    use canterlot_worker::adapter::CompactOutcome;
+    let mut lines = handshake("thread-main");
+    lines.extend(turn_exchange(4, "thread-main", "turn-1"));
+    lines.push(turn_end("thread-main", "turn-1", "completed"));
+    lines.extend(compaction_turn_frames(true, "completed"));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let (command, _) = fake.send("hello").await;
+    let outcome = tokio::time::timeout(WAIT, fake.adapter.compact(Uuid::now_v7()))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, CompactOutcome::Accepted));
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), fake.adapter.next_event())
+            .await
+            .unwrap_or_else(|_| panic!("the compaction must end in time, got {events:?}"));
+        let done = matches!(event, AdapterEvent::Compacted { .. });
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    fake.close().await;
+    assert!(
+        matches!(events.last(), Some(AdapterEvent::Compacted { ok: true })),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::RunAdopted { .. })),
+        "a compaction turn is not a run of the previous command: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command)),
+        "the owner turn is not finished a second time: {events:?}"
     );
 }
 
