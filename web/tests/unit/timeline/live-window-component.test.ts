@@ -71,6 +71,14 @@ describe("timeline/LiveWindow", () => {
     expect(head.textContent).toContain("1 мин 5 с");
   });
 
+  it("head_shows_the_error_count_instead_of_the_clock", () => {
+    const v = view([], { count: 3, failed: 1, startedAt: NOW - 65_000 });
+    const head = render(v).querySelector('[data-role="live-window-head"]')!;
+
+    expect(head.textContent).toContain("Ошибка 1");
+    expect(head.textContent).not.toContain("1 мин 5 с");
+  });
+
   it("head_clock_follows_the_now_prop", () => {
     const v = view([], { count: 1, startedAt: NOW - 65_000 });
     expect(render(v, { now: NOW }).textContent).toContain("1 мин 5 с");

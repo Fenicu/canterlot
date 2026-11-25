@@ -25,7 +25,8 @@
   const head = $derived(view.head);
   const name = $derived(head.count > 0 ? `${head.count} ${fmt.plural(head.count, ['шаг', 'шага', 'шагов'])}` : 'Шаги');
   const elapsed = $derived(head.startedAt > 0 ? fmt.duration(liveElapsed(now - head.startedAt)) : '');
-  const status = $derived([elapsed, head.failed > 0 ? `Ошибка ${head.failed}` : ''].filter(Boolean).join(' · '));
+  // Как у свёрнутой группы: при ошибке её счёт важнее часов, иначе счётчик шагов не помещается.
+  const status = $derived(head.failed > 0 ? `Ошибка ${head.failed}` : elapsed);
 
   type ToolItem = Extract<WindowItem, { kind: 'tool' }>;
 

@@ -157,6 +157,23 @@ describe("AnswerCard live window", () => {
     expect(body.compareDocumentPosition(asked!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it("at_the_end_of_a_turn_each_intro_key_stands_once", () => {
+    const req = request("r1");
+    const entries = [...threeSteps(), req];
+    const intro = entries.find((entry) => entry.kind === "block" && entry.block.kind === "text")!;
+    const { target, run } = render(entries);
+    expect(target.querySelectorAll(`[data-key="${intro.key}"]`)).toHaveLength(1);
+    expect(target.querySelectorAll(`[data-key="${req.key}"]`)).toHaveLength(1);
+
+    run.stop();
+    const reasoning = entries.find((entry) => entry.kind === "block" && entry.block.kind === "reasoning");
+    if (reasoning?.kind === "block") reasoning.block.state = "final";
+    flushSync();
+
+    expect(target.querySelectorAll(`[data-key="${intro.key}"]`)).toHaveLength(1);
+    expect(target.querySelectorAll(`[data-key="${req.key}"]`)).toHaveLength(1);
+  });
+
   it("a_live_card_without_steps_stays_as_today", () => {
     const { target } = render([block("text", { text: "Отвечаю", state: "streaming" })]);
 
