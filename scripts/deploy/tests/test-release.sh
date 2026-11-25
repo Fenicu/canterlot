@@ -611,6 +611,82 @@ for plan in "execute refused phase=token fail_codes=token_invalid" "execute refu
 done
 case_end
 
+# ---------------------------------------------------------------- прогрев spec_compat
+# (из test-release-fast.sh: прогрев идёт на любом пути) отслеживается, отменяется и убирается.
+case_begin "the build phase warms the spec_compat test build, a failed warm-up never stops the release"
+setup_release warm
+cutover_plan "${HAPPY_PLAN[@]}"
+run_release ship "${RVER}"
+C="${FAKE_ROOT}/state/calls.log"
+assert_eq "${RREL_RC}" "0" "exit 0"
+assert_eq "$(grep -c '^cargo test --locked -p canterlot-worker --all-features --test it --no-run$' "${C}" || true)" "1" "one warm-up compile of the spec_compat test binary"
+assert_not_contains "${C}" "spec_compat" "the check itself is not run by the warm-up (the preflight runs it)"
+teardown_case
+setup_release warm-failed
+cutover_plan "${HAPPY_PLAN[@]}"
+: >"${FAKE_ROOT}/state/warm-fail"
+run_release ship "${RVER}"
+assert_eq "${RREL_RC}" "0" "a failing warm-up: exit 0"
+assert_contains "${RDIR}/release-${RVER}.log" "warm-up of the spec_compat build failed" "the failure is logged"
+teardown_case
+case_end
+
+# Живой процесс: есть и не зомби (kill -0 успешен и для зомби, а он уже не работает).
+proc_running() {
+    local st
+    st="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')" || return 1
+    [ -n "${st}" ] && [ "${st:0:1}" != "Z" ]
+}
+warm_alive() { [ -f "${FAKE_ROOT}/state/warm.pid" ] && proc_running "$(cat "${FAKE_ROOT}/state/warm.pid")"; }
+# Потомок прогрева (sleep от «rustc») тоже должен исчезнуть, а не только сам cargo.
+warm_child_alive() { [ -f "${FAKE_ROOT}/state/warm.child" ] && proc_running "$(cat "${FAKE_ROOT}/state/warm.child")"; }
+warm_kill() {
+    if warm_alive; then kill -KILL "$(cat "${FAKE_ROOT}/state/warm.pid")" 2>/dev/null || true; fi
+    if warm_child_alive; then kill -KILL "$(cat "${FAKE_ROOT}/state/warm.child")" 2>/dev/null || true; fi
+}
+# Ждать завершения процесса не дольше N секунд (иначе тест не зависает навсегда).
+wait_gone() {
+    local pid="$1" deadline="$2" i
+    for ((i = 0; i < deadline * 10; i++)); do kill -0 "${pid}" 2>/dev/null || return 0; command sleep 0.1; done
+    return 1
+}
+case_begin "a TERM delivered during a blocked warm-up cancels and reaps it, and the lock is released"
+setup_release warm-term
+cutover_plan "${HAPPY_PLAN[@]}"
+: >"${FAKE_ROOT}/state/warm-block"
+( cd "${RREPO}" && bash scripts/release.sh ship "${RVER}" ) >"${FAKE_ROOT}/release.out" 2>&1 &
+RPID=$!
+for _ in $(seq 1 100); do [ -f "${FAKE_ROOT}/state/warm.pid" ] && break; command sleep 0.1; done
+[ -f "${FAKE_ROOT}/state/warm.pid" ] && case_ok "the warm-up cargo is running" || case_fail "the warm-up never started"
+warm_alive && case_ok "the warm-up process is alive before the TERM" || case_fail "no live warm-up"
+kill -TERM "${RPID}"
+RC=0
+if wait_gone "${RPID}" 30; then case_ok "the driver exits within the deadline"; else case_fail "the driver did not exit within 30 s"; kill -KILL "${RPID}" 2>/dev/null || true; fi
+wait "${RPID}" || RC=$?
+assert_eq "${RC}" "1" "the driver exits 1 (interrupted)"
+warm_alive && case_fail "the warm-up cargo survived the TERM" || case_ok "the warm-up cargo is gone"
+warm_child_alive && case_fail "a descendant of the warm-up survived the TERM" || case_ok "no descendant of the warm-up is left"
+warm_kill
+assert_eq "$(rres status)" "interrupted" "result: interrupted"
+RC=0
+(cd "${RREPO}" && flock -n "${RDIR}/release.lock" true) || RC=$?
+assert_eq "${RC}" "0" "the release lock is free again"
+teardown_case
+case_end
+
+case_begin "a build failure while the warm-up cargo is active cancels it"
+setup_release warm-buildfail
+cutover_plan "${HAPPY_PLAN[@]}"
+: >"${FAKE_ROOT}/state/warm-block"
+: >"${FAKE_ROOT}/state/build-fail"
+run_release ship "${RVER}"
+assert_eq "$(rres status)/$(rres phase)" "failed_before_cutover/build" "stopped at the build"
+warm_alive && case_fail "the warm-up cargo survived the failed build" || case_ok "the warm-up cargo was cancelled"
+warm_child_alive && case_fail "a descendant of the warm-up survived the failed build" || case_ok "no descendant of the warm-up is left"
+warm_kill
+teardown_case
+case_end
+
 # ---------------------------------------------------------------- настоящий cutover.sh
 # release.sh в своём чекауте, cutover.sh — обёртка над настоящим: релиз подменяется
 # релизом стенда (SHA_NEW), --source и --dist — стендовыми, значения стенда — свои.
@@ -647,21 +723,9 @@ EOF
     attest_head
 }
 
-case_begin "happy path through the real cutover fixture"
-setup_cutover release-real
-wire_real_cutover
-run_release ship "${RVER}"
-assert_eq "${RREL_RC}" "0" "exit 0"
-[ "${RREL_RC}" = "0" ] || tail -20 "${FAKE_ROOT}/release.out"
-assert_eq "$(sed -n 's/^status=//p' "${RDIR}/rehearsal-${RVER}-1.result")" "pass" "real rehearsal result: pass"
-assert_eq "$(sed -n 's/^status=//p' "${RDIR}/cutover-${RVER}-1.result")" "done" "real cutover result: done"
-hub_is "${SHA_NEW}" && worker_is "${SHA_NEW}" && web_is "${SHA_NEW}" && case_ok "hub, worker and PWA on the new release" || case_fail "not all on new"
-assert_eq "$(rres status)/$(rres published)" "done/yes" "result: done, published"
-assert_contains "${FAKE_ROOT}/release.out" "=== owner checklist: authenticated checks" "the cutover's owner checklist printed"
-teardown_case
-case_end
-
-case_begin "a CT backup lock in the real rehearsal is retried once, then the real cutover runs"
+# Счастливый путь через настоящий cutover.sh и повтор репетиции после блокировки CT — один
+# прогон: после повтора выпуск идёт тем же путём до публикации.
+case_begin "happy path through the real cutover fixture, after a CT backup lock in the first real rehearsal retried once"
 setup_cutover release-real-lock
 wire_real_cutover
 echo 1 >"${FAKE_ROOT}/state/locked-rehearsals"
@@ -670,8 +734,11 @@ assert_eq "${RREL_RC}" "0" "exit 0"
 [ "${RREL_RC}" = "0" ] || tail -20 "${FAKE_ROOT}/release.out"
 assert_eq "$(sed -n 's/^fail_codes=//p' "${RDIR}/rehearsal-${RVER}-1.result")" "vzdump_busy" "first real rehearsal: vzdump_busy"
 assert_eq "$(sed -n 's/^status=//p' "${RDIR}/rehearsal-${RVER}-2.result")" "pass" "second real rehearsal: pass"
+assert_eq "$(sed -n 's/^status=//p' "${RDIR}/cutover-${RVER}-1.result")" "done" "real cutover result: done"
 assert_eq "$(rres status)/$(rres rehearsal_retried)" "done/yes" "result: done after one retry"
-hub_is "${SHA_NEW}" && case_ok "hub on new" || case_fail "hub not on new"
+hub_is "${SHA_NEW}" && worker_is "${SHA_NEW}" && web_is "${SHA_NEW}" && case_ok "hub, worker and PWA on the new release" || case_fail "not all on new"
+assert_eq "$(rres status)/$(rres published)" "done/yes" "result: done, published"
+assert_contains "${FAKE_ROOT}/release.out" "=== owner checklist: authenticated checks" "the cutover's owner checklist printed"
 teardown_case
 case_end
 

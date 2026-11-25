@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Замок прогона, идентичность кластера, чужое состояние веба и восстановление по
-# записанным фактам для быстрого пути. Стенд и помощники — как в test-fastcutover.sh.
+# Развилки быстрого пути в охране и восстановлении: чужое состояние веба, идентичность кластера
+# и источник идентичности, закреплённая база (дрейф во время предпроверки и перед стопом, flip
+# вперёд только из ожидаемого релиза), тексты восстановления без vzdump (STOP после flip, сбой
+# чтения дампа до flip, forward-only после живого воркера) и дословный откат быстрого прогона.
+# Замок прогона — во втором проходе счастливого пути test-cutover.sh; запись идентичности рядом
+# с дампом, отказ отката на чужом кластере и повтор той же команды после частичного
+# восстановления — там же, в кейсе readyz боевого прогона: команда отката одна для обоих путей.
 # shellcheck disable=SC2015 # assert pattern: both branches always exit 0
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd "${HARNESS_DIR}/.." && pwd)"
@@ -11,69 +16,7 @@ source "${HARNESS_DIR}/lib-harness.sh"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=cutover-fixture.sh
 source "${HARNESS_DIR}/cutover-fixture.sh"
-
-# Стенд на настоящем git-источнике; база уже на последней миграции релиза (0041), как
-# при выпуске без новых миграций.
-setup_fast() {
-    local name="$1"
-    shift
-    make_fast_source "$@"
-    setup_cutover "${name}"
-    printf 'MIGR_MAX=41\nFAILED=0\npayload-predump\n' >"${FAKE_ROOT}/state/db.txt"
-    cp "${FAKE_ROOT}/state/db.txt" "${FAKE_ROOT}/state/db-pre.txt"
-    # Развёрнутый релиз уже на 0041: так выглядит выпуск без новых миграций.
-    sed -i 's/^migrations_last=.*/migrations_last=0041_fake_harness.sql/' \
-        "${HUB_RELEASES}/${SHA_PREV}/RELEASE" "${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
-    # Развёрнутый релиз хранит полный хэш исходника, как настоящая сборка.
-    printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${HUB_RELEASES}/${SHA_PREV}/RELEASE"
-    printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
-    seed_identity_sidecar
-    : >"${FAKE_ROOT}/state/calls.log"
-}
-finish_fast() { drop_fast_source; teardown_case; }
-fcut() {
-    # fcut РЕЖИМ... : cutover.sh с источником-репозиторием; ssh-команды пишутся в state/ssh-cmds.log
-    FAKE_SSH_LOG_CMDS=1 bash "${DEPLOY_DIR}/cutover.sh" "$@" --source "${FAST_SRC}" --dist "${FAKE_ROOT}/dist" \
-        --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1
-}
-rehearse_skip() { fcut "${SHA_NEW}" --rehearse --skip-ct-backup "$@"; }
-# Токен репетиции из её файла результата.
-token_of() { result_of "${FAKE_ROOT}/cutover.result" token; }
-
-
-# Отказ быстрого пути до первой записи: ни маркеров резерва, ни остановок, ни дампов.
-no_writes_yet() {
-    local why="$1"
-    worker_stopped_ever && case_fail "${why}: worker stopped" || case_ok "${why}: worker untouched"
-    grep -qE '^(vzdump|pg_dump) ' "${FAKE_ROOT}/state/calls.log" && case_fail "${why}: vzdump or pg_dump ran" || case_ok "${why}: no vzdump, no pg_dump"
-    # Маркеры резерва снимаются при выходе, поэтому по остатку их не видно: проверяем сами команды ssh.
-    if grep -q '\.reserved\.' "${FAKE_ROOT}/state/ssh-cmds.log" 2>/dev/null; then
-        case_fail "${why}: a reservation command was sent to a host"
-    else
-        case_ok "${why}: zero reservation writes (no reserve command reached any host)"
-    fi
-}
-
-# ------------------------------------------------------------ один замок на весь прогон
-case_begin "a second mutating run fails fast while another holds the deploy lock"
-setup_fast lockheld other
-LOCKF="${WORKER_BASE}/.cutover.lock"
-RC=0
-flock "${LOCKF}" bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --fast --source "${FAST_SRC}" --dist "${FAKE_ROOT}/dist" \
-    --state "${FAKE_ROOT}/snap.state" --result "${FAKE_ROOT}/x.result" >"${FAKE_ROOT}/cutover.log" 2>&1 || RC=$?
-[ "${RC}" != "0" ] && case_ok "the cutover exits nonzero" || case_fail "the cutover ran under a held lock"
-assert_eq "$(result_of "${FAKE_ROOT}/x.result" status)/$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "refused/deploy_locked" "clear code deploy_locked"
-assert_contains "${FAKE_ROOT}/cutover.log" "another cutover or rollback holds" "reason printed"
-no_writes_yet "held lock"
-printf 'TOC-LINE-02 _sqlx_migrations table\n' >"${HUB_BACKUP_DIR}/canterlot-pre-manual.dump"
-RC=0
-flock "${LOCKF}" bash "${DEPLOY_DIR}/rollback-db.sh" "${HUB_BACKUP_DIR}/canterlot-pre-manual.dump" --to "${SHA_PREV}" >"${FAKE_ROOT}/rollback.log" 2>&1 || RC=$?
-[ "${RC}" != "0" ] && case_ok "rollback-db.sh exits nonzero under a held lock" || case_fail "rollback-db.sh ran under a held lock"
-assert_contains "${FAKE_ROOT}/rollback.log" "deploy_locked" "rollback-db.sh names the code"
-grep -qE '^(dropdb|createdb) ' "${FAKE_ROOT}/state/calls.log" && case_fail "the rollback touched the database" || case_ok "the rollback touched nothing"
-fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" && case_ok "with the lock free the run completes" || case_fail "the run failed with a free lock"
-finish_fast
-case_end
+# setup_fast, fcut, no_writes_yet, printed_rollback_cmd, run_printed — fast-source-fixture.sh.
 
 # Чужое состояние веба: проверка ожидаемого прежнего релиза идёт ДО замены живого env, а
 # при отказе откатывать нечего — чужое не перезаписывается.
@@ -106,40 +49,9 @@ no_writes_yet "populated wrong cluster"
 finish_fast
 case_end
 
-case_begin "the dump carries the cluster identity and the printed restore command expects it"
-setup_fast idrecord other
-export FAKE_READYZ_NEW=0
-fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
-unset FAKE_READYZ_NEW
-assert_eq "$(result_of "${FAKE_ROOT}/exe.result" pg_system_identifier)/$(result_of "${FAKE_ROOT}/exe.result" pg_database_oid)" "7000000000000000001/16384" "result: identity recorded"
-IDFILE="$(result_of "${FAKE_ROOT}/exe.result" dump).identity"
-[ -f "${IDFILE}" ] && grep -q '^system_identifier=7000000000000000001$' "${IDFILE}" && grep -q '^database_oid=16384$' "${IDFILE}" && case_ok "the identity file sits next to the dump" || case_fail "no identity file next to the dump"
-STOP_BLOCK="$(result_of "${FAKE_ROOT}/exe.result" stop_block)"
-assert_contains "${STOP_BLOCK}" "--expect-system-id 7000000000000000001 --expect-db-oid 16384" "the printed restore command carries the expected identity"
-# Кластер с другим идентификатором: откат отказывает ДО остановки хаба и до любого dropdb;
-# воркер при этом жив, значит отказ именно по идентичности, а не по охраннику воркера.
-: >"${FAKE_ROOT}/state/calls.log"
-export FAKE_PG_SYSID=7999999999999999999
-RECOVERY_CMD="$(grep -m1 'scripts/deploy/rollback-db.sh' "${FAKE_ROOT}/cutover.log" | sed 's/^[[:space:]]*//')"
-RC=0
-( cd "${REPO_ROOT}" && eval "${RECOVERY_CMD}" ) >"${FAKE_ROOT}/rollback.log" 2>&1 || RC=$?
-unset FAKE_PG_SYSID
-[ "${RC}" != "0" ] && case_ok "the printed restore refuses a foreign cluster" || case_fail "the restore ran on a foreign cluster"
-assert_contains "${FAKE_ROOT}/rollback.log" "system identifier" "refused on the system identifier"
-assert_not_contains "${FAKE_ROOT}/rollback.log" "(before any change)" "not on the worker guard (it was never reached)"
-grep -qE '^(dropdb|createdb) ' "${FAKE_ROOT}/state/calls.log" && case_fail "dropdb or createdb ran" || case_ok "no dropdb, no createdb"
-grep -q 'stop canterlot-hub' "${FAKE_ROOT}/state/calls.log" && case_fail "the hub was stopped" || case_ok "the hub was not stopped"
-# Тот же кластер, другой oid базы.
-export FAKE_PG_DBOID=99999
-RC=0
-( cd "${REPO_ROOT}" && eval "${RECOVERY_CMD}" ) >"${FAKE_ROOT}/rollback.log" 2>&1 || RC=$?
-unset FAKE_PG_DBOID
-[ "${RC}" != "0" ] && case_ok "a different database oid is refused too" || case_fail "the restore ran against another database oid"
-assert_contains "${FAKE_ROOT}/rollback.log" "database oid" "refused on the database oid"
-finish_fast
-case_end
-
 # ------------------------------------------------------------ быстрый путь без источника идентичности
+# Полный путь без источника идентичности работает и записывает её: кейс счастливого пути
+# test-cutover.sh (его стенд без записи идентичности).
 case_begin "skip eligibility refuses the fast path when there is no identity source (pin or sidecar)"
 setup_fast noid other
 rm -f "${HUB_BACKUP_DIR}/canterlot-pre-seed-20261101T000000Z.dump.identity"  # lint: local-temp
@@ -155,82 +67,105 @@ unset HUB_PG_SYSTEM_ID
 finish_fast
 case_end
 
-case_begin "the full path keeps working without an identity source"
-setup_fast noidfull migration
-rm -f "${HUB_BACKUP_DIR}/canterlot-pre-seed-20261101T000000Z.dump.identity"  # lint: local-temp
-printf 'MIGR_MAX=40\nFAILED=0\npayload-predump\n' >"${FAKE_ROOT}/state/db.txt"
-sed -i 's/^migrations_last=.*/migrations_last=0040_monthly_limits.sql/' "${HUB_RELEASES}/${SHA_PREV}/RELEASE" "${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
+# ------------------------------------------------------------ базовое состояние закреплено
+# (из бывшего test-fastbaseline.sh)
+# Крючок, который «вручную» переключает ссылку веба на другой релиз.
+make_drift_hook() {
+    mkdir -p "${WEB_RELEASES}/cccccccccccc/_app"
+    printf '#!/usr/bin/env bash\nln -sfn releases/cccccccccccc "%s"\n' "${WEB_BUILD_LINK}" >"${FAKE_ROOT}/drift-hook.sh"
+}
+case_begin "the baseline drifting during the preflight refuses the fast path before any write"
+setup_fast driftpre other
+make_drift_hook
+export FAKE_CARGO_HOOK="${FAKE_ROOT}/drift-hook.sh"
+if fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/x.result"; then case_fail "exit 0 after a drift"; else case_ok "exit nonzero"; fi
+unset FAKE_CARGO_HOOK
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" status)/$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "refused/fast_path_refused" "refused with the fallback code"
+assert_contains "${FAKE_ROOT}/cutover.log" "web link" "the drifted link is named"
+no_writes_yet "drift during the preflight"
+finish_fast
+case_end
+
+case_begin "the baseline drifting during the preflight stops a full run too (baseline_drift)"
+setup_fast driftfull migration
+fast_to_full_migration
 fcut "${SHA_NEW}" --rehearse --result "${FAKE_ROOT}/reh.result" || true
 TOK="$(result_of "${FAKE_ROOT}/reh.result" token)"
-fcut --execute "${SHA_NEW}" --confirm "${TOK}" --result "${FAKE_ROOT}/exe.result" || true
-assert_eq "$(result_of "${FAKE_ROOT}/exe.result" status)" "done" "the full run is done"
-[ -f "$(result_of "${FAKE_ROOT}/exe.result" dump).identity" ] && case_ok "it records the identity for the next run" || case_fail "no identity recorded"
+make_drift_hook
+export FAKE_CARGO_HOOK="${FAKE_ROOT}/drift-hook.sh"
+if fcut --execute "${SHA_NEW}" --confirm "${TOK}" --result "${FAKE_ROOT}/x.result"; then case_fail "exit 0 after a drift"; else case_ok "exit nonzero"; fi
+unset FAKE_CARGO_HOOK
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "baseline_drift" "fail code baseline_drift"
+no_writes_yet "full run drift"
 finish_fast
 case_end
 
-# ------------------------------------------------------------ откат переживает частичное восстановление
-# Печатаемая команда отката после быстрого прогона со СТОПом: общий подготовительный шаг.
-printed_rollback() {
-    export FAKE_READYZ_NEW=0
-    fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
-    unset FAKE_READYZ_NEW
-    RECOVERY_CMD="$(grep -m1 'scripts/deploy/rollback-db.sh' "${FAKE_ROOT}/cutover.log" | sed 's/^[[:space:]]*//')"
-    PHASE_FILE="$(result_of "${FAKE_ROOT}/exe.result" dump).restore-phase"
-    printf 'MIGR_MAX=41\nFAILED=0\nchanged-after-the-dump\n' >"${FAKE_ROOT}/state/db.txt"
-}
-run_printed() { RC=0; ( cd "${REPO_ROOT}" && eval "${RECOVERY_CMD}" ) >"${FAKE_ROOT}/rollback.log" 2>&1 || RC=$?; }
-
-case_begin "pg_restore fails after createdb: the same printed command is rerun and restores"
-setup_fast rbcreated other
-printed_rollback
-export FAKE_FAIL_PG_RESTORE=1
-run_printed
-unset FAKE_FAIL_PG_RESTORE
-[ "${RC}" != "0" ] && case_ok "the first run fails" || case_fail "the first run did not fail"
-assert_eq "$(cut -d' ' -f1-2 "${PHASE_FILE}" 2>/dev/null)" "created 16500" "the phase file records the replacement oid"
-run_printed
-assert_eq "${RC}" "0" "the rerun of the same printed command succeeds"
-[ "${RC}" = "0" ] || tail -5 "${FAKE_ROOT}/rollback.log"
-grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" && case_ok "the data is restored from the dump" || case_fail "the data was not restored"
-FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub && case_ok "the hub is started" || case_fail "the hub is not running"
-assert_contains "${FAKE_ROOT}/rollback.log" "replacement database oid 16500" "the recorded replacement oid was accepted"
-assert_eq "$(cut -d' ' -f1 "${PHASE_FILE}")" "restored" "the phase ends as restored"
+case_begin "the baseline drifting after the regate and before the stop leaves the worker running"
+setup_fast driftstop other
+make_drift_hook
+export FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/drift-hook.sh" FAKE_SSH_AFTER_CMD="select distinct conversation_id" FAKE_SSH_AFTER_NTH=2
+if fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/x.result"; then case_fail "exit 0 after a drift"; else case_ok "exit nonzero"; fi
+unset FAKE_SSH_AFTER_HOOK FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_NTH
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "baseline_drift" "fail code baseline_drift"
+assert_contains "${FAKE_ROOT}/cutover.log" "changed after it was approved" "reason printed"
+worker_stopped_ever && case_fail "worker stopped" || case_ok "worker never stopped"
+grep -qE '^pg_dump ' "${FAKE_ROOT}/state/calls.log" && case_fail "pg_dump ran" || case_ok "no pg_dump"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 finish_fast
 case_end
 
-case_begin "a failure between dropdb and createdb: the rerun continues from dropped"
-setup_fast rbdropped other
-printed_rollback
-export FAKE_FAIL_CREATEDB=1
-run_printed
-unset FAKE_FAIL_CREATEDB
-[ "${RC}" != "0" ] && case_ok "the first run fails" || case_fail "the first run did not fail"
-assert_eq "$(cut -d' ' -f1 "${PHASE_FILE}" 2>/dev/null)" "dropped" "the phase file says dropped"
-[ ! -f "${FAKE_ROOT}/state/db.txt" ] && case_ok "the database is really missing" || case_fail "the database exists"
-run_printed
-assert_eq "${RC}" "0" "the rerun succeeds with the database missing"
-[ "${RC}" = "0" ] || tail -5 "${FAKE_ROOT}/rollback.log"
-grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" && case_ok "the data is restored from the dump" || case_fail "the data was not restored"
-finish_fast
-case_end
-
-case_begin "an unrecorded foreign oid is still refused, with or without a phase record"
-setup_fast rbforeign other
-printed_rollback
-export FAKE_PG_DBOID=77777
-: >"${FAKE_ROOT}/state/calls.log"
-run_printed
-[ "${RC}" != "0" ] && case_ok "no phase record: refused" || case_fail "the foreign oid was accepted"
-assert_contains "${FAKE_ROOT}/rollback.log" "database oid" "refused on the oid"
-printf 'created 16500\n' >"${PHASE_FILE}"
-run_printed
-[ "${RC}" != "0" ] && case_ok "a phase record for another oid does not excuse 77777" || case_fail "the foreign oid was accepted under a phase record"
-unset FAKE_PG_DBOID
-grep -qE '^(dropdb|createdb) ' "${FAKE_ROOT}/state/calls.log" && case_fail "dropdb or createdb ran" || case_ok "the database was never touched"
+case_begin "the forward flip scripts refuse when the link is no longer the approved release"
+setup_fast flipold other
+FLIPDIR="${FAKE_ROOT}/flipdir"
+mkdir -p "${FLIPDIR}/releases/old/bin" "${FLIPDIR}/releases/new/bin" "${FLIPDIR}/releases/other"
+printf 'x' >"${FLIPDIR}/releases/new/RELEASE"; printf 'x' >"${FLIPDIR}/releases/new/SHA256SUMS"
+printf '#!/bin/sh\n' >"${FLIPDIR}/releases/new/bin/canterlot-hub"; chmod +x "${FLIPDIR}/releases/new/bin/canterlot-hub"
+mkdir -p "${FLIPDIR}/releases/new/_app"; printf '#!/bin/sh\n' >"${FLIPDIR}/releases/new/bin/canterlot-worker"
+flip_run() { bash -c "$(bash -c 'source "$1/lib.sh"; printf "%s" "${!2}"' _ "${DEPLOY_DIR}" "$1")" -- "${@:2}"; }
+ln -sfn releases/old "${FLIPDIR}/current"; ln -sfn releases/old "${FLIPDIR}/build"
+flip_run HUB_FLIP_FWD_SCRIPT "${FLIPDIR}" new "${FLIPDIR}/current" other >/dev/null 2>&1 && case_fail "hub flip ignored the expected-old" || case_ok "hub flip refuses a link that is not the approved release"
+assert_eq "$(readlink "${FLIPDIR}/current")" "releases/old" "hub link untouched"
+flip_run HUB_FLIP_FWD_SCRIPT "${FLIPDIR}" new "${FLIPDIR}/current" old >/dev/null 2>&1 && case_ok "hub flip proceeds from the approved release" || case_fail "hub flip refused the approved release"
+assert_eq "$(readlink "${FLIPDIR}/current")" "releases/new" "hub link moved"
+ln -sfn releases/other "${FLIPDIR}/current"
+flip_run WORKER_FLIP_FWD_SCRIPT "${FLIPDIR}" new old >/dev/null 2>&1 && case_fail "worker flip ignored the expected-old" || case_ok "worker flip refuses a link that is not the approved release"
+ln -sfn releases/old "${FLIPDIR}/current"
+flip_run WORKER_FLIP_FWD_SCRIPT "${FLIPDIR}" new old >/dev/null 2>&1 && case_ok "worker flip proceeds from the approved release" || case_fail "worker flip refused the approved release"
+ln -sfn releases/other "${FLIPDIR}/build"
+flip_run WEB_FLIP_FWD_SCRIPT "${FLIPDIR}" new "${FLIPDIR}/build" old >/dev/null 2>&1 && case_fail "web flip ignored the expected-old" || case_ok "web flip refuses a link that is not the approved release"
+assert_eq "$(readlink "${FLIPDIR}/build")" "releases/other" "web link untouched"
 finish_fast
 case_end
 
 # ------------------------------------------------------------ восстановление по записанным фактам
+# STOP после flip хаба в быстром прогоне: тексты не называют несуществующий vzdump, а напечатанная
+# команда отката дословно возвращает данные дампа и прежний хаб (бывшие «STOP-AND-REPORT after
+# a fast run» и «the printed rollback of a fast run»: один прогон).
+case_begin "STOP-AND-REPORT after a fast run names no vzdump, and its printed rollback runs verbatim"
+setup_fast stopfast other
+export FAKE_READYZ_NEW=0
+fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
+unset FAKE_READYZ_NEW
+STOP_BLOCK="$(result_of "${FAKE_ROOT}/exe.result" stop_block)"
+assert_eq "$(result_of "${FAKE_ROOT}/exe.result" status)" "stop_and_report" "result: stop_and_report"
+assert_eq "$(result_of "${FAKE_ROOT}/exe.result" vzdump_done)/$(result_of "${FAKE_ROOT}/exe.result" vzdump_skipped)" "no/yes" "result: vzdump_done=no, vzdump_skipped=yes"
+[ -f "${STOP_BLOCK}" ] && case_ok "the stop block file exists" || case_fail "no stop block"
+assert_contains "${STOP_BLOCK}" "vzdump done=no (skipped:" "facts: the vzdump is reported as skipped"
+assert_contains "${STOP_BLOCK}" "this run's vzdump = none (skipped:" "live state: no vzdump named"
+assert_not_contains "${STOP_BLOCK}" "notes pre-${SHA_NEW}-" "no vzdump notes in the block"
+assert_not_contains "${STOP_BLOCK}" "The vzdump above" "recovery step 2 does not point at a vzdump"
+assert_not_contains "${STOP_BLOCK}" "earlier whole-CT restore point" "no whole-CT restore point mentioned"
+assert_contains "${STOP_BLOCK}" "rollback-db.sh" "the quiesced dump restore command is still printed"
+assert_contains "${STOP_BLOCK}" "${HUB_BACKUP_DIR}/canterlot-pre-${SHA_NEW}-" "the dump path is printed"
+printf 'MIGR_MAX=41\nFAILED=0\nchanged-after-the-dump\n' >"${FAKE_ROOT}/state/db.txt"
+RECOVERY_CMD="$(printed_rollback_cmd)"
+[ -n "${RECOVERY_CMD}" ] && run_printed || RC=1
+[ "${RC}" = "0" ] && case_ok "the printed recovery command runs verbatim" || { case_fail "the printed recovery command failed"; tail -3 "${FAKE_ROOT}/rollback.log" 2>/dev/null; }
+grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" && case_ok "the restored data is the dump's" || case_fail "the data was not restored from the dump"
+hub_is "${SHA_PREV}" && case_ok "recovery flipped the hub back" || case_fail "the hub was not flipped back"
+finish_fast
+case_end
+
 case_begin "a skip-mode dump read-back failure before the flip: the planned dump is not a restore point"
 setup_fast recdumpfail other
 export FAKE_DUMP_CORRUPT=1
@@ -286,20 +221,6 @@ assert_contains "${STOP_BLOCK}" "this run's vzdump = none (skipped:" "no vzdump 
 assert_not_contains "${STOP_BLOCK}" "notes pre-${SHA_NEW}-" "no vzdump notes"
 assert_not_contains "${STOP_BLOCK}" "The vzdump above" "no vzdump fallback text"
 hub_is "${SHA_NEW}" && worker_is "${SHA_NEW}" && case_ok "hub and worker stay new" || case_fail "not on new"
-finish_fast
-case_end
-
-case_begin "the printed rollback of a fast run runs verbatim and restores the data"
-setup_fast recrollback other
-export FAKE_READYZ_NEW=0
-fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
-unset FAKE_READYZ_NEW
-assert_eq "$(result_of "${FAKE_ROOT}/exe.result" status)" "stop_and_report" "result: stop_and_report"
-printf 'MIGR_MAX=41\nFAILED=0\nchanged-after-the-dump\n' >"${FAKE_ROOT}/state/db.txt"
-RECOVERY_CMD="$(grep -m1 'scripts/deploy/rollback-db.sh' "${FAKE_ROOT}/cutover.log" | sed 's/^[[:space:]]*//')"
-if [ -n "${RECOVERY_CMD}" ] && ( cd "${REPO_ROOT}" && eval "${RECOVERY_CMD}" ) >"${FAKE_ROOT}/recovery.log" 2>&1; then case_ok "the printed recovery command runs verbatim"; else case_fail "the printed recovery command failed"; tail -3 "${FAKE_ROOT}/recovery.log" 2>/dev/null; fi
-grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" && case_ok "the restored data is the dump's" || case_fail "the data was not restored from the dump"
-hub_is "${SHA_PREV}" && case_ok "recovery flipped the hub back" || case_fail "the hub was not flipped back"
 finish_fast
 case_end
 

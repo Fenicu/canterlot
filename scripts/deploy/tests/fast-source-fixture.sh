@@ -114,3 +114,51 @@ seed_identity_sidecar() {
     printf 'system_identifier=7000000000000000001\ndatabase_oid=16384\ndatabase=canterlot\nsocket=/var/run/postgresql\n' \
         >"${HUB_BACKUP_DIR}/canterlot-pre-seed-20261101T000000Z.dump.identity"
 }
+
+# --- стенд быстрого пути (второй проход сценариев test-cutover.sh и развилки test-fast*.sh) ---
+# Стенд cutover на настоящем git-источнике; база уже на последней миграции релиза (0041), как
+# при выпуске без новых миграций. setup_fast ИМЯ ИЗМЕНЕНИЯ... (изменения — как у make_fast_source).
+setup_fast() {
+    local name="$1"
+    shift
+    make_fast_source "$@"
+    setup_cutover "${name}"
+    printf 'MIGR_MAX=41\nFAILED=0\npayload-predump\n' >"${FAKE_ROOT}/state/db.txt"
+    cp "${FAKE_ROOT}/state/db.txt" "${FAKE_ROOT}/state/db-pre.txt"
+    # Развёрнутый релиз уже на 0041: так выглядит выпуск без новых миграций.
+    sed -i 's/^migrations_last=.*/migrations_last=0041_fake_harness.sql/' \
+        "${HUB_RELEASES}/${SHA_PREV}/RELEASE" "${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
+    # Развёрнутый релиз хранит полный хэш исходника, как настоящая сборка.
+    printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${HUB_RELEASES}/${SHA_PREV}/RELEASE"
+    printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
+    seed_identity_sidecar
+    : >"${FAKE_ROOT}/state/calls.log"
+}
+# Выпуск с новой миграцией на том же источнике: база и развёрнутый релиз на 0040, цель на 0041.
+fast_to_full_migration() {
+    printf 'MIGR_MAX=40\nFAILED=0\npayload-predump\n' >"${FAKE_ROOT}/state/db.txt"
+    sed -i 's/^migrations_last=.*/migrations_last=0040_monthly_limits.sql/' \
+        "${HUB_RELEASES}/${SHA_PREV}/RELEASE" "${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
+}
+finish_fast() { drop_fast_source; teardown_case; }
+# fcut РЕЖИМ... : cutover.sh с источником-репозиторием; ssh-команды пишутся в state/ssh-cmds.log.
+fcut() {
+    FAKE_SSH_LOG_CMDS=1 bash "${DEPLOY_DIR}/cutover.sh" "$@" --source "${FAST_SRC}" --dist "${FAKE_ROOT}/dist" \
+        --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1
+}
+rehearse_skip() { fcut "${SHA_NEW}" --rehearse --skip-ct-backup "$@"; }
+# Отказ быстрого пути до первой записи: ни маркеров резерва, ни остановок, ни дампов.
+no_writes_yet() {
+    local why="$1"
+    worker_stopped_ever && case_fail "${why}: worker stopped" || case_ok "${why}: worker untouched"
+    grep -qE '^(vzdump|pg_dump) ' "${FAKE_ROOT}/state/calls.log" && case_fail "${why}: vzdump or pg_dump ran" || case_ok "${why}: no vzdump, no pg_dump"
+    # Маркеры резерва снимаются при выходе, поэтому по остатку их не видно: проверяем сами команды ssh.
+    if grep -q '\.reserved\.' "${FAKE_ROOT}/state/ssh-cmds.log" 2>/dev/null; then
+        case_fail "${why}: a reservation command was sent to a host"
+    else
+        case_ok "${why}: zero reservation writes (no reserve command reached any host)"
+    fi
+}
+# Печатаемая команда отката из лога cutover; run_printed исполняет её дословно из корня репозитория.
+printed_rollback_cmd() { grep -m1 'scripts/deploy/rollback-db.sh' "${FAKE_ROOT}/cutover.log" | sed 's/^[[:space:]]*//'; }
+run_printed() { RC=0; ( cd "${REPO_ROOT}" && eval "${RECOVERY_CMD}" ) >"${FAKE_ROOT}/rollback.log" 2>&1 || RC=$?; }

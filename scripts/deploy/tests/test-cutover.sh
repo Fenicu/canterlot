@@ -289,17 +289,72 @@ FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-wo
     && case_fail "worker started (must stay stopped)" || case_ok "worker stays stopped"
 assert_proc_alive "${SUP1}" "session 1 alive"
 assert_proc_alive "${SUP2}" "session 2 alive"
+# Блок STOP полного прогона называет свой vzdump (бывший кейс test-fastcutover.sh «STOP-AND-REPORT
+# after a full run still names its vzdump»; без vzdump — test-fastguards.sh).
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" vzdump_done)/$(result_of "${FAKE_ROOT}/cutover.result" vzdump_skipped)" "yes/no" "result file: vzdump_done=yes, vzdump_skipped=no"
+assert_contains "${STOP_BLOCK}" "this run's vzdump = notes pre-${SHA_NEW}-" "live state: the vzdump is named"
+assert_contains "${STOP_BLOCK}" "The vzdump above is a separate" "recovery step 2 keeps the vzdump fallback"
+# Идентичность кластера записана рядом с дампом и вшита в команду отката (бывший кейс
+# test-fastguards.sh: запись одна на оба пути).
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" pg_system_identifier)/$(result_of "${FAKE_ROOT}/cutover.result" pg_database_oid)" "7000000000000000001/16384" "result file: identity recorded"
+RUN_DUMP_PATH="$(result_of "${FAKE_ROOT}/cutover.result" dump)"
+PHASE_FILE="${RUN_DUMP_PATH}.restore-phase"
+[ -f "${RUN_DUMP_PATH}.identity" ] && grep -q '^system_identifier=7000000000000000001$' "${RUN_DUMP_PATH}.identity" \
+    && grep -q '^database_oid=16384$' "${RUN_DUMP_PATH}.identity" && case_ok "the identity file sits next to the dump" || case_fail "no identity file next to the dump"
+assert_contains "${STOP_BLOCK}" "--expect-system-id 7000000000000000001 --expect-db-oid 16384" "the printed restore command carries the expected identity"
 # Напечатанная команда восстановления должна работать дословно: режим +x и
 # никаких скрытых подстановок, которых нет в отчёте.
-RECOVERY_CMD="$(grep -m1 'scripts/deploy/rollback-db.sh' "${FAKE_ROOT}/cutover.log" | sed 's/^[[:space:]]*//')"
-if [ -n "${RECOVERY_CMD}" ] && ( cd "${REPO_ROOT}" && eval "${RECOVERY_CMD}" ) >"${FAKE_ROOT}/recovery.log" 2>&1; then
-    case_ok "printed recovery command runs verbatim"
-else
-    case_fail "printed recovery command failed"; tail -3 "${FAKE_ROOT}/recovery.log" 2>/dev/null
-fi
+RECOVERY_CMD="$(printed_rollback_cmd)"
+# Сначала отказы, которые базу не трогают: другой кластер, другая база, чужой oid и с записью фазы.
+: >"${FAKE_ROOT}/state/calls.log"
+export FAKE_PG_SYSID=7999999999999999999
+run_printed
+unset FAKE_PG_SYSID
+[ "${RC}" != "0" ] && case_ok "the printed restore refuses a foreign cluster" || case_fail "the restore ran on a foreign cluster"
+assert_contains "${FAKE_ROOT}/rollback.log" "system identifier" "refused on the system identifier"
+assert_not_contains "${FAKE_ROOT}/rollback.log" "(before any change)" "not on the worker guard (it was never reached)"
+grep -q 'stop canterlot-hub' "${FAKE_ROOT}/state/calls.log" && case_fail "the hub was stopped" || case_ok "the hub was not stopped"
+export FAKE_PG_DBOID=77777
+run_printed
+[ "${RC}" != "0" ] && case_ok "another database oid, no phase record: refused" || case_fail "the restore ran against another database oid"
+assert_contains "${FAKE_ROOT}/rollback.log" "database oid" "refused on the database oid"
+printf 'created 16500\n' >"${PHASE_FILE}"
+run_printed
+[ "${RC}" != "0" ] && case_ok "a phase record for another oid does not excuse 77777" || case_fail "the foreign oid was accepted under a phase record"
+unset FAKE_PG_DBOID
+rm -f "${PHASE_FILE}"  # lint: local-temp
+grep -qE '^(dropdb|createdb) ' "${FAKE_ROOT}/state/calls.log" && case_fail "dropdb or createdb ran" || case_ok "no dropdb, no createdb on any refusal"
+run_printed
+[ "${RC}" = "0" ] && case_ok "printed recovery command runs verbatim" || { case_fail "printed recovery command failed"; tail -3 "${FAKE_ROOT}/rollback.log" 2>/dev/null; }
 hub_is "${SHA_PREV}" && case_ok "recovery flipped hub back" || case_fail "recovery did not flip hub"
 [ "$(grep '^MIGR_MAX=' "${FAKE_ROOT}/state/db.txt" | cut -d= -f2)" = "40" ] \
     && case_ok "recovery restored the dump" || case_fail "recovery did not restore the dump"
+# Частичное восстановление: та же напечатанная команда, повторённая, доводит дело до конца
+# (бывшие кейсы test-fastguards.sh; фаза пишется рядом с дампом при любом пути).
+printf 'MIGR_MAX=41\nFAILED=0\nchanged-after-the-dump\n' >"${FAKE_ROOT}/state/db.txt"
+export FAKE_FAIL_PG_RESTORE=1
+run_printed
+unset FAKE_FAIL_PG_RESTORE
+[ "${RC}" != "0" ] && case_ok "pg_restore after createdb fails: the run fails" || case_fail "the run with a failing pg_restore did not fail"
+assert_eq "$(cut -d' ' -f1-2 "${PHASE_FILE}" 2>/dev/null)" "created 16500" "the phase file records the replacement oid"
+run_printed
+assert_eq "${RC}" "0" "the rerun of the same printed command succeeds"
+[ "${RC}" = "0" ] || tail -5 "${FAKE_ROOT}/rollback.log"
+grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" && case_ok "the data is restored from the dump" || case_fail "the data was not restored"
+FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub && case_ok "the hub is started" || case_fail "the hub is not running"
+assert_contains "${FAKE_ROOT}/rollback.log" "replacement database oid 16500" "the recorded replacement oid was accepted"
+assert_eq "$(cut -d' ' -f1 "${PHASE_FILE}")" "restored" "the phase ends as restored"
+printf 'MIGR_MAX=41\nFAILED=0\nchanged-after-the-dump\n' >"${FAKE_ROOT}/state/db.txt"
+export FAKE_FAIL_CREATEDB=1
+run_printed
+unset FAKE_FAIL_CREATEDB
+[ "${RC}" != "0" ] && case_ok "a failure between dropdb and createdb: the run fails" || case_fail "the run with a failing createdb did not fail"
+assert_eq "$(cut -d' ' -f1 "${PHASE_FILE}" 2>/dev/null)" "dropped" "the phase file says dropped"
+[ ! -f "${FAKE_ROOT}/state/db.txt" ] && case_ok "the database is really missing" || case_fail "the database exists"
+run_printed
+assert_eq "${RC}" "0" "the rerun continues from dropped and succeeds"
+[ "${RC}" = "0" ] || tail -5 "${FAKE_ROOT}/rollback.log"
+grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" && case_ok "the data is restored from the dump after the dropped phase" || case_fail "the data was not restored after the dropped phase"
 teardown_case
 case_end
 
@@ -413,6 +468,40 @@ assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
 
+# Гарантии успешного боевого прогона, общие для полного пути и --fast: оба прохода счастливого
+# пути (L и L2) проверяют их этой функцией. $1 — файл результата прогона.
+check_done_run() {
+    local R="$1" C="${FAKE_ROOT}/state/calls.log" L="${FAKE_ROOT}/cutover.log" gates
+    # Итог прогона: все три цели на новом, база на последней миграции, восстановления не было.
+    hub_is "${SHA_NEW}" && case_ok "hub on new" || case_fail "hub not new"
+    worker_is "${SHA_NEW}" && case_ok "worker on new" || case_fail "worker not new"
+    web_is "${SHA_NEW}" && case_ok "web on new" || case_fail "web not new"
+    db_migr_is 41 0 && case_ok "db on the last migration, none failed" || case_fail "db not on the last migration"
+    restore_logged && case_fail "database restore ran on a done run" || case_ok "no dropdb/createdb/pg_restore restore"
+    [ "$(compose_up_count)" = "1" ] && case_ok "exactly one caddy recreate" || case_fail "recreate count wrong"
+    grep -q "compose run" "${C}" && case_fail "compose run used" || case_ok "no compose run"
+    grep -q '^pg_dump -Fc -Z zstd:3 -f ' "${C}" && case_ok "pg_dump uses zstd:3" || case_fail "pg_dump is not zstd:3"
+    grep -q '^pg_restore --list' "${C}" && case_ok "the dump verified with pg_restore --list" || case_fail "no pg_restore --list"
+    assert_contains "${L}" "dump fully readable" "the quiesced dump was read back in full"
+    assert_contains "${L}" "verify PASS" "verify passed inside cutover"
+    assert_proc_alive "${SUP1}" "session 1 supervisor alive"
+    assert_proc_alive "${SUP2}" "session 2 supervisor alive"
+    gates="$(grep -c 'read gates for target' "${L}" || true)"
+    [ "${gates}" -ge 2 ] && case_ok "read gates ran before the writes and again before the stop (${gates}x)" || case_fail "read gates ran ${gates}x"
+    assert_contains "${L}" "the session inventory" "the session inventory was re-checked"
+    assert_contains "${L}" "control-worker scan before the worker stop: exactly the unit process" "the control-worker scan ran before the stop"
+    in_order "${C}" "stop canterlot-worker" "pg_dump -Fc" "pg_restore --list" "restart canterlot-hub" "start canterlot-worker" "compose up -d caddy" \
+        && case_ok "commands: worker stop -> pg_dump -> dump verify -> hub restart -> worker start -> caddy recreate" \
+        || case_fail "commands out of order"
+    assert_eq "$(result_of "${R}" status)/$(result_of "${R}" mode)" "done/execute" "result file: done, mode execute"
+    [ -n "$(result_of "${R}" dump)" ] && case_ok "result file: dump named" || case_fail "result file: no dump"
+    assert_eq "$(result_of "${R}" dump_verified)" "yes" "result file: dump_verified=yes"
+    assert_eq "$(result_of "${R}" token)" "" "result file: no token from a real run"
+    assert_eq "$(result_of "${R}" log)" "${L}" "result file: log path"
+    assert_eq "$(grep -c 'stop canterlot-worker' "${C}")" "1" "worker stopped once"
+    assert_eq "$(grep -c 'start canterlot-worker' "${C}")" "1" "worker started once"
+}
+
 # --- L. счастливый путь: порядок, токен, ожидание старта, слияние чанков, обслуживание,
 # проба, чек-лист; всё новое, verify PASS, один recreate ---
 # Тот же прогон проверяет порог размера дампа по умолчанию (бывший L7): zstd-дамп 65 МБ проходит.
@@ -430,19 +519,12 @@ unset FAKE_MAINPID_FAULTS FAKE_DUMP_SIZE_BYTES
 export DUMP_MIN_BYTES=1
 C="${FAKE_ROOT}/state/calls.log"
 L="${FAKE_ROOT}/cutover.log"
-# Итог прогона: все три цели на новом, база промигрирована, восстановления не было.
-hub_is "${SHA_NEW}" && case_ok "hub on new" || case_fail "hub not new"
-worker_is "${SHA_NEW}" && case_ok "worker on new" || case_fail "worker not new"
-web_is "${SHA_NEW}" && case_ok "web on new" || case_fail "web not new"
-db_migr_is 41 0 && case_ok "db migrated" || case_fail "db not migrated"
-restore_logged && case_fail "database restore ran on happy path" || case_ok "no dropdb/createdb/pg_restore restore"
-[ "$(compose_up_count)" = "1" ] && case_ok "exactly one caddy recreate" || case_fail "recreate count wrong"
-grep -q "compose run" "${C}" && case_fail "compose run used" || case_ok "no compose run"
-grep -q '^pg_dump -Fc -Z zstd:3 -f ' "${C}" && case_ok "pg_dump uses zstd:3" || case_fail "pg_dump is not zstd:3"
+R="${FAKE_ROOT}/cutover.result"
+check_done_run "${R}"
 assert_contains "${L}" "dump fully readable" "65 MB dump accepted by the default gate"
-assert_contains "${L}" "verify PASS" "verify passed inside cutover"
-assert_proc_alive "${SUP1}" "session 1 supervisor alive"
-assert_proc_alive "${SUP2}" "session 2 supervisor alive"
+# Стенд без записи идентичности (ни HUB_PG_SYSTEM_ID, ни .identity у прежнего дампа): полный путь
+# идёт и записывает её для следующего прогона (бывший кейс test-fastguards.sh).
+[ -f "$(result_of "${R}" dump).identity" ] && case_ok "the full path without an identity source records one next to its dump" || case_fail "no identity recorded"
 # Новые шаги боевого прогона видны в журнале.
 assert_contains "${L}" "confirm token accepted: release ${SHA_NEW}" "token checked before anything"
 assert_contains "${L}" "vzdump done: archive ct/130/" "vzdump success and archive id parsed"
@@ -482,20 +564,59 @@ assert_contains "${L}" "downtime: worker " "worker downtime printed"
 grep -qE 'downtime: worker [0-9]+ s \(stop -> state=live\), hub [0-9]+ s \(restart -> readyz ok\)' "${L}" \
     && case_ok "downtime line names both components" || case_fail "downtime line malformed: $(grep 'downtime:' "${L}")"
 assert_contains "${L}" "hub interruption: " "hub interruption measured"
-R="${FAKE_ROOT}/cutover.result"
-assert_eq "$(result_of "${R}" status)" "done" "result file: done"
-assert_eq "$(result_of "${R}" mode)" "execute" "result file: mode execute"
 assert_eq "$(result_of "${R}" soft_failures)/$(result_of "${R}" speech_soft_failures)" "0/0" "result file: no soft failures"
 [[ "$(result_of "${R}" worker_downtime_s)" =~ ^[0-9]+$ ]] && case_ok "result file: worker downtime" || case_fail "result file: worker downtime missing"
 [[ "$(result_of "${R}" hub_interruption_s)" =~ ^[0-9]+$ ]] && case_ok "result file: hub interruption" || case_fail "result file: hub interruption missing"
 assert_eq "$(result_of "${R}" vzdump_notes)" "$(sed -n 's/.*notes pre-\([^ ,)]*\).*/pre-\1/p' "${L}" | head -1)" "result file: vzdump notes"
-[ -n "$(result_of "${R}" dump)" ] && case_ok "result file: dump named" || case_fail "result file: no dump"
-assert_eq "$(result_of "${R}" token)" "" "result file: no token from a real run"
-assert_eq "$(result_of "${R}" log)" "${L}" "result file: log path"
-assert_eq "$(grep -c 'stop canterlot-worker' "${C}")" "1" "worker stopped once"
-assert_eq "$(grep -c 'start canterlot-worker' "${C}")" "1" "worker started once"
-hub_is "${SHA_NEW}" && web_is "${SHA_NEW}" && worker_is "${SHA_NEW}" && case_ok "all on new" || case_fail "not all on new"
 teardown_case
+case_end
+
+# --- L2. второй проход счастливого пути: cutover.sh --fast (без токена и vzdump) на стенде с
+# git-источником проходит те же ворота, предпроверку, инвентарь, дамп с проверкой чтения, порядок
+# и verify (check_done_run), плюс свои развилки: условия пересчитаны, vzdump пропущен. До него —
+# замок прогона: второй выкат и откат базы под чужим замком отказывают, ничего не тронув.
+# (Бывшие кейсы test-fastcutover.sh «--fast: no token, no vzdump…» и «dump and restore name the
+# same explicit socket», test-fastguards.sh «a second mutating run fails fast…»,
+# test-fastbaseline.sh «the staged manifest runs as the hub service account…».)
+case_begin "second pass of the happy path on the fast path: the same gates and checks, no token, no vzdump; a held deploy lock refuses first"
+setup_fast fasthappy other
+LOCKF="${WORKER_BASE}/.cutover.lock"
+RC=0
+flock "${LOCKF}" bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --fast --source "${FAST_SRC}" --dist "${FAKE_ROOT}/dist" \
+    --state "${FAKE_ROOT}/snap.state" --result "${FAKE_ROOT}/x.result" >"${FAKE_ROOT}/cutover.log" 2>&1 || RC=$?
+[ "${RC}" != "0" ] && case_ok "the cutover exits nonzero under a held lock" || case_fail "the cutover ran under a held lock"
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" status)/$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "refused/deploy_locked" "clear code deploy_locked"
+assert_contains "${FAKE_ROOT}/cutover.log" "another cutover or rollback holds" "reason printed"
+no_writes_yet "held lock"
+printf 'TOC-LINE-02 _sqlx_migrations table\n' >"${HUB_BACKUP_DIR}/canterlot-pre-manual.dump"
+RC=0
+flock "${LOCKF}" bash "${DEPLOY_DIR}/rollback-db.sh" "${HUB_BACKUP_DIR}/canterlot-pre-manual.dump" --to "${SHA_PREV}" >"${FAKE_ROOT}/rollback.log" 2>&1 || RC=$?
+[ "${RC}" != "0" ] && case_ok "rollback-db.sh exits nonzero under a held lock" || case_fail "rollback-db.sh ran under a held lock"
+assert_contains "${FAKE_ROOT}/rollback.log" "deploy_locked" "rollback-db.sh names the code"
+grep -qE '^(dropdb|createdb) ' "${FAKE_ROOT}/state/calls.log" && case_fail "the rollback touched the database" || case_ok "the rollback touched nothing"
+rm -f "${HUB_BACKUP_DIR}/canterlot-pre-manual.dump"  # lint: local-temp
+# Замок свободен: тот же выкат проходит. Журналы — только этого прогона.
+: >"${FAKE_ROOT}/state/calls.log"
+: >"${FAKE_ROOT}/state/ssh-cmds.log"
+if fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result"; then case_ok "exit 0 with the lock free"; else case_fail "exit nonzero"; tail -10 "${FAKE_ROOT}/cutover.log"; fi
+C="${FAKE_ROOT}/state/calls.log"
+L="${FAKE_ROOT}/cutover.log"
+R="${FAKE_ROOT}/exe.result"
+check_done_run "${R}"
+assert_contains "${L}" "fast path: no confirm token" "the fast path is logged"
+assert_contains "${L}" "allowlisted application code" "the recomputed conditions are logged"
+assert_not_contains "${L}" "confirm token accepted" "no token was involved"
+grep -q '^vzdump ' "${C}" && case_fail "vzdump ran" || case_ok "vzdump never ran"
+assert_contains "${L}" "common preflight: preflight.sh and target-check.sh for ${SHA_NEW}" "the common preflight ran"
+assert_contains "${L}" "target check PASS for ${SHA_NEW}" "the target check ran"
+grep -q '^cargo test .*spec_compat::' "${C}" && case_ok "spec_compat ran in the preflight" || case_fail "spec_compat did not run"
+assert_contains "${L}" "gate 5: worker KillMode, no vzdump, no CT lock" "preflight gate 5 ran"
+assert_eq "$(result_of "${R}" vzdump_done)/$(result_of "${R}" vzdump_skipped)/$(result_of "${R}" confirm)" "no/yes/fast" "result: vzdump_done=no, vzdump_skipped=yes, confirm=fast"
+[ -n "$(result_of "${R}" vzdump_skip_reason)" ] && case_ok "result: the skip reason is recorded" || case_fail "result: no skip reason"
+grep -E '^pg_dump ' "${C}" | grep -q -- " -h ${HUB_PG_SOCKET} " && case_ok "pg_dump carries -h <socket>" || case_fail "pg_dump has no explicit -h ${HUB_PG_SOCKET}"
+grep -E 'migrations manifest --json' "${FAKE_ROOT}/state/ssh-cmds.log" | grep -q "runuser -u '${HUB_SERVICE_USER:-canterlot}' -- timeout 30 " \
+    && case_ok "runuser -u <service account> -- timeout 30 <staged binary> migrations manifest --json" || case_fail "the manifest is not run as the service account under timeout 30"
+finish_fast
 case_end
 
 # --- L3. NRestarts воркера после старта не 0: STOP-and-report ---
