@@ -444,6 +444,71 @@ if python3 "${DEPLOY_DIR}/config-check.py" "${REPO_ROOT}/crates/canterlot-hub/sr
 else
     case_ok "unknown key in [pricing] rejected"
 fi
+# --require: обязательный ключ — тот, который потребует serde. Значение по умолчанию в атрибуте
+# на несколько строк (так его пишет rustfmt) делает ключ необязательным, а у структуры со своим
+# impl Deserialize о ключах ничего сказать нельзя: ни её поля, ни таблицы под ней не требуются.
+cat >"${FAKE_ROOT}/check/require.rs" <<'EOF'
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Root {
+    pub must: String,
+    #[serde(
+        default = "Root::default_wait",
+        with = "humantime_serde"
+    )]
+    pub wait: Duration,
+    #[serde(default)]
+    pub own: Own,
+    #[serde(default)]
+    pub inner: Option<Inner>,
+}
+#[derive(Debug, Clone, Default)]
+pub struct Own {
+    pub computed: bool,
+    pub below: Option<Inner>,
+}
+#[derive(
+    Debug,
+    serde::Deserialize
+)]
+#[serde(deny_unknown_fields)]
+pub struct Inner {
+    pub needed: String,
+}
+EOF
+cc_require() { python3 "${DEPLOY_DIR}/config-check.py" --require "$@" >"${FAKE_ROOT}/check/require.log" 2>&1; }
+printf 'must = "a"\n' >"${FAKE_ROOT}/check/require-min.toml"
+cc_require "${FAKE_ROOT}/check/require.rs" Root "${FAKE_ROOT}/check/require-min.toml" \
+    && case_ok "--require: a multi-line serde default is not a required key" \
+    || { case_fail "--require demands a key with a multi-line serde default"; cat "${FAKE_ROOT}/check/require.log"; }
+printf 'must = "a"\n[own.below]\nother = 1\n' >"${FAKE_ROOT}/check/require-own.toml"
+cc_require "${FAKE_ROOT}/check/require.rs" Root "${FAKE_ROOT}/check/require-own.toml" \
+    && case_fail "an unknown key under a hand-written Deserialize passed" || case_ok "unknown keys are still reported under a hand-written Deserialize"
+assert_not_contains "${FAKE_ROOT}/check/require.log" "missing required key" "--require: nothing is required in or under a struct with its own Deserialize"
+printf 'wait = "1s"\n[inner]\n' >"${FAKE_ROOT}/check/require-missing.toml"
+cc_require "${FAKE_ROOT}/check/require.rs" Root "${FAKE_ROOT}/check/require-missing.toml" \
+    && case_fail "--require passed without the required keys" || case_ok "--require: missing keys fail"
+assert_contains "${FAKE_ROOT}/check/require.log" "missing required key 'must'" "the missing root key is named"
+assert_contains "${FAKE_ROOT}/check/require.log" "missing required key 'inner.needed'" "the missing key of a multi-line derive struct is named"
+# Настоящие структуры: минимальные конфиги стенда проходят, [runners.cloud] без ключей с
+# умолчаниями и с ключами прежнего провайдера не объявляется неполным (RunnersConfig разбирает
+# таблицу сам), а конфиг без обязательного ключа отвергается с его именем.
+write_configs
+cc_require "${REPO_ROOT}/crates/canterlot-hub/src/config.rs" HubConfig "${HUB_CONFIG}" \
+    && case_ok "--require: the minimal hub.toml passes" || { case_fail "--require rejects the minimal hub.toml"; cat "${FAKE_ROOT}/check/require.log"; }
+cc_require "${REPO_ROOT}/crates/canterlot-worker/src/config.rs" WorkerConfig "${WORKER_CONFIG}" \
+    && case_ok "--require: the minimal worker.toml passes" || { case_fail "--require rejects the minimal worker.toml"; cat "${FAKE_ROOT}/check/require.log"; }
+{ cat "${HUB_CONFIG}"; printf '\n[runners.cloud]\nprovider = "yandex"\n'; } >"${FAKE_ROOT}/check/hub-cloud.toml"
+cc_require "${REPO_ROOT}/crates/canterlot-hub/src/config.rs" HubConfig "${FAKE_ROOT}/check/hub-cloud.toml" || true
+assert_not_contains "${FAKE_ROOT}/check/require.log" "missing required key" "--require: [runners.cloud] is not judged (RunnersConfig has its own Deserialize)"
+grep -v '^manifest = ' "${HUB_CONFIG}" >"${FAKE_ROOT}/check/hub-nomanifest.toml"
+cc_require "${REPO_ROOT}/crates/canterlot-hub/src/config.rs" HubConfig "${FAKE_ROOT}/check/hub-nomanifest.toml" \
+    && case_fail "--require passed a hub.toml without manifest" || case_ok "--require: hub.toml without manifest fails"
+assert_contains "${FAKE_ROOT}/check/require.log" "missing required key 'manifest'" "the missing hub key is named"
+grep -v '^data_dir = ' "${WORKER_CONFIG}" >"${FAKE_ROOT}/check/worker-nodatadir.toml"
+cc_require "${REPO_ROOT}/crates/canterlot-worker/src/config.rs" WorkerConfig "${FAKE_ROOT}/check/worker-nodatadir.toml" \
+    && case_fail "--require passed a worker.toml without data_dir" || case_ok "--require: worker.toml without data_dir fails"
+assert_contains "${FAKE_ROOT}/check/require.log" "missing required key 'data_dir'" "the missing worker key is named"
 mkdir -p "${FAKE_ROOT}/own-neg/ownership"
 printf 'seq = -1\nrecords = []\n' >"${FAKE_ROOT}/own-neg/ownership/snapshot.toml"
 if python3 "${DEPLOY_DIR}/ownership-check.py" \
@@ -652,6 +717,30 @@ case_end
 # 14. нода CT: умолчание deploy.conf — нейтральный pve-node1, он и должен совпасть
 # с нодой из кластерного списка, а заданная вручную чужая нода — громкая ошибка
 # с названием настоящей.
+# Ворота 3: обязательный ключ, которого нет в боевом hub.toml или worker.toml, — отказ в
+# предпроверке, а не хаб или воркер, не стартовавшие уже после flip.
+case_begin "preflight refuses a hub.toml or worker.toml without a required key"
+setup_live requiredkeys
+sed -i '/^manifest = /d' "${HUB_CONFIG}"
+if bash "${DEPLOY_DIR}/preflight.sh" "${SHA_PREV}" --source "${REPO_ROOT}" >"${FAKE_ROOT}/out.log" 2>&1; then
+    case_fail "exit 0 with hub.toml lacking manifest"
+else
+    case_ok "hub.toml without manifest: exit nonzero"
+fi
+assert_contains "${FAKE_ROOT}/out.log" "missing required key 'manifest'" "the missing hub.toml key is named"
+assert_contains "${FAKE_ROOT}/out.log" "HARD-FAIL: hub.toml" "hub.toml gate failed hard"
+write_configs
+sed -i '/^data_dir = /d' "${WORKER_CONFIG}"
+if bash "${DEPLOY_DIR}/preflight.sh" "${SHA_PREV}" --source "${REPO_ROOT}" >"${FAKE_ROOT}/out.log" 2>&1; then
+    case_fail "exit 0 with worker.toml lacking data_dir"
+else
+    case_ok "worker.toml without data_dir: exit nonzero"
+fi
+assert_contains "${FAKE_ROOT}/out.log" "missing required key 'data_dir'" "the missing worker.toml key is named"
+assert_contains "${FAKE_ROOT}/out.log" "HARD-FAIL: worker.toml" "worker.toml gate failed hard"
+teardown_case
+case_end
+
 case_begin "PROXMOX_NODE default matches the cluster node and a disagreeing one fails loudly"
 setup_live pvenode
 unset PROXMOX_NODE

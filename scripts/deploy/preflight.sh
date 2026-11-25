@@ -233,15 +233,18 @@ if [ -n "${INVENTORY}" ]; then
 fi
 
 log "gate 3: every table and key of worker.toml, hub.toml and speech.toml against the new structs"
-if ! python3 "${SCRIPT_DIR}/config-check.py" \
+# --require: ключ, который новый релиз требует, а в боевом конфиге его нет, ловится здесь, а не
+# хабом или воркером, не стартовавшим уже после flip. Обязательным считается только то, что
+# потребует serde (см. config-check.py: значения по умолчанию, Option, свой impl Deserialize).
+if ! python3 "${SCRIPT_DIR}/config-check.py" --require \
     "${SOURCE_DIR}/crates/canterlot-worker/src/config.rs" WorkerConfig \
     "${WORKER_CONFIG}"; then
-    hard "worker.toml has unknown tables or keys"
+    hard "worker.toml has unknown tables or keys, or lacks a required key"
 fi
 # hub.toml читается конвейером, без файлов (секретов в нём нет, только имена файлов).
-if ! ssh_hub "cat '${HUB_CONFIG}'" | python3 "${SCRIPT_DIR}/config-check.py" \
+if ! ssh_hub "cat '${HUB_CONFIG}'" | python3 "${SCRIPT_DIR}/config-check.py" --require \
     "${SOURCE_DIR}/crates/canterlot-hub/src/config.rs" HubConfig /dev/stdin; then
-    hard "hub.toml has unknown tables or keys"
+    hard "hub.toml has unknown tables or keys, or lacks a required key"
 fi
 # speech.toml службы диктовки: та же строгость, что у самой службы (неизвестные ключи,
 # обязательные ключи, sha256 модели и VAD — 64 hex). Нет файла — диктовка выключена.

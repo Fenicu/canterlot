@@ -7,7 +7,8 @@
 
 Использование: config-check.py [--require] [--hex64 КЛЮЧ]... <config.rs> <RootStruct> <config.toml>
 --require: обязательные ключи (не Option, без serde default у поля и структуры) должны
-быть на месте, как их требует serde при запуске. --hex64 model.sha256: значение ключа —
+быть на месте, как их требует serde при запуске. Структура со своим impl Deserialize (без
+derive) не судится вместе со всем, что под ней: по исходнику её обязательные ключи не видны. --hex64 model.sha256: значение ключа —
 ровно 64 шестнадцатеричных символа (так проверяет speech.toml сама служба).
 Печатает только имена таблиц и ключей, никогда значения. Код возврата 1 при ошибках.
 Стандартная библиотека: tomllib, без uv и venv.
@@ -20,6 +21,7 @@ import tomllib
 FIELD_RE = re.compile(r"^\s*pub\s+([A-Za-z0-9_]+)\s*:\s*(.+?),\s*(?://.*)?$")
 STRUCT_RE = re.compile(r"^\s*pub\s+struct\s+(\w+)")
 SERDE_RE = re.compile(r"^\s*#\[serde\(([^]]*)\)\]\s*$")
+DERIVE_RE = re.compile(r"^\s*#\[derive\(([^]]*)\)\]\s*$")
 
 SCALAR_TYPES = {
     "String", "PathBuf", "Uuid", "SocketAddr", "Duration", "u8", "u16", "u32", "u64",
@@ -85,22 +87,53 @@ def field_spec(field, tp, serde_attrs):
     }
 
 
+def logical_lines(fh):
+    """Строки исходника; атрибут `#[...]`, разнесённый rustfmt на несколько строк, — одной строкой.
+
+    Без этого `#[serde(\\n default = "...",\\n with = "..."\\n)]` не читался вовсе: ключ со
+    значением по умолчанию выглядел обязательным."""
+    pending = None
+    for line in fh:
+        if pending is None:
+            stripped = line.strip()
+            if stripped.startswith("#[") and stripped.count("[") > stripped.count("]"):
+                pending = stripped
+                continue
+            yield line
+            continue
+        pending += " " + line.strip()
+        if pending.count("[") <= pending.count("]"):
+            # `#[serde( a, b )]` -> `#[serde(a, b)]`: дальше атрибут разбирается как обычный.
+            yield re.sub(r"\(\s+", "(", re.sub(r",?\s+\)", ")", pending)) + "\n"
+            pending = None
+    if pending is not None:
+        yield pending + "\n"
+
+
 def parse_structs(path):
-    """{struct: {"fields": {field: spec}, "deny": bool}}."""
+    """{struct: {"fields": {field: spec}, "deny": bool, "default": bool, "derived": bool}}.
+
+    derived — структура получает Deserialize через derive. У структуры со своим impl Deserialize
+    по исходнику нельзя сказать, какие ключи обязательны: --require её не судит."""
     structs = {}
     cur = None
     depth = 0
     deny = False
     pending_deny = False
     pending_default = False
+    pending_derive = False
     pending_field_serde = []
     with open(path, encoding="utf-8") as fh:
-        for line in fh:
+        for line in logical_lines(fh):
             if cur is None:
                 ms = SERDE_RE.match(line)
                 if ms:
                     pending_deny = pending_deny or "deny_unknown_fields" in ms.group(1)
                     pending_default = pending_default or bool(re.search(r"\bdefault\b(?!\s*=)", ms.group(1)))
+                    continue
+                md = DERIVE_RE.match(line)
+                if md:
+                    pending_derive = pending_derive or bool(re.search(r"\bDeserialize\b", md.group(1)))
                     continue
                 ms = STRUCT_RE.match(line)
                 if ms:
@@ -110,13 +143,18 @@ def parse_structs(path):
                     struct_default = pending_default
                     pending_default = False
                     depth = line.count("{") - line.count("}")
-                    structs[cur] = {"fields": {}, "deny": deny, "default": struct_default}
+                    structs[cur] = {"fields": {}, "deny": deny, "default": struct_default, "derived": pending_derive}
+                    pending_derive = False
                     pending_field_serde = []
                     if depth <= 0 and "{" in line:
                         cur = None
                     continue
+                # Прочие атрибуты и doc-комментарии между derive и struct метки не сбрасывают.
+                if line.strip().startswith(("#[", "///", "//")):
+                    continue
                 pending_deny = False
                 pending_default = False
+                pending_derive = False
                 continue
             ms = SERDE_RE.match(line)
             if ms:
@@ -222,8 +260,14 @@ def check_dict(node, struct_name, structs, path, errors, warnings):
 
 
 def check_required(node, struct_name, structs, path, errors):
-    """Обязательные поля структуры есть в таблице; вложенные таблицы — рекурсивно."""
+    """Обязательные поля структуры есть в таблице; вложенные таблицы — рекурсивно.
+
+    Ложный отказ здесь останавливает выкат, поэтому обязательным считается только то, что
+    потребует serde: структура со своим impl Deserialize (не derive) не судится вовсе, вместе
+    со всем, что лежит под ней."""
     struct = structs[struct_name]
+    if not struct["derived"]:
+        return
     for _field, spec in struct["fields"].items():
         if spec["flatten"]:
             continue
