@@ -933,8 +933,9 @@ async fn already_transmitted_deferral_is_unconfirmed_not_held() -> TestResult {
 
 /// Слот очереди называет ввод (`inputs.id`), а блоки хода — его команду (`input_command_id`):
 /// клиент сопоставляет их только по `command_id` рядом с `input_id`.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_slot_carries_the_command_id_of_its_input(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn run_slot_carries_the_command_id_of_its_input() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, _, head) = setup(&pool).await;
     assert_ne!(head.input_id, head.command_id);
     let slot_of = |name: &str| {
