@@ -978,6 +978,19 @@ async fn adopt_once(context: &ToolContext, caller: &Caller, from: Uuid) -> Resul
         )
         .into());
     }
+    // План передаётся от сессии без живого процесса: остановленной, в архиве или в корзине.
+    // Вместе с задачами переходит право принять их исполнителей, в том числе с `force`;
+    // у работающего оркестратора другой корневой агент домена так забрал бы его делегатов.
+    if crate::executions::live(&mut tx, args.from_session_id)
+        .await?
+        .is_some()
+    {
+        return Err(invalid(
+            "The source session is still running; its plan can be adopted once it is stopped, \
+             archived or in the trash",
+        )
+        .into());
+    }
     lock_journal(&mut tx, caller.owner_id).await?;
     // Счётчики обоих по возрастанию ID.
     let mut mine = 0;

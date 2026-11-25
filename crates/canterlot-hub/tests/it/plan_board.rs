@@ -800,6 +800,52 @@ async fn adopt_moves_open_tasks_and_the_adopter_may_accept_their_executors() {
     assert_eq!(f.task_of(fresh, 3).await.0, "done");
 }
 
+/// План работающего оркестратора перенять нельзя: иначе любой корневой агент домена получал
+/// бы право принять с `force` чужих работающих делегатов и выбросить их незакоммиченную
+/// работу. Передача идёт от сессии без живого процесса.
+#[tokio::test]
+async fn adopt_refuses_a_source_that_is_still_running() {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fx::new(pool).await;
+    f.add(&["Парсер"]).await;
+    f.link(1, f.child).await;
+    let source = start(&f.pool, f.owner, f.orchestrator).await;
+    let fresh = personal_conversation(&f.pool, f.owner, f.machine).await;
+    let adopt = || {
+        f.call_as(
+            fresh,
+            "plan.adopt",
+            json!({"from_session_id": f.orchestrator}),
+        )
+    };
+
+    let error = adopt().await.unwrap_err();
+    assert_eq!(error.code, Code::InvalidArguments);
+    assert!(error.message.contains("still running"), "{}", error.message);
+    assert_eq!(f.task(1).await.2, Some(f.child), "nothing moved");
+    let error = f
+        .call_as(
+            fresh,
+            "sessions.accept",
+            json!({"session_id": f.child, "force": true}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::NotParent);
+
+    // Процесс источника остановлен: план передаётся.
+    for (state, outcome) in [
+        (ExecutionState::Stopping, None),
+        (ExecutionState::Stopped, Some("user_stop")),
+    ] {
+        executions::set_state(&f.pool, source.execution_id, state, outcome, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let adopted = adopt().await.unwrap();
+    assert_eq!(adopted["moved"], json!([{"from": 1, "to": 1}]));
+}
+
 #[tokio::test]
 async fn adopt_refuses_delegates_foreign_and_missing_sources() {
     let pool = canterlot_hub::testkit::db().await;
