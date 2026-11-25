@@ -148,6 +148,9 @@ setup_case() {
     export CATALOG_WAIT="${CATALOG_WAIT:-3}" CONNECT_WAIT="${CONNECT_WAIT:-10}"
     # Ожидание переходных строк исполнений (starting и т. п.) у супервизоров: секунды, не минута.
     export SUPERVISOR_SETTLE_WAIT="${SUPERVISOR_SETTLE_WAIT:-2}" SUPERVISOR_SETTLE_POLL="${SUPERVISOR_SETTLE_POLL:-0.2}"
+    # Опрос старта, остановки и журнала воркера: фейки отвечают сразу, поэтому шаг 0,05 с
+    # вместо боевых 0,5 с (START_POLL) и 1 с (LIVE_POLL). Число опросов остаётся боевым.
+    export LIVE_POLL="${LIVE_POLL:-0.05}" START_POLL="${START_POLL:-0.05}"
 
     # Конфиг скриптов — на фейковые хосты и пути. Файл стенда отключён: у
     # разработчика может быть свой .superpowers/site.env, тесты от него не зависят.

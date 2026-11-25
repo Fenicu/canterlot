@@ -52,10 +52,17 @@ fi
 # Удалённый ps гипервизора — это ps этой машины: в нём видны процессы соседних
 # наборов (параллельный прогон) и даже текст команды оператора. Показываем только
 # процессы своего стенда (FAKE_ROOT в окружении), как если бы хост был отдельным.
+# Окружения всех процессов читает один grep: прежние tr и grep на каждую строку ps
+# стоили больше секунды на вызов, а cutover спрашивает ps гипервизора трижды.
 if [ "${host}" = "fakeproxmox" ] && [ "${cmd}" = "ps -eo pid=,args=" ]; then
     out="$(ps -eo pid=,args=)" || exit $?
+    declare -A own=()
+    while IFS= read -r env_file; do
+        env_file="${env_file#/proc/}"
+        own["${env_file%/environ}"]=1
+    done < <(grep -lsxzF "FAKE_ROOT=${FAKE_ROOT}" /proc/[0-9]*/environ || true)
     while read -r pid rest; do
-        if tr '\0' '\n' <"/proc/${pid}/environ" 2>/dev/null | grep -qxF "FAKE_ROOT=${FAKE_ROOT}"; then
+        if [ -n "${own[${pid}]:-}" ]; then
             printf '%s %s\n' "${pid}" "${rest}"
         fi
     done <<<"${out}"
