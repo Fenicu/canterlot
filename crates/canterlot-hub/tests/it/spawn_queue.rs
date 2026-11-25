@@ -871,6 +871,91 @@ async fn guard_queues_on_low_disk_and_names_cleanup_candidates() {
     assert_eq!(preview["guard"]["stale"], false, "{preview}");
 }
 
+/// Делегат с неубранной рабочей копией, простаивающий три часа.
+async fn stale_worktree(pool: &PgPool, parent: Uuid, title: &str) -> Uuid {
+    let id = child_of(
+        pool,
+        parent,
+        "opencode",
+        "opencode-go/deepseek-v4.1-flash",
+        "idle",
+    )
+    .await;
+    sqlx::query("update conversations set title=$2,worktree=$3 where id=$1")
+        .bind(id)
+        .bind(title)
+        .bind(json!({"path":"/data/worktrees/x","branch":"canterlot/x","state":"active"}))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "update conversation_derived set activity_since=now()-interval '3 hours'
+          where conversation_id=$1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+/// Подсказка стража называет только сессии, которые вызывающий видит и может принять: чужой
+/// домен памяти для агента не существует, а делегат не видит чужих потомков.
+#[tokio::test]
+async fn guard_hint_names_only_sessions_the_caller_can_see() {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fx::new(pool).await;
+    stale_worktree(&f.pool, f.parent, "T3").await;
+    // Родитель стенда личный. Рабочий корень со своим делегатом на той же машине.
+    let work = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let domains: Vec<Option<String>> =
+        sqlx::query_scalar("select memory_domain from conversations where id=any($1) order by 1")
+            .bind([f.parent, work])
+            .fetch_all(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(domains, [Some("personal".into()), Some("work".into())]);
+    stale_worktree(&f.pool, work, "ACME: биллинг").await;
+    low_disk(&f.pool, f.machine).await;
+
+    let answer = f.spawn_direct().await.unwrap();
+    let detail = answer["detail"].as_str().unwrap();
+    assert!(detail.contains("T3 idle 3 h"), "{detail}");
+    assert!(!detail.contains("ACME"), "{detail}");
+
+    // Делегат того же домена: чужие потомки ему не видны, своих у него нет.
+    let delegate = stale_worktree(&f.pool, f.parent, "T4").await;
+    let mut conn = f.pool.acquire().await.unwrap();
+    let verdict = canterlot_hub::session_tools::guard::check_in_tx(
+        &mut conn,
+        f.owner,
+        f.machine,
+        Some(delegate),
+        &f.context.guards,
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        verdict.detail.as_deref(),
+        Some("disk 12 GB free < 30 GB."),
+        "{verdict:?}"
+    );
+    // Владелец видит всё: его экран маршрута получает полный список.
+    let verdict = canterlot_hub::session_tools::guard::check_in_tx(
+        &mut conn,
+        f.owner,
+        f.machine,
+        None,
+        &f.context.guards,
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    let detail = verdict.detail.unwrap();
+    assert!(detail.contains("T3") && detail.contains("ACME"), "{detail}");
+}
+
 #[tokio::test]
 async fn start_now_bypasses_the_guard_but_not_the_whitelist() {
     let pool = canterlot_hub::testkit::db().await;
@@ -2082,6 +2167,7 @@ async fn guard_uses_the_sample_time_not_the_arrival_time() {
         &mut conn,
         f.owner,
         f.machine,
+        None,
         &Default::default(),
         Utc::now(),
     )

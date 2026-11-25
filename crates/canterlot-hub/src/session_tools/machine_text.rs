@@ -39,6 +39,30 @@ fn cache_name(kind: &str) -> &str {
     }
 }
 
+/// Запись о сессии, которую получатель не видит (`disk::details_for`): имён в ней нет.
+fn hidden(entry: &Value) -> bool {
+    entry["hidden"].as_bool() == Some(true)
+}
+
+const HIDDEN_SESSION: &str = "another session";
+
+/// Источник записи: название сессии, а без него идентификатор исполнения.
+fn source(entry: &Value) -> String {
+    if hidden(entry) {
+        return HIDDEN_SESSION.to_owned();
+    }
+    entry["title"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("«{t}»"))
+        .unwrap_or_else(|| {
+            format!(
+                "execution {}",
+                entry["execution_id"].as_str().unwrap_or_default()
+            )
+        })
+}
+
 fn hotspot(h: &Value, now: DateTime<Utc>) -> String {
     let bytes = h["bytes"].as_u64().unwrap_or(0);
     let incremental = h["incremental_bytes"].as_u64().unwrap_or(0);
@@ -46,6 +70,13 @@ fn hotspot(h: &Value, now: DateTime<Utc>) -> String {
         .as_str()
         .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
         .map(|at| at.with_timezone(&Utc));
+    if hidden(h) {
+        return format!(
+            "another checkout's {} {}",
+            cache_name(h["kind"].as_str().unwrap_or_default()),
+            gb(bytes)
+        );
+    }
     match h["title"].as_str() {
         Some(title) => {
             let mut text = format!(
@@ -110,19 +141,7 @@ pub fn memory(machine: &str, details: &Value) -> String {
         .as_array()
         .into_iter()
         .flatten()
-        .map(|e| {
-            let name = e["title"]
-                .as_str()
-                .filter(|t| !t.is_empty())
-                .map(|t| format!("«{t}»"))
-                .unwrap_or_else(|| {
-                    format!(
-                        "execution {}",
-                        e["execution_id"].as_str().unwrap_or_default()
-                    )
-                });
-            format!("{name} {}", gb(e["rss_bytes"].as_u64().unwrap_or(0)))
-        })
+        .map(|e| format!("{} {}", source(e), gb(e["rss_bytes"].as_u64().unwrap_or(0))))
         .collect();
     if !heaviest.is_empty() {
         text.push_str(&format!(" Largest sessions: {}.", heaviest.join(", ")));
@@ -141,16 +160,7 @@ pub fn leaked(machine: &str, details: &Value) -> String {
             .entry(row["comm"].as_str().unwrap_or("?"))
             .or_default() += 1;
         rss = rss.saturating_add(row["rss_bytes"].as_u64().unwrap_or(0));
-        let source = row["title"]
-            .as_str()
-            .filter(|t| !t.is_empty())
-            .map(|t| format!("«{t}»"))
-            .unwrap_or_else(|| {
-                format!(
-                    "execution {}",
-                    row["execution_id"].as_str().unwrap_or_default()
-                )
-            });
+        let source = source(row);
         if !sources.contains(&source) {
             sources.push(source);
         }
@@ -183,6 +193,7 @@ pub fn lease_long_hold(machine: &str, details: &Value) -> String {
     };
     let holder = match details["holder_title"].as_str().filter(|t| !t.is_empty()) {
         _ if details["holder"].as_str() == Some("owner") => "the owner's terminal".to_owned(),
+        _ if details["holder_hidden"].as_bool() == Some(true) => HIDDEN_SESSION.to_owned(),
         Some(title) => format!(
             "session «{title}» (id {})",
             details["conversation_id"].as_str().unwrap_or_default()

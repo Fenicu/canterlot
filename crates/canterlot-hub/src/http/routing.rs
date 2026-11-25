@@ -260,9 +260,11 @@ async fn preview(
     let now = chrono::Utc::now();
     let headroom =
         routing::machine_headroom(&mut conn, machine, std::time::Duration::from_secs(120)).await?;
-    let guard =
-        crate::session_tools::guard::check_in_tx(&mut conn, o.owner_id, machine, &s.guards, now)
-            .await?;
+    // Экран владельца: ему кандидаты на уборку видны все.
+    let guard = crate::session_tools::guard::check_in_tx(
+        &mut conn, o.owner_id, machine, None, &s.guards, now,
+    )
+    .await?;
     match routing::route(routing::RouteInputs {
         policy: &policy,
         revision,

@@ -120,8 +120,105 @@ async fn recipients(
     Ok(merged.into_values().collect())
 }
 
+fn uuid_at(value: &Value) -> Option<Uuid> {
+    value.as_str().and_then(|id| Uuid::parse_str(id).ok())
+}
+
+/// Детали события для одного получателя. Сторож смотрит на всю машину, а агент видит только
+/// сессии своего домена памяти (`access.rs`): чужой домен для него не существует. У записей
+/// о невидимых сессиях остаются числа, а название, идентификаторы, путь и метка аренды
+/// убираются; запись помечается `hidden`, и текст называет её «another session».
+///
+/// Каталог сборки без сессии-хозяина подчиняется правилу файлов (`memory::file_denied_for`):
+/// путь под рабочим корнем получатель не из рабочего домена не видит.
+async fn details_for(
+    conn: &mut PgConnection,
+    viewer: Uuid,
+    details: &Value,
+) -> Result<Value, sqlx::Error> {
+    fn list<'a>(details: &'a Value, name: &str) -> &'a [Value] {
+        details[name]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+    let rows = |name: &str| list(details, name);
+    let executions: Vec<Uuid> = rows("heaviest")
+        .iter()
+        .chain(rows("leaked"))
+        .chain([details])
+        .filter_map(|entry| uuid_at(&entry["execution_id"]))
+        .collect();
+    let owners: BTreeMap<Uuid, Uuid> = if executions.is_empty() {
+        BTreeMap::new()
+    } else {
+        sqlx::query_as::<_, (Uuid, Uuid)>(
+            "select id,conversation_id from executions where id=any($1)",
+        )
+        .bind(&executions)
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .collect()
+    };
+    // Сессия записи: названная прямо или хозяин её исполнения.
+    let session = |entry: &Value| {
+        uuid_at(&entry["conversation_id"])
+            .or_else(|| uuid_at(&entry["execution_id"]).and_then(|id| owners.get(&id).copied()))
+    };
+    let sessions: Vec<Uuid> = rows("hotspots")
+        .iter()
+        .chain(rows("heaviest"))
+        .chain(rows("leaked"))
+        .chain([details])
+        .filter_map(session)
+        .collect();
+    let hidden = if sessions.is_empty() {
+        Vec::new()
+    } else {
+        super::access::hidden_from_in_tx(&mut *conn, viewer, &sessions).await?
+    };
+    let is_hidden = |entry: &Value| session(entry).is_some_and(|id| hidden.contains(&id));
+
+    let mut out = details.clone();
+    if is_hidden(details) {
+        for field in ["holder_title", "conversation_id", "execution_id", "label"] {
+            out[field] = Value::Null;
+        }
+        out["holder_hidden"] = json!(true);
+    }
+    for list in ["heaviest", "leaked"] {
+        for (index, entry) in rows(list).iter().enumerate() {
+            if is_hidden(entry) {
+                let entry = &mut out[list][index];
+                entry["title"] = Value::Null;
+                entry["execution_id"] = Value::Null;
+                entry["hidden"] = json!(true);
+            }
+        }
+    }
+    for (index, entry) in rows("hotspots").iter().enumerate() {
+        // Название есть только у каталога живой сессии; остальное решает путь.
+        let hide = if entry["title"].is_string() {
+            is_hidden(entry)
+        } else {
+            let path = entry["path"].as_str().unwrap_or_default();
+            crate::memory::file_denied_for(&mut *conn, viewer, path, None).await?
+        };
+        if hide {
+            let entry = &mut out["hotspots"][index];
+            entry["path"] = Value::Null;
+            entry["title"] = Value::Null;
+            entry["conversation_id"] = Value::Null;
+            entry["hidden"] = json!(true);
+        }
+    }
+    Ok(out)
+}
+
 /// Ставит задания тем получателям, у кого ещё нет отметки этого эпизода и вида.
-/// Общая точка для всех событий машины, в том числе `lease_long_hold`.
+/// Общая точка для всех событий машины, в том числе `lease_long_hold`. Детали у каждого
+/// получателя свои: `details_for` убирает из них сессии, которых он не видит.
 pub(crate) async fn announce(
     conn: &mut PgConnection,
     machine_id: Uuid,
@@ -146,6 +243,7 @@ pub(crate) async fn announce(
         if marked == 0 {
             continue;
         }
+        let details = details_for(&mut *conn, recipient.conversation_id, details).await?;
         let payload = json!({
             "action": "machine_event",
             "kind": kind,

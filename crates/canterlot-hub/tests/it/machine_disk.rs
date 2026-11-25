@@ -536,6 +536,158 @@ async fn disk_text_names_the_largest_build_caches() -> TestResult {
     Ok(())
 }
 
+/// На машине работают оба домена памяти. Сторож смотрит на всю машину, но каждому получателю
+/// называет только сессии и каталоги его домена: у остальных остаются числа.
+#[tokio::test]
+async fn watchdog_events_hide_sessions_of_another_domain() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = fx(&pool).await;
+    let now = Utc::now();
+    sqlx::query(
+        "update machines set capabilities=array['memory_scope_v1'],
+           memory_work_roots='[\"/srv/work\"]',worktree_root='/data/worktrees' where id=$1",
+    )
+    .bind(f.machine)
+    .execute(&pool)
+    .await?;
+    // Личный оркестратор с делегатом на той же машине: тоже получатель событий.
+    let personal = conversation(&pool, f.owner, f.machine, "Личное").await;
+    let kid = conversation(&pool, f.owner, f.machine, "Личное: налоги").await;
+    child_of(&pool, personal, kid, now).await;
+    sqlx::query("update conversations set memory_domain='personal' where id=any($1)")
+        .bind([personal, kid])
+        .execute(&pool)
+        .await?;
+    derive(&pool, personal, "working", json!({})).await;
+    let work_run = execution(&pool, f.target).await;
+    let personal_run = execution(&pool, kid).await;
+
+    let at = |h: i64| (now - TimeDelta::hours(h)).timestamp_millis();
+    let spot = |path: String, gb: u64, owner: Option<Uuid>| {
+        json!({"path": path, "kind": "target", "bytes": gb * GB, "incremental_bytes": 0,
+               "newest_ms": at(5), "measured_at_ms": at(0),
+               "conversation_id": owner.map(|id| id.to_string())})
+    };
+    let leaked = json!([
+        {"execution_id": work_run, "pid": 10, "comm": "cargo", "rss_bytes": 600_000_000u64, "age_s": 600},
+        {"execution_id": personal_run, "pid": 11, "comm": "node", "rss_bytes": 400_000_000u64, "age_s": 600}
+    ]);
+    let hotspots = json!([
+        spot("/srv/work/acme/target".into(), 77, None),
+        spot(
+            format!("/data/worktrees/{}/target", f.target),
+            40,
+            Some(f.target)
+        ),
+        spot(format!("/data/worktrees/{kid}/target"), 12, Some(kid)),
+        spot("/srv/hobby/target".into(), 5, None),
+    ]);
+    let executions = json!([
+        {"execution_id": work_run, "alive": true, "cpu_permille": 0, "rss_bytes": 6 * GB},
+        {"execution_id": personal_run, "alive": true, "cpu_permille": 0, "rss_bytes": 3 * GB}
+    ]);
+    set_disk(&pool, f.machine, 28 * GB, 295 * GB, now).await;
+    // Три низкие выборки памяти подряд открывают эпизод `mem_low`.
+    for n in 0..3 {
+        let step = now + TimeDelta::seconds(30 * n);
+        set_mem(&pool, f.machine, 2 * GB, executions.clone(), step).await;
+        set_watch(
+            &pool,
+            f.owner,
+            f.machine,
+            hotspots.clone(),
+            leaked.clone(),
+            step,
+        )
+        .await;
+        sweep(&pool, step).await;
+    }
+    let details = |jobs: &[Value], kind: &str| {
+        jobs.iter()
+            .find(|job| job["kind"] == kind)
+            .unwrap_or_else(|| panic!("no {kind} job"))["details"]
+            .clone()
+    };
+
+    // Рабочий получатель: свои названия видит, личная сессия для него безымянна.
+    let work = jobs(&pool, f.subscriber).await;
+    let disk = details(&work, "disk_low");
+    assert_eq!(disk["hotspots"][0]["path"], "/srv/work/acme/target");
+    assert_eq!(disk["hotspots"][1]["title"], "делегат");
+    assert_eq!(
+        disk["hotspots"][2],
+        json!({"path": null, "kind": "target", "bytes": 12 * GB, "incremental_bytes": 0,
+               "newest_at": disk["hotspots"][2]["newest_at"], "conversation_id": null,
+               "title": null, "hidden": true})
+    );
+    let mem = details(&work, "mem_low");
+    assert_eq!(mem["heaviest"][0]["title"], "делегат");
+    assert_eq!(
+        mem["heaviest"][1],
+        json!({"execution_id": null, "title": null, "rss_bytes": 3 * GB, "hidden": true})
+    );
+    let leak = details(&work, "processes_leaked");
+    assert_eq!(leak["leaked"][0]["title"], "делегат");
+    assert_eq!(
+        leak["leaked"][1],
+        json!({"execution_id": null, "title": null, "comm": "node",
+               "rss_bytes": 400_000_000u64, "hidden": true})
+    );
+
+    // Личный получатель: ни названий, ни идентификаторов, ни путей рабочего домена.
+    let mine = jobs(&pool, personal).await;
+    let all = serde_json::to_string(&mine)?;
+    for secret in [
+        "делегат".to_owned(),
+        "/srv/work".to_owned(),
+        f.target.to_string(),
+        work_run.to_string(),
+    ] {
+        assert!(!all.contains(&secret), "{secret} leaked: {all}");
+    }
+    let disk = details(&mine, "disk_low");
+    assert_eq!(disk["hotspots"][0]["hidden"], true);
+    assert_eq!(disk["hotspots"][0]["bytes"], 77 * GB);
+    assert_eq!(disk["hotspots"][2]["title"], "Личное: налоги");
+    assert_eq!(disk["hotspots"][3]["path"], "/srv/hobby/target");
+    assert_eq!(
+        details(&mine, "mem_low")["heaviest"][1]["title"],
+        "Личное: налоги"
+    );
+
+    scheduler(&pool).tick(now + TimeDelta::seconds(90)).await?;
+    let texts: Vec<String> = delivered(&pool, personal)
+        .await
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect();
+    let disk_text = texts
+        .iter()
+        .find(|text| text.contains("low on disk"))
+        .expect("disk text");
+    assert!(
+        disk_text.contains(
+            "Largest build caches: another checkout's target 77 GB; another checkout's target \
+             40 GB; worktree «Личное: налоги» target 12 GB (idle 5 h)."
+        ),
+        "{disk_text}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text
+                .contains("Largest sessions: another session 6 GB, «Личное: налоги» 3 GB.")),
+        "{texts:#?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("from another session, «Личное: налоги».")),
+        "{texts:#?}"
+    );
+    Ok(())
+}
+
 async fn mem_episodes(pool: &PgPool, open: bool) -> i64 {
     sqlx::query_scalar(
         "select count(*) from machine_watch_episodes

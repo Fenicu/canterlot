@@ -1316,8 +1316,15 @@ async fn replayed(
             child.subscribed,
             remote_name,
         );
-        let verdict =
-            guard::check_in_tx(conn, caller.owner_id, child.machine_id, guards, Utc::now()).await?;
+        let verdict = guard::check_in_tx(
+            conn,
+            caller.owner_id,
+            child.machine_id,
+            Some(caller.conversation_id),
+            guards,
+            Utc::now(),
+        )
+        .await?;
         if verdict.stale {
             answer["machine_metrics"] = serde_json::json!("stale");
         }
@@ -1578,7 +1585,15 @@ pub async fn spawn(
     // Страж и связь — целевой машины. Недоступная цель ставит запуск в очередь.
     let target = spec.launch_machine(caller.machine_id);
     let remote_block = spawn_queue::remote_block(&context.registry, target, spec.machine_id);
-    let guard = guard::check_in_tx(&mut tx, caller.owner_id, target, &context.guards, now).await?;
+    let guard = guard::check_in_tx(
+        &mut tx,
+        caller.owner_id,
+        target,
+        Some(caller.conversation_id),
+        &context.guards,
+        now,
+    )
+    .await?;
     let queue_reason = queue_reason
         .or_else(|| remote_block.as_ref().map(|block| block.reason))
         .or_else(|| {

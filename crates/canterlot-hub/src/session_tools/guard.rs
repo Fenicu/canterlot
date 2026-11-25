@@ -194,10 +194,14 @@ fn measurements(row: (i32, i32, i64, Value, DateTime<Utc>)) -> Measurements {
 
 /// Последние метрики машины и вердикт стража. Устаревшие метрики не загружают
 /// кандидатов на уборку: они ни на что не влияют.
+///
+/// `viewer` — сессия агента, которой уйдёт вердикт: кандидаты на уборку называются только те,
+/// что ей видны. `None` у владельца: ему видно всё.
 pub async fn check_in_tx(
     conn: &mut PgConnection,
     owner: Uuid,
     machine: Uuid,
+    viewer: Option<Uuid>,
     config: &GuardsConfig,
     now: DateTime<Utc>,
 ) -> Result<GuardVerdict, sqlx::Error> {
@@ -224,16 +228,21 @@ pub async fn check_in_tx(
     if stale || !verdict.blocked() {
         return Ok(verdict);
     }
-    let cleanup = cleanup_candidates_in_tx(conn, owner, machine, now).await?;
+    let cleanup = cleanup_candidates_in_tx(conn, owner, machine, viewer, now).await?;
     Ok(with_cleanup(&verdict, &cleanup))
 }
 
 /// Делегированные сессии владельца на машине с неубранной рабочей копией,
 /// устоявшиеся в `idle` или `stopped` дольше часа.
+///
+/// Агенту (`viewer`) названия уходят в ответ инструмента, поэтому действуют правила видимости
+/// `access.rs`: только его домен памяти (отсутствие домена не равно ничему), а делегату —
+/// только его прямые потомки: принять рабочую копию может лишь родитель.
 pub async fn cleanup_candidates_in_tx(
     conn: &mut PgConnection,
     owner: Uuid,
     machine: Uuid,
+    viewer: Option<Uuid>,
     now: DateTime<Utc>,
 ) -> Result<Vec<CleanupCandidate>, sqlx::Error> {
     let rows: Vec<(Uuid, String, String, i64)> = sqlx::query_as(
@@ -246,6 +255,11 @@ pub async fn cleanup_candidates_in_tx(
             and c.worktree is not null and coalesce(c.worktree->>'state','') <> 'removed'
             and d.activity_state in ('idle','stopped')
             and d.activity_since <= $3 - interval '1 hour'
+            and ($5::uuid is null or exists(
+                  select 1 from conversations v
+                   where v.id=$5 and v.owner_id=$1
+                     and v.memory_domain is not null and v.memory_domain=c.memory_domain
+                     and (v.spawn_depth=0 or c.parent_conversation_id=v.id)))
           order by d.activity_since
           limit $4",
     )
@@ -253,6 +267,7 @@ pub async fn cleanup_candidates_in_tx(
     .bind(machine)
     .bind(now)
     .bind(CLEANUP_LIMIT)
+    .bind(viewer)
     .fetch_all(&mut *conn)
     .await?;
     Ok(rows

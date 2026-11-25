@@ -1725,6 +1725,7 @@ pub async fn preview(
         &mut tx,
         caller.owner_id,
         machine,
+        Some(caller.conversation_id),
         &context.guards,
         now,
     )

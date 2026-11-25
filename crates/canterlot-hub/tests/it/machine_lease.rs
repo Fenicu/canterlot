@@ -598,6 +598,88 @@ async fn long_hold_warns_holder_subscribers_once_and_only_from_fresh_state() -> 
     Ok(())
 }
 
+/// Держатель аренды из другого домена памяти: получатель узнаёт срок и вид аренды, но не
+/// название, идентификаторы и метку команды.
+#[tokio::test]
+async fn long_hold_hides_a_holder_of_another_domain() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let s = testkit::seed(&pool).await;
+    let holder = testkit::seed_conversation(&pool, s.owner_id, s.machine_id).await;
+    sqlx::query("update conversations set title='Баннер связи' where id=$1")
+        .bind(holder)
+        .execute(&pool)
+        .await?;
+    let execution = running(&pool, s.owner_id, holder).await;
+    // Личный оркестратор с делегатом на той же машине: получатель событий машины.
+    let personal = testkit::seed_conversation(&pool, s.owner_id, s.machine_id).await;
+    let delegate = testkit::seed_conversation(&pool, s.owner_id, s.machine_id).await;
+    sqlx::query("update conversations set parent_conversation_id=$2 where id=$1")
+        .bind(delegate)
+        .bind(personal)
+        .execute(&pool)
+        .await?;
+    sqlx::query("update conversations set memory_domain='personal' where id=any($1)")
+        .bind([personal, delegate])
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "insert into conversation_derived(conversation_id,activity_state,activity_evidence)
+         values($1,'working','{}')",
+    )
+    .bind(personal)
+    .execute(&pool)
+    .await?;
+    let now = Utc::now();
+    apply(
+        &pool,
+        &s,
+        &state(
+            vec![entry(
+                "long",
+                "build",
+                Some(execution),
+                ms(now - TimeDelta::minutes(95)),
+                0,
+            )],
+            vec![],
+            ms(now),
+        ),
+    )
+    .await;
+    available(&pool, s.machine_id).await;
+    leases::long_hold_sweep(&pool, HOLD, now).await?;
+
+    let jobs = long_hold_jobs(&pool).await;
+    let (_, job) = jobs
+        .iter()
+        .find(|(to, _)| *to == personal)
+        .expect("the personal orchestrator hears the event");
+    let details = &job["details"];
+    assert_eq!(details["held_minutes"], 95);
+    assert_eq!(details["lease_kind"], "build");
+    assert_eq!(details["holder_hidden"], true);
+    for field in ["holder_title", "conversation_id", "execution_id", "label"] {
+        assert!(details[field].is_null(), "{field}: {details}");
+    }
+
+    Scheduler::new(pool.clone(), Dispatcher::channel().0, Default::default())
+        .tick(now)
+        .await?;
+    let text: String = sqlx::query_scalar(
+        "select content->0->>'text' from inputs where conversation_id=$1 order by input_seq",
+    )
+    .bind(personal)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        text,
+        "[canterlot] Machine \"synthetic\": another session has held the build lease for 95 min. \
+         Other heavy tasks on the machine queue behind it; check whether the command hangs. \
+         Nothing is stopped automatically."
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn lease_state_travels_the_control_stream_only_with_the_capability() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;

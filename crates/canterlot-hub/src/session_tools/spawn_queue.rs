@@ -1262,8 +1262,15 @@ async fn try_start(
                 at,
             });
         }
-        let verdict =
-            guard::check_in_tx(&mut *conn, caller.owner_id, target, runtime.guards, now).await?;
+        let verdict = guard::check_in_tx(
+            &mut *conn,
+            caller.owner_id,
+            target,
+            Some(caller.conversation_id),
+            runtime.guards,
+            now,
+        )
+        .await?;
         metrics_stale = verdict.stale;
         if verdict.blocked() {
             return Ok(Attempt::Blocked {
