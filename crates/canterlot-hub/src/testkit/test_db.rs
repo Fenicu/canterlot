@@ -299,8 +299,11 @@ impl<'m> Setup<'m> {
     /// Оставляет текущий шаблон и один предыдущий, остальные с этим префиксом удаляет.
     /// Порядок задаёт время постройки в `_canterlot_test.templates`.
     async fn drop_stale(&self, conn: &mut PgConnection, current: &str) -> Result<(), sqlx::Error> {
+        // Схема общая для всех наборов миграций, а замок постройки у каждого свой:
+        // `if not exists` при одновременном создании даёт 23505, поэтому свой замок.
         conn.execute(
-            "create schema if not exists _canterlot_test;
+            "select pg_advisory_xact_lock(7161679214410133360);
+             create schema if not exists _canterlot_test;
              create table if not exists _canterlot_test.templates (
                  name text primary key,
                  built_at timestamptz not null default clock_timestamp()
