@@ -8,10 +8,13 @@
 
 	let {
 		chat,
+		stacked = false,
 		onnavigate,
 		children
 	}: {
 		chat: ChatStore;
+		/** Широкий стол: план и дерево стоят друг под другом в одной прокрутке, без вкладок. */
+		stacked?: boolean;
 		/** Переход из плана в чат исполнителя. */
 		onnavigate?: () => void;
 		/** Дерево делегирования: первая вкладка. */
@@ -37,17 +40,32 @@
 	};
 </script>
 
-{#if hasPlan}
-	<div class="tabs" data-role="delegation-tabs">
-		<Segmented {name} label="Раздел панели" options={TABS} bind:value={() => pane.delegationTab, pick} />
-	</div>
-{/if}
-{#if hasPlan && pane.delegationTab === 'plan'}
-	<div class="plan-slot" data-role="plan-tab">
-		<PlanView orchestratorId={chat.id} {onnavigate} />
-	</div>
+{#if stacked}
+	{#if hasPlan}
+		<section class="part" data-role="pane-plan" aria-labelledby="{name}-plan">
+			<h3 class="part-title" id="{name}-plan">План</h3>
+			<PlanView orchestratorId={chat.id} {onnavigate} />
+		</section>
+		<section class="part" data-role="pane-tree" aria-labelledby="{name}-tree">
+			<h3 class="part-title" id="{name}-tree">Делегаты</h3>
+			{@render children()}
+		</section>
+	{:else}
+		<div class="part" data-role="pane-tree">{@render children()}</div>
+	{/if}
 {:else}
-	{@render children()}
+	{#if hasPlan}
+		<div class="tabs" data-role="delegation-tabs">
+			<Segmented {name} label="Раздел панели" options={TABS} bind:value={() => pane.delegationTab, pick} />
+		</div>
+	{/if}
+	{#if hasPlan && pane.delegationTab === 'plan'}
+		<div class="plan-slot" data-role="plan-tab">
+			<PlanView orchestratorId={chat.id} {onnavigate} />
+		</div>
+	{:else}
+		{@render children()}
+	{/if}
 {/if}
 
 <style>
@@ -57,5 +75,21 @@
 	}
 	.plan-slot {
 		min-height: 0;
+	}
+	/* Части стопки идут в потоке одна за другой: заголовок делегатов не наезжает на хвост плана. */
+	.part {
+		flex: none;
+		display: flex;
+		flex-direction: column;
+	}
+	.part + .part {
+		margin-top: var(--s8);
+	}
+	.part-title {
+		margin: var(--s0) var(--s0) var(--s3);
+		padding-inline: var(--s3);
+		color: var(--muted);
+		font-size: var(--fs-sm);
+		font-weight: var(--weight-medium);
 	}
 </style>

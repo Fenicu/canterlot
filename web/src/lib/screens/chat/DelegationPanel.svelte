@@ -9,9 +9,12 @@
 
 	let {
 		chat,
+		stacked = false,
 		onclose
 	}: {
 		chat: ChatStore;
+		/** Широкий стол: план и дерево делегатов стопкой вместо вкладок. */
+		stacked?: boolean;
 		onclose?: () => void;
 	} = $props();
 
@@ -22,7 +25,9 @@
 	} catch {
 		runtime = null;
 	}
-	const planOpen = $derived(pane.delegationTab === 'plan' && (runtime?.list.plan.has(chat.id) ?? false));
+	const hasPlan = $derived(runtime?.list.plan.has(chat.id) ?? false);
+	const planOpen = $derived(!stacked && pane.delegationTab === 'plan' && hasPlan);
+	const title = $derived(stacked && hasPlan ? 'План и делегаты' : 'Делегирование');
 	let LaneComponent = $state<Component<{ chat: ChatStore; rootBlockId: string; embedded?: boolean }> | null>(null);
 
 	$effect(() => {
@@ -34,16 +39,16 @@
 	});
 </script>
 
-<aside class="desktop-lane-panel" aria-label="Панель делегирования">
+<aside class="desktop-lane-panel" aria-label={stacked && hasPlan ? 'Панель плана и делегатов' : 'Панель делегирования'}>
 	<header class="topbar">
-		<h2 class="panel-title grow">Делегирование</h2>
+		<h2 class="panel-title grow">{title}</h2>
 		{#if onclose}
 			<IconButton icon="close" label="Закрыть боковую панель" onclick={onclose} />
 		{/if}
 	</header>
 
-	<div class="tree-slot" class:plan-open={planOpen}>
-		<DelegationTabs {chat}>
+	<div class="tree-slot" class:plan-open={planOpen} class:stack={stacked} class:alone={stacked && !selectedBlockId}>
+		<DelegationTabs {chat} {stacked}>
 			<DelegationTree {chat} selected={selectedBlockId} onselect={(id) => (selectedBlockId = selectedBlockId === id ? null : id)} />
 		</DelegationTabs>
 	</div>
@@ -94,6 +99,16 @@
 	}
 	/* План занимает всю высоту панели: линии субагента рядом с ним нет. */
 	.tree-slot.plan-open {
+		flex: 1;
+		max-height: none;
+		min-height: 0;
+	}
+	/* Стопка плана и делегатов — одна прокрутка; пока линия делегата не выбрана, она во всю высоту. */
+	.tree-slot.stack {
+		display: flex;
+		flex-direction: column;
+	}
+	.tree-slot.alone {
 		flex: 1;
 		max-height: none;
 		min-height: 0;
