@@ -527,6 +527,19 @@ pub(crate) async fn receive(
     }
 }
 
+/// Запись журнала ссылается на файл, которого у хаба нет: в ленте он не появится. Курсор
+/// идёт дальше, поэтому единственный след пропуска — эта строка.
+fn warn_reference_skipped(run: &ExecutionRef, id: Uuid, reason: &'static str) {
+    tracing::warn!(
+        kind = "media_reference_skipped",
+        media_id = %id,
+        execution_id = %run.execution_id,
+        conversation_id = %run.conversation_id,
+        reason,
+        "journal record references a file the hub does not hold"
+    );
+}
+
 /// Запись `BlockMedia`: ссылка появляется только на опубликованную строку того же исполнения,
 /// блока, типа, размера и checksum. Иначе запись пропускается (`true`), курсор журнала идёт дальше.
 pub async fn attach_in_tx(
@@ -553,6 +566,8 @@ pub async fn attach_in_tx(
     .fetch_optional(&mut *conn)
     .await?;
     let Some((stored_block, mime, size, sha256, attached)) = row else {
+        // Воркер пишет запись только после `MediaStored`: строки нет — значит, её убрали.
+        warn_reference_skipped(run, id, "media_missing");
         return Ok(true);
     };
     if attached
@@ -665,6 +680,7 @@ pub async fn attach_file_in_tx(
     .fetch_one(&mut *conn)
     .await?;
     if !ready {
+        warn_reference_skipped(run, id, "attachment_not_ready");
         return Ok(true);
     }
     let row: Option<(String, String, i64, String, String, String, bool)> = sqlx::query_as(

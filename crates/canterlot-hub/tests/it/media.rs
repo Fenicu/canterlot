@@ -159,6 +159,33 @@ impl Media {
         );
     }
 
+    fn closed(&self) -> Body {
+        Body::JournalClosed(JournalClosed {
+            execution_id: self.execution.to_string(),
+            generation: 1,
+            reason: "normal_exit".into(),
+        })
+    }
+
+    /// Исполнение кончилось, сопровождение закрыло журнал: новых записей в нём не будет.
+    async fn finish_execution(&mut self) {
+        let fact = |state: &str, outcome: &str| {
+            Body::ExecutionState(canterlot_proto::worker::v1::ExecutionState {
+                execution_id: self.execution.to_string(),
+                generation: 1,
+                state: state.into(),
+                outcome: outcome.into(),
+                ..Default::default()
+            })
+        };
+        let bodies = vec![
+            fact("stopping", ""),
+            fact("stopped", "normal_exit"),
+            self.closed(),
+        ];
+        self.committed(bodies).await;
+    }
+
     /// Блок вызова инструмента `Read`, к которому прикрепляется картинка.
     async fn tool_block(&mut self) -> Uuid {
         let block = Uuid::now_v7();
@@ -1160,6 +1187,8 @@ async fn gc_keeps_referenced_media_and_removes_unreferenced_after_grace() {
         .execute(&pool)
         .await
         .unwrap();
+    // Журнал исполнения закрыт: ссылки на оставшиеся картинки уже не придут.
+    f.finish_execution().await;
     let report = gc::run_once(&pool, f.files.blobs(), Utc::now(), DAY)
         .await
         .unwrap();
@@ -1355,6 +1384,8 @@ async fn late_block_file_after_release_is_not_attached() {
     .execute(&pool)
     .await
     .unwrap();
+    // Журнал исполнения закрыт, запись о файле в нём так и не появилась.
+    f.finish_execution().await;
     let report = gc::run_once(&pool, f.files.blobs(), Utc::now(), DAY)
         .await
         .unwrap();
@@ -1378,6 +1409,148 @@ async fn late_block_file_after_release_is_not_attached() {
     ])
     .await;
     assert_eq!(f.history_block(block).await["files"], json!([]));
+    stop.cancel();
+    timeout(WAIT, task).await.unwrap().unwrap();
+}
+
+/// Картинка и файл агента сданы на хаб, а запись журнала о них задержалась дольше
+/// отсрочки сборщика (журнал стоит на неприменённой записи либо машина сутки без связи).
+/// Пока исполнение живо, сборщик их не трогает: поздняя запись прикрепляет оба.
+#[tokio::test]
+async fn gc_keeps_agent_media_whose_journal_record_is_late() {
+    let pool = canterlot_hub::testkit::db().await;
+    let mut f = Media::new(pool.clone()).await;
+    let (mut client, stop, task) = server(f.hub.clone()).await;
+    let block = f.tool_block().await;
+    let image = png(1, 1, 300, 7);
+    let media = Uuid::now_v7();
+    put(
+        &mut client,
+        &f.token,
+        f.header(media, block, &image),
+        &image,
+    )
+    .await
+    .unwrap();
+    let report = b"%PDF-1.7\nlate report".as_slice();
+    let file = Uuid::now_v7();
+    let header = share_header(&f, file, block, "report.pdf", "application/pdf", report);
+    put(&mut client, &f.token, header, report).await.unwrap();
+    for id in [media, file] {
+        set_mtime(&f.files.blob_path(id), 30);
+    }
+    sqlx::query(
+        "update block_media set created_at=clock_timestamp()-interval '30 hours' where id=$1",
+    )
+    .bind(media)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update attachments set updated_at=clock_timestamp()-interval '30 hours' where id=$1",
+    )
+    .bind(file)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let passed = gc::run_once(&pool, f.files.blobs(), Utc::now(), DAY)
+        .await
+        .unwrap();
+    assert_eq!(passed, gc::GcReport::default(), "nothing to collect yet");
+    assert!(f.files.blob_path(media).exists());
+    assert!(f.files.blob_path(file).exists());
+
+    f.committed(vec![
+        Media::reference(media, block, &image, 1, 1),
+        Body::BlockFile(BlockFile {
+            block_id: block.to_string(),
+            attachment_id: file.to_string(),
+            name: "report.pdf".into(),
+            mime: "application/pdf".into(),
+            size: report.len() as u64,
+            sha256: sha(report),
+            ..Default::default()
+        }),
+    ])
+    .await;
+    assert!(f.attached(media).await);
+    let item = f.history_block(block).await;
+    assert_eq!(item["files"][0]["attachment_id"], file.to_string());
+    // Прикреплённое переживает и конец исполнения.
+    f.finish_execution().await;
+    let after = gc::run_once(&pool, f.files.blobs(), Utc::now(), DAY)
+        .await
+        .unwrap();
+    assert_eq!(after, gc::GcReport::default());
+    assert!(f.files.blob_path(media).exists());
+    assert!(f.files.blob_path(file).exists());
+    stop.cancel();
+    timeout(WAIT, task).await.unwrap().unwrap();
+}
+
+/// Хаб уже знает, что исполнение кончилось, но его журнал ещё не закрыт: записи в нём
+/// могут доигрываться. Сборщик ждёт закрытия журнала и только потом убирает брошенное.
+#[tokio::test]
+async fn gc_drops_unattached_agent_media_only_after_the_journal_is_closed() {
+    let pool = canterlot_hub::testkit::db().await;
+    let mut f = Media::new(pool.clone()).await;
+    let (mut client, stop, task) = server(f.hub.clone()).await;
+    let block = f.tool_block().await;
+    let image = png(1, 1, 300, 9);
+    let media = Uuid::now_v7();
+    put(
+        &mut client,
+        &f.token,
+        f.header(media, block, &image),
+        &image,
+    )
+    .await
+    .unwrap();
+    let report = b"%PDF-1.7\nabandoned report".as_slice();
+    let file = Uuid::now_v7();
+    let header = share_header(&f, file, block, "report.pdf", "application/pdf", report);
+    put(&mut client, &f.token, header, report).await.unwrap();
+    for id in [media, file] {
+        set_mtime(&f.files.blob_path(id), 30);
+    }
+    sqlx::query(
+        "update block_media set created_at=clock_timestamp()-interval '30 hours' where id=$1",
+    )
+    .bind(media)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update attachments set updated_at=clock_timestamp()-interval '30 hours' where id=$1",
+    )
+    .bind(file)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (state, outcome) in [
+        (ExecutionState::Stopping, None),
+        (ExecutionState::Stopped, Some("normal_exit")),
+    ] {
+        executions::set_state(&pool, f.execution, state, outcome, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let open = gc::run_once(&pool, f.files.blobs(), Utc::now(), DAY)
+        .await
+        .unwrap();
+    assert_eq!(open, gc::GcReport::default(), "the journal is still open");
+    assert_eq!(f.rows(media).await, 1);
+
+    let closed = f.closed();
+    f.committed(vec![closed]).await;
+    let report = gc::run_once(&pool, f.files.blobs(), Utc::now(), DAY)
+        .await
+        .unwrap();
+    assert_eq!((report.unreferenced_media, report.released), (1, 1));
+    assert_eq!(f.rows(media).await, 0);
+    assert!(!f.files.blob_path(media).exists());
+    assert!(!f.files.blob_path(file).exists());
     stop.cancel();
     timeout(WAIT, task).await.unwrap().unwrap();
 }

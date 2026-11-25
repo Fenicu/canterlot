@@ -23,6 +23,33 @@ pub struct GcReport {
     pub unreferenced_media: usize,
 }
 
+/// Условие «журнал исполнения ещё может прикрепить строку `alias`». Воркер сдаёт файл
+/// (`PutMedia`) раньше, чем пишет о нём запись в журнал сопровождения, а разрыв между
+/// ними бывает дольше отсрочки сборщика: журнал стоит на записи, которую хаб не смог
+/// применить, или машина сутки без связи. Удалённую строку поздняя запись молча
+/// пропускает, и файл в ленте не появляется. Поэтому неприкреплённое не трогаем, пока
+/// исполнение живо или его журнал не закрыт: после закрытия записей в нём не будет.
+fn journal_pending(alias: &str) -> String {
+    format!(
+        "(exists(select 1 from executions e where e.id={alias}.execution_id
+                 and e.state not in ('stopped','failed'))
+          or exists(select 1 from journal_cursors j where j.execution_id={alias}.execution_id
+                    and j.kind='sj' and not j.closed and not j.discarded))"
+    )
+}
+
+/// Файл агента (`block_files`) этого вложения ещё ждёт своей записи журнала.
+async fn file_awaits_journal(conn: &mut sqlx::PgConnection, id: Uuid) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "select exists(select 1 from block_files bf where bf.attachment_id=$1
+                       and bf.attached_at is null and {})",
+        journal_pending("bf")
+    )))
+    .bind(id)
+    .fetch_one(conn)
+    .await
+}
+
 fn log_file_error(id: Uuid, error: &std::io::Error) {
     tracing::warn!(kind = "attachment_gc_delete_failed", attachment_id = %id, error = %error.kind(), "file delete failed; retried by the orphan sweep");
 }
@@ -101,7 +128,11 @@ async fn release(
                 return Ok::<bool, sqlx::Error>(false);
             };
             // Новый оператор после блокировки видит ссылку, зафиксированную конкурентной привязкой.
-            if state != "ready" || updated_at >= cutoff || linked(&mut *conn, id).await? {
+            if state != "ready"
+                || updated_at >= cutoff
+                || linked(&mut *conn, id).await?
+                || file_awaits_journal(&mut *conn, id).await?
+            {
                 return Ok::<bool, sqlx::Error>(false);
             }
             sqlx::query(
@@ -148,10 +179,12 @@ async fn drop_unreferenced_media(
     let store = &*locked;
     let dropped = crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
-            let locked: Option<Uuid> = sqlx::query_scalar(
-                "select id from block_media where id=$1 and attached_at is null and created_at < $2
-                 for update skip locked",
-            )
+            let locked: Option<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "select m.id from block_media m
+                 where m.id=$1 and m.attached_at is null and m.created_at < $2 and not {}
+                 for update of m skip locked",
+                journal_pending("m")
+            )))
             .bind(id)
             .bind(cutoff)
             .fetch_optional(&mut *conn)
@@ -193,14 +226,18 @@ pub async fn run_once(
             report.expired_uploads += 1;
         }
     }
-    let unused: Vec<Uuid> = sqlx::query_scalar(
+    // Ждущие журнала строки отсеиваются уже здесь: иначе тысяча таких вложений заняла бы
+    // пачку целиком, и до остальных сборщик не дошёл бы.
+    let unused: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "select a.id from attachments a where a.state='ready' and a.updated_at < $1
            and not exists(select 1 from input_attachments ia where ia.attachment_id=a.id)
            and not exists(select 1 from scheduled_job_attachments sa where sa.attachment_id=a.id)
-           and not exists(select 1 from block_files bf where bf.attachment_id=a.id and bf.attached_at is not null)
+           and not exists(select 1 from block_files bf where bf.attachment_id=a.id
+                          and (bf.attached_at is not null or {}))
            and not exists(select 1 from composer_drafts d where d.attachment_ids ? a.id::text)
          order by a.id limit $2",
-    )
+        journal_pending("bf")
+    )))
     .bind(cutoff)
     .bind(BATCH)
     .fetch_all(pool)
@@ -210,9 +247,12 @@ pub async fn run_once(
             report.released += 1;
         }
     }
-    let unreferenced: Vec<Uuid> = sqlx::query_scalar(
-        "select id from block_media where attached_at is null and created_at < $1 order by id limit $2",
-    )
+    let unreferenced: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "select m.id from block_media m
+         where m.attached_at is null and m.created_at < $1 and not {}
+         order by m.id limit $2",
+        journal_pending("m")
+    )))
     .bind(cutoff)
     .bind(BATCH)
     .fetch_all(pool)
