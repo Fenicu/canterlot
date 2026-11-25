@@ -34,8 +34,10 @@ pub fn launch_overrides(relay_exe: &Path, exec_dir: &Path) -> [OsString; 6] {
     ]
 }
 
-/// Секрет сокета для relay: `env` сервера canterlot. Значение видно в командной строке,
-/// но читать её может только тот, кто и так читает окружение relay.
+/// Секрет сокета для relay: `env` сервера canterlot. Значение видно в командной строке
+/// app-server, а `/proc/<pid>/cmdline` читает любой пользователь машины. Чужому uid не
+/// помогут права сокета и проверка uid, процессу того же uid вне дерева сопровождения —
+/// проверка родства в брокере: на тайну секрета допуск не опирается.
 pub fn secret_override(secret: &str) -> [OsString; 2] {
     let mut env = toml::map::Map::new();
     env.insert(

@@ -204,11 +204,41 @@ async fn authenticated(
         .is_some_and(|given| same_secret(given, secret.as_bytes()))
 }
 
-/// Соединение от процесса того же пользователя.
-fn same_user(stream: &UnixStream) -> bool {
-    stream
-        .peer_cred()
-        .is_ok_and(|cred| cred.uid() == rustix::process::getuid().as_raw())
+/// Pid соединившегося процесса, если он того же пользователя.
+fn same_user_peer(stream: &UnixStream) -> Option<u32> {
+    let cred = stream.peer_cred().ok()?;
+    if cred.uid() != rustix::process::getuid().as_raw() {
+        return None;
+    }
+    u32::try_from(cred.pid()?).ok()
+}
+
+/// Процесс `pid` — корень дерева или его потомок. Одно сопровождение ведёт одно
+/// исполнение: CLI и его relay — потомки сопровождения, осиротевшие процессы исполнения
+/// достаются ему же (`PR_SET_CHILD_SUBREAPER`). Агент соседней сессии в это дерево не
+/// попадает, даже зная секрет: тот читается с диска и из `/proc` под тем же uid. Родство
+/// берётся одним снимком `/proc`; что прочесть не удалось — чужое: здесь безопасен отказ.
+fn in_tree(pid: u32, root: u32) -> bool {
+    if pid == root {
+        return true;
+    }
+    let Ok(table) = crate::containment::process_table() else {
+        return false;
+    };
+    let mut current = pid;
+    for _ in 0..table.len() {
+        let Some(info) = table.get(&current) else {
+            return false;
+        };
+        if info.parent == root {
+            return true;
+        }
+        if info.parent <= 1 {
+            return false;
+        }
+        current = info.parent;
+    }
+    false
 }
 
 pub struct Broker {
@@ -237,6 +267,17 @@ impl Broker {
         exec_dir: &Path,
         tool_set: ToolSet,
         limits_provider: &str,
+    ) -> std::io::Result<Self> {
+        Self::bind_in_tree(exec_dir, tool_set, limits_provider, std::process::id()).await
+    }
+
+    /// То же с явным корнем дерева допуска. В работе корень — само сопровождение; тесты
+    /// подставляют другой процесс, чтобы соединиться извне дерева.
+    pub async fn bind_in_tree(
+        exec_dir: &Path,
+        tool_set: ToolSet,
+        limits_provider: &str,
+        tree_root: u32,
     ) -> std::io::Result<Self> {
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -267,9 +308,9 @@ impl Broker {
                     let Ok((stream, _)) = listener.accept().await else {
                         break;
                     };
-                    if !same_user(&stream) {
+                    let Some(peer) = same_user_peer(&stream) else {
                         continue;
-                    }
+                    };
                     let (pending, agent_pending, gate, tx, provider, secret) = (
                         pending.clone(),
                         agent_pending.clone(),
@@ -280,6 +321,16 @@ impl Broker {
                     );
                     // Приветствие ждётся в своей задаче: молчащий процесс не держит приём.
                     tokio::spawn(async move {
+                        // Снимок `/proc` — блокирующее чтение: не на потоке цикла приёма.
+                        let inside =
+                            tokio::task::spawn_blocking(move || in_tree(peer, tree_root)).await;
+                        if !matches!(inside, Ok(true)) {
+                            tracing::warn!(
+                                kind = "mcp_relay_rejected",
+                                "mcp socket connection from outside the session process tree"
+                            );
+                            return;
+                        }
                         let (read, write) = stream.into_split();
                         let mut reader = BufReader::new(read);
                         if !authenticated(&mut reader, &secret).await {

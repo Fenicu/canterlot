@@ -562,14 +562,34 @@ async fn preset_change_through_the_supervisor_keeps_the_server_and_the_text_priv
 }
 
 // Команда реле из конфигурации запуска — настоящий `mcp-relay` воркера, а брокер живёт в
-// супервизоре: именно это соединение открывает сервер OpenCode.
+// супервизоре: именно это соединение открывает сервер OpenCode. Реле запускает двойник
+// сервера, как настоящий OpenCode: сокет обслуживает только дерево своего сопровождения.
 #[tokio::test]
 async fn relay_from_the_boot_config_reaches_the_broker_of_the_supervisor() {
-    use std::{
-        io::{BufRead as _, BufReader, Write as _},
-        process::{Command as Process, Stdio},
-    };
-    let mut env = Env::new(Some(ready())).await;
+    use tokio::io::AsyncBufReadExt as _;
+    let replies = TempDir::new().unwrap();
+    let reply_to = replies.path().join("mcp-reply");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&reply_to)
+            .status()
+            .unwrap()
+            .success()
+    );
+    // Канал открыт на чтение и запись: двойник пишет в него, не дожидаясь читателя.
+    let reply = tokio::net::unix::pipe::OpenOptions::new()
+        .read_write(true)
+        .open_receiver(&reply_to)
+        .unwrap();
+    let mut script = ready();
+    script.mcp_call = Some(canterlot_worker::adapter::opencode::replay::McpCall {
+        request: json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "canterlot_limits", "arguments": {}},
+        }),
+        reply_to,
+    });
+    let mut env = Env::new(Some(script)).await;
     env.start("bypass").await;
     env.wait_running().await;
     let boot = env.fake().boot();
@@ -577,54 +597,25 @@ async fn relay_from_the_boot_config_reaches_the_broker_of_the_supervisor() {
         serde_json::from_str(boot["env"]["OPENCODE_CONFIG_CONTENT"].as_str().unwrap()).unwrap();
     let server = &content["mcp"]["servers"]["canterlot"];
     assert_eq!(server["codemode"], false);
-    let command: Vec<&str> = server["command"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(Value::as_str)
-        .collect();
     // OpenCode запускает локальный сервер с его `environment`: там секрет сокета.
-    let environment: Vec<(String, String)> = server["environment"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(key, value)| (key.clone(), value.as_str().unwrap().to_owned()))
-        .collect();
     assert!(
-        environment
-            .iter()
-            .any(|(key, _)| key == "CANTERLOT_MCP_SECRET"),
+        server["environment"]
+            .as_object()
+            .unwrap()
+            .contains_key("CANTERLOT_MCP_SECRET"),
         "{server}"
     );
-    let mut relay = Process::new(command[0])
-        .args(&command[1..])
-        .envs(environment)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stdin = relay.stdin.take().unwrap();
-    let call = json!({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "canterlot_limits", "arguments": {}},
-    });
-    writeln!(stdin, "{call}").unwrap();
-    stdin.flush().unwrap();
     let mut line = String::new();
-    let stdout = relay.stdout.take().unwrap();
-    let answer = tokio::task::spawn_blocking(move || {
-        BufReader::new(stdout).read_line(&mut line).unwrap();
-        line
-    });
-    let answer: Value =
-        serde_json::from_str(&timeout(WAIT, answer).await.unwrap().unwrap()).unwrap();
+    timeout(WAIT, tokio::io::BufReader::new(reply).read_line(&mut line))
+        .await
+        .expect("the relay answers in time")
+        .unwrap();
+    let answer: Value = serde_json::from_str(&line)
+        .unwrap_or_else(|_| panic!("the relay of the server must be served, got {line:?}"));
     assert_eq!(
         answer["result"]["content"][0]["text"],
         "no limit data yet in this session"
     );
-    drop(stdin);
-    relay.wait().unwrap();
     env.stop().await;
     env.fake().wait_gone().await;
 }

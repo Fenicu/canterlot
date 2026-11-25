@@ -668,6 +668,97 @@ fn no_agent_tool_applies_a_setting_itself() {
     assert_eq!(mcp::AGENT_TOOLS.len(), 44);
 }
 
+/// Клиент сокета отдельным процессом: ждёт строку в stdin, соединяется с секретом,
+/// шлёт `ping` и печатает ответ сервера (или `closed`, если тот закрыл соединение).
+const SOCKET_CLIENT: &str = r#"#!/usr/bin/python3
+import socket, sys
+path, secret = sys.argv[1:3]
+sys.stdin.readline()
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(20)
+s.connect(path)
+s.sendall(("canterlot-relay %s\n" % secret).encode() + b'{"jsonrpc":"2.0","id":7,"method":"ping"}\n')
+try:
+    data = s.recv(65536)
+except OSError:
+    data = b"error"
+print((data or b"closed").decode().strip(), flush=True)
+"#;
+
+/// Секрет сессии читается с диска и из `/proc` любым процессом того же пользователя,
+/// поэтому один он агента соседней сессии не останавливает. Сокет обслуживает только
+/// процессы дерева своего сопровождения: чужой процесс с верным секретом получает
+/// закрытое соединение, а процесс из дерева работает как раньше.
+#[tokio::test]
+async fn a_process_outside_the_session_tree_is_not_served_even_with_the_secret() {
+    use tokio::io::AsyncReadExt as _;
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let client = dir.path().join("client.py");
+    crate::fake_exec::write_executable(&client, SOCKET_CLIENT, 0o700);
+    let socket = dir.path().join("exec").join("mcp.sock");
+    // Секрет знают оба клиента: у сессии он один, а сокета ещё нет, поэтому клиент
+    // получает его позже, а корнем дерева становится уже запущенный процесс.
+    let secret_file = dir.path().join("secret");
+    let mut inside = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(r#"read _; exec "$0" "$1" "$(cat "$2")""#)
+        .arg(&client)
+        .arg(&socket)
+        .arg(&secret_file)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("client");
+    let broker = Broker::bind_in_tree(
+        &dir.path().join("exec"),
+        ToolSet::LimitsOnly,
+        "codex",
+        inside.id().expect("client pid"),
+    )
+    .await
+    .expect("bind");
+    std::fs::write(&secret_file, broker.relay_secret()).unwrap();
+
+    // Этот тест — родитель корня, а не его потомок: для сокета он чужой процесс.
+    let stream = UnixStream::connect(&socket).await.expect("connect");
+    let (mut read, mut sink) = stream.into_split();
+    sink.write_all(relay_hello(broker.relay_secret()).as_bytes())
+        .await
+        .expect("hello");
+    let _ = sink
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n")
+        .await;
+    let mut reply = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(10), read.read_to_end(&mut reply))
+        .await
+        .expect("the server closes a foreign connection");
+    assert!(
+        read.is_err() || reply.is_empty(),
+        "a foreign process got an answer: {}",
+        String::from_utf8_lossy(&reply)
+    );
+
+    // Процесс из дерева с тем же секретом обслуживается.
+    let mut stdin = inside.stdin.take().unwrap();
+    stdin
+        .write_all(b"go\ngo\n")
+        .await
+        .expect("release the client");
+    let mut answer = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        BufReader::new(inside.stdout.take().unwrap()).read_line(&mut answer),
+    )
+    .await
+    .expect("client answer in time")
+    .expect("client stdout");
+    let answer: Value = serde_json::from_str(answer.trim())
+        .unwrap_or_else(|_| panic!("the session's own process must be served, got {answer:?}"));
+    assert_eq!(answer["id"], 7, "{answer}");
+    assert!(answer.get("result").is_some(), "{answer}");
+}
+
 #[tokio::test]
 async fn session_call_reaches_the_hub_and_returns_text_with_hint() {
     let dir = tempfile::TempDir::new().expect("tempdir");

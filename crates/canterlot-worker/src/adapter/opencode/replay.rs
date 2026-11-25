@@ -39,6 +39,19 @@ pub struct Script {
     pub ignore_term: bool,
     /// Отказывать в подписке на поток, начиная с этой по счёту: связь не восстановить.
     pub refuse_events_from: Option<u32>,
+    /// Поднять локальный сервер MCP canterlot из конфигурации запуска и послать ему вызов.
+    pub mcp_call: Option<McpCall>,
+}
+
+/// Вызов сервера MCP canterlot от имени двойника. Настоящий OpenCode запускает локальные
+/// серверы сам, поэтому реле — потомок сервера и сопровождения, а не теста.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpCall {
+    /// Строка JSON-RPC для stdin реле.
+    pub request: Value,
+    /// Куда записать первую строку ответа (тест читает именованный канал).
+    pub reply_to: PathBuf,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -761,6 +774,48 @@ async fn serve_connection(shared: Arc<Shared>, stream: TcpStream) {
     }
 }
 
+/// Команда и окружение сервера canterlot берутся из `OPENCODE_CONFIG_CONTENT`, как их
+/// читает OpenCode. Без ответа в канал уходит пустая строка: тест видит отказ, а не тишину.
+async fn mcp_call(call: McpCall) {
+    let reply = async {
+        let content: Value =
+            serde_json::from_str(&std::env::var("OPENCODE_CONFIG_CONTENT").ok()?).ok()?;
+        let server = &content["mcp"]["servers"]["canterlot"];
+        let mut command = server["command"]
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str);
+        let mut relay = tokio::process::Command::new(command.next()?)
+            .args(command)
+            .envs(
+                server["environment"]
+                    .as_object()?
+                    .iter()
+                    .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned()))),
+            )
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .ok()?;
+        let mut stdin = relay.stdin.take()?;
+        stdin
+            .write_all(format!("{}\n", call.request).as_bytes())
+            .await
+            .ok()?;
+        let mut line = String::new();
+        BufReader::new(relay.stdout.take()?)
+            .read_line(&mut line)
+            .await
+            .ok()?;
+        Some(line)
+    }
+    .await
+    .unwrap_or_default();
+    let _ = tokio::fs::write(&call.reply_to, format!("{}\n", reply.trim_end())).await;
+}
+
 fn boot_entry(args: &[String]) -> Value {
     let env: BTreeMap<String, String> = std::env::vars()
         .filter(|(key, _)| key != "OPENCODE_PASSWORD")
@@ -882,6 +937,9 @@ pub async fn main(args: Vec<String>) -> ExitCode {
         println!("{line}");
     }
     tokio::spawn(run_steps(shared.clone()));
+    if let Some(call) = script.mcp_call {
+        tokio::spawn(mcp_call(call));
+    }
     let ignore_eof = script.ignore_eof;
     tokio::spawn(async move {
         let mut stdin = tokio::io::stdin();
