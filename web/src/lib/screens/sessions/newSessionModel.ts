@@ -2,7 +2,7 @@ import { recentWorkdirs } from "#lib/api/client.js";
 import { DEFAULT_PERMISSION_MODE, availabilityLabel } from "#lib/format/labels.js";
 import { ApiError } from "#lib/api/http.js";
 import type { components } from "#lib/api/generated/openapi.js";
-import type { OpJournal } from "#lib/ops/journal.js";
+import type { Op, OpJournal } from "#lib/ops/journal.js";
 import type {
   MachineRecord,
   MachinesStore,
@@ -124,6 +124,30 @@ export function machineProblem(
   }
   if (!(machine.capabilities ?? []).includes("pilot_v1"))
     return "Машина не готова к пилоту";
+  return null;
+}
+
+/** Создание сняли из журнала до ответа хаба: владелец отменил его сам. */
+export class CreateCancelled extends Error {
+  constructor() {
+    super("create_cancelled");
+    this.name = "CreateCancelled";
+  }
+}
+
+/**
+ * Создание сессии, которое ещё не дошло до хаба. Журнал повторяет его без срока и переносит через
+ * перезагрузку, поэтому форма смотрит в журнал, а не в свою модель: закрытая и открытая заново форма
+ * видит то же создание и не заводит второе.
+ */
+export function pendingCreate(ops: Iterable<Op>): Op | null {
+  for (const op of ops) {
+    if (
+      op.kind === "create_conversation" &&
+      (op.state === "saving" || op.state === "unknown")
+    )
+      return op;
+  }
   return null;
 }
 
@@ -286,6 +310,12 @@ export class NewSessionModel {
         }
       }
       throw err;
+    }
+    // Без исхода журнал возвращается только у снятой операции: это отмена, а не отказ хаба,
+    // и следующее нажатие — новое намерение со своим ключом.
+    if (op.state !== "committed") {
+      this.#key = "";
+      throw new CreateCancelled();
     }
     const result = op.result as { conversation_id?: string } | undefined;
     const conversationId = result?.conversation_id ?? "";

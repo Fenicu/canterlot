@@ -20,7 +20,8 @@
   import Textarea from '#lib/ui/Textarea.svelte';
   import Toggle from '#lib/ui/Toggle.svelte';
   import { onMount, untrack } from 'svelte';
-  import { defaultModelId, historySize, keptHarness, machineProblem, NewSessionModel, prefillWorkdir, soleEffort, soleMachine } from './newSessionModel';
+  import { unconfirmed, type Op } from '#lib/ops/journal.js';
+  import { CreateCancelled, defaultModelId, historySize, keptHarness, machineProblem, NewSessionModel, pendingCreate, prefillWorkdir, soleEffort, soleMachine } from './newSessionModel';
   import { latestSession, prefillFromSession, shortenHomePath } from './newSessionPrefill';
   import WorkdirField from './WorkdirField.svelte';
   import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
@@ -269,21 +270,51 @@
   });
 
   let creating = $state(false);
+  let mounted = true;
+  onMount(() => () => { mounted = false; });
+
+  // Создание, которое ещё не дошло до хаба: своё или оставшееся в журнале от закрытой формы и от перезагрузки.
+  // Пока оно есть, «Создать» занята: второе нажатие завело бы вторую сессию, когда связь вернётся.
+  const pending = $derived(runtime ? pendingCreate(runtime.journal.ops.values()) : null);
+  const stalled = $derived(unconfirmed(pending ?? undefined));
+
+  async function open(conversationId: string) {
+    const share = page.url.searchParams.get('share');
+    if (share) await goto(resolve(`/share?id=${encodeURIComponent(share)}&conversation=${encodeURIComponent(conversationId)}` as '/share'));
+    else await goto(resolve(`/c/${conversationId}` as '/'));
+  }
 
   async function send() {
-    if (!model || !gate.ok || creating) return;
+    if (!model || !gate.ok || creating || pending) return;
     error = '';
     creating = true;
     try {
       const created = await model.submit();
-      const share = page.url.searchParams.get('share');
-      if (share) await goto(resolve(`/share?id=${encodeURIComponent(share)}&conversation=${encodeURIComponent(created.conversationId)}` as '/share'));
-      else await goto(resolve(`/c/${created.conversationId}` as '/'));
+      // Форму закрыли, пока создание ждало связи: владелец уже в другом месте, и переносить его нельзя.
+      if (mounted) await open(created.conversationId);
     } catch (err) {
-      error = errorText(err, 'Не удалось создать сессию');
+      if (!(err instanceof CreateCancelled)) error = errorText(err, 'Не удалось создать сессию');
     } finally {
       creating = false;
     }
+  }
+
+  // Создание из прошлого открытия формы доводится до конца так же, как своё: готовая сессия открывается.
+  let adopted = $state.raw<Op | null>(null);
+  $effect(() => {
+    if (pending && !creating) adopted = pending;
+  });
+  $effect(() => {
+    const op = adopted;
+    if (!op || op.state !== 'committed') return;
+    adopted = null;
+    const id = (op.result as { conversation_id?: string } | undefined)?.conversation_id;
+    if (id) void open(id);
+  });
+
+  function cancelCreate() {
+    if (pending) runtime?.journal.discard(pending.key);
+    adopted = null;
   }
 </script>
 
@@ -357,8 +388,10 @@
     {#if crunch}<Textarea label="Текст продолжения" bind:value={resume} />{/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if model?.errors.machine}<p class="error">{model.errors.machine}</p>{/if}
-    {#if creating}
+    {#if stalled}<p class="hint" role="status" data-role="create-waiting">Нет связи с хабом. Сессия создастся, когда связь вернётся</p>{/if}
+    {#if creating || pending}
       <Button variant="primary" full disabled reason="Сессия создаётся" onclick={send}>Создаю…</Button>
+      {#if stalled}<Button variant="text" full onclick={cancelCreate}>Отменить создание</Button>{/if}
     {:else if gate.ok}
       <Button variant="primary" full onclick={send}>Создать</Button>
     {:else}
