@@ -8,6 +8,9 @@
   } = $props();
   const autoKey = $props.id();
   let dismissed = $state(false);
+  // Хозяин, который держит окно в документе и открывает его пропом `open`, получает то же окно снова:
+  // без сброса оно после первого закрытия больше не открывалось.
+  $effect(() => { if (!open) dismissed = false; });
   let confirmed = false;
   let alive = true;
   onDestroy(() => { alive = false; });
