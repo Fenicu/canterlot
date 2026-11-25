@@ -2428,6 +2428,117 @@ async fn discover_lists_go_and_the_enabled_providers() {
     );
 }
 
+fn wave(models: &[(&str, &str)]) -> Reply {
+    catalog_reply(Value::Array(
+        models
+            .iter()
+            .map(|(provider, id)| json!({"providerID": provider, "id": id, "name": id}))
+            .collect(),
+    ))
+}
+
+/// 2.4.1 после первой сессии: `/api/model` наполняется волнами, ответы идут по опросам.
+/// Возвращает каталог и число запросов `GET /api/model`.
+async fn discovered_lazily(waves: Vec<Reply>) -> (Vec<ModelEntry>, usize) {
+    let mut script = Script {
+        version: "opencode v2.4.1".into(),
+        ..Default::default()
+    };
+    script.set_route("GET", "/api/model", waves);
+    script.set_route(
+        "POST",
+        "/api/session",
+        vec![Reply {
+            body: Some(json!({"data": {"id": "ses_probe"}})),
+            ..Default::default()
+        }],
+    );
+    script.set_route("DELETE", "/api/session/ses_probe", vec![reply_204()]);
+    let fake = Fake::new(script);
+    let data = fake.dir.path().join("data");
+    let cfg = OpenCodeConfig {
+        executable: fake.exe.clone(),
+        providers: vec!["opencode".into()],
+        provider_models: [(
+            "opencode".to_owned(),
+            vec!["*-free".to_owned(), "big-pickle".to_owned()],
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let found = tokio::time::timeout(WAIT, discover(&cfg, &data))
+        .await
+        .expect("discover must finish")
+        .unwrap();
+    fake.wait_gone().await;
+    let polls = fake
+        .requests()
+        .iter()
+        .filter(|request| request["method"] == "GET" && path_of(request) == "/api/model")
+        .count();
+    (found.models, polls)
+}
+
+fn ids(models: &[ModelEntry]) -> Vec<&str> {
+    let mut ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+    ids.sort_unstable();
+    ids
+}
+
+// Вход аккаунтом в 2.4.1: первая волна — одни `opencode` (с моделями Go под этим же
+// провайдером), Go приходит следующей. Проба не должна останавливаться на первой.
+#[tokio::test]
+async fn lazy_discover_waits_for_the_go_wave() {
+    let first = [
+        ("opencode", "big-pickle"),
+        ("opencode", "hy4-flash-free"),
+        ("opencode", "muse-spark-1.3-contributor"),
+        ("opencode", "deepseek-v4.1-flash"),
+    ];
+    let settled = [
+        ("opencode", "big-pickle"),
+        ("opencode", "hy4-flash-free"),
+        ("opencode-go", "muse-spark-1.3-contributor"),
+        ("opencode-go", "deepseek-v4.1-flash"),
+    ];
+    let with_extra = [settled.as_slice(), &[("strata", "qwen3.8-coder")]].concat();
+    let (models, _) = discovered_lazily(vec![
+        wave(&[]),
+        wave(&first),
+        wave(&settled),
+        wave(&with_extra),
+    ])
+    .await;
+    assert_eq!(
+        ids(&models),
+        [
+            "opencode-go/deepseek-v4.1-flash",
+            "opencode-go/muse-spark-1.3-contributor",
+            "opencode/big-pickle",
+            "opencode/hy4-flash-free",
+        ]
+    );
+}
+
+// Без входа в Go список оседает на одних `opencode`: проба кончается после затишья,
+// а не по сроку, и берёт осевший список, а не промежуточный.
+#[tokio::test]
+async fn lazy_discover_without_go_ends_once_the_list_is_quiet() {
+    let first = [
+        ("opencode", "big-pickle"),
+        ("opencode", "hy4-flash-free"),
+        ("opencode", "flint-40b-free"),
+    ];
+    let settled = [("opencode", "big-pickle"), ("opencode", "hy4-flash-free")];
+    let (models, polls) = discovered_lazily(vec![wave(&[]), wave(&first), wave(&settled)]).await;
+    assert_eq!(
+        ids(&models),
+        ["opencode/big-pickle", "opencode/hy4-flash-free"]
+    );
+    // Опрос раз в 100 мс: до срока в 5 с было бы около пятидесяти запросов.
+    assert!(polls < 30, "{polls} polls: the probe ran into its deadline");
+}
+
 /// Настоящий ответ `GET /api/model`, пока плагины владельца не активировались:
 /// `evidence/opencode/live/plugins_503.jsonl`. Сервер ждёт их 5 с и отвечает этим.
 fn plugins_activating() -> Reply {

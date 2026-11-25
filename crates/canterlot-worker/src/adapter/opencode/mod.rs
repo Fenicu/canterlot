@@ -46,7 +46,7 @@ use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     ffi::OsString,
     path::{Path, PathBuf},
     process::ExitStatus,
@@ -66,6 +66,10 @@ const DISCOVER_WAIT: Duration = Duration::from_secs(20);
 /// 2.4.1 наполняет `/api/model` после первой сессии волнами; ждём не дольше этого,
 /// чтобы пустой каталог остался пустым, а не стал отказом по общему сроку.
 const MODEL_SETTLE: Duration = Duration::from_secs(5);
+/// Список без всех нужных провайдеров принимается, когда он столько не менялся: так
+/// кончается проба на машине без входа в Go. Замер со входом аккаунтом: волна одних
+/// `opencode` держалась около 0,5 с до прихода Go, поэтому затишье втрое длиннее.
+const MODEL_QUIET: Duration = Duration::from_millis(1500);
 const INTERRUPT_WAIT: Duration = Duration::from_secs(5);
 const POLL_EVERY: Duration = Duration::from_millis(100);
 /// Эвристика: `connected` публикуется раньше инструментов, дебаунс `mcp.tools.changed`
@@ -259,6 +263,28 @@ async fn models_reply(http: &Http, path: &str, limit: Duration) -> Result<Value,
     }
 }
 
+/// Модели провайдеров, которые попадут в каталог: Go и перечисленные в `providers`.
+/// Прочие провайдеры владельца появляются и пропадают сами и затишью не мешают.
+fn kept_models(models: &Value, providers: &[String]) -> BTreeSet<(String, String)> {
+    models["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|model| {
+            let provider = model["providerID"].as_str()?;
+            let id = model["id"].as_str()?;
+            (provider == catalog::GO_PROVIDER || providers.iter().any(|name| name == provider))
+                .then(|| (provider.to_owned(), id.to_owned()))
+        })
+        .collect()
+}
+
+fn all_providers_present(seen: &BTreeSet<(String, String)>, providers: &[String]) -> bool {
+    std::iter::once(catalog::GO_PROVIDER)
+        .chain(providers.iter().map(String::as_str))
+        .all(|wanted| seen.iter().any(|(provider, _)| provider == wanted))
+}
+
 // Список моделей зависит от учётных данных и конфигурации, поэтому его отдаёт сам сервер.
 // Запуск короткий и без сессий, на общей базе canterlot это безопасно.
 async fn probe_models(
@@ -281,8 +307,10 @@ async fn probe_models(
         let models = if lazy_models && models["data"].as_array().is_none_or(Vec::is_empty) {
             // 2.4.1 поднимает локацию, модели и поставщиков лениво: до первой сессии
             // `/api/model` пуст, а после неё список наполняется волнами — сперва
-            // встроенные провайдеры, затем настроенные. Заводим временную сессию и
-            // ждём модели нужных провайдеров, затем убираем её за собой.
+            // встроенные провайдеры, затем настроенные. При входе аккаунтом первая волна —
+            // одни `opencode`, даже модели Go в ней под этим провайдером, а Go приходит
+            // следующей. Заводим временную сессию и ждём модели Go и всех перечисленных
+            // провайдеров либо затишья списка, затем убираем её за собой.
             let session = http
                 .post("/api/session", &json!({}), DISCOVER_WAIT)
                 .await
@@ -292,28 +320,24 @@ async fn probe_models(
                 .and_then(|reply| reply.pointer("/data/id"))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            let wanted = |models: &Value| {
-                let Some(list) = models["data"].as_array() else {
-                    return false;
-                };
-                if list.is_empty() {
-                    return false;
-                }
-                cfg.providers.is_empty()
-                    || list.iter().any(|model| {
-                        model["providerID"].as_str().is_some_and(|provider| {
-                            cfg.providers.iter().any(|name| name == provider)
-                        })
-                    })
-            };
             let mut models = models;
             if let Some(id) = id {
                 let deadline = Instant::now() + MODEL_SETTLE;
-                while !wanted(&models) && Instant::now() < deadline {
+                let mut seen = kept_models(&models, &cfg.providers);
+                let mut changed = Instant::now();
+                while !all_providers_present(&seen, &cfg.providers)
+                    && (seen.is_empty() || changed.elapsed() < MODEL_QUIET)
+                    && Instant::now() < deadline
+                {
                     tokio::time::sleep(POLL_EVERY).await;
                     models = models_reply(&http, "/api/model", DISCOVER_WAIT)
                         .await
                         .map_err(drop)?;
+                    let now = kept_models(&models, &cfg.providers);
+                    if now != seen {
+                        seen = now;
+                        changed = Instant::now();
+                    }
                 }
                 let _ = http
                     .delete(&format!("/api/session/{id}"), &[], REQUEST_WAIT)
