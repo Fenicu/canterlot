@@ -10,7 +10,10 @@ use std::{
     time::Duration,
 };
 
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+};
 
 /// Порт обратного SOCKS5 на облачном раннере: весь его исходящий трафик идёт с аплинка
 /// носителя. Должен совпадать с `EGRESS_SOCKS_PORT` хаба (`cloud_init.rs`).
@@ -294,11 +297,8 @@ impl Ssh {
         let mut command = self.base();
         command
             .args(self.forward_args(socket, target, egress))
-            .arg(self.peer())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        command.spawn()
+            .arg(self.peer());
+        spawn_tunnel(command)
     }
 
     /// Аргументы проброса без адресата. Статическому раннеру — только сокет хаба; облачному
@@ -316,6 +316,50 @@ impl Ssh {
             args.push(format!("127.0.0.1:{port}"));
         }
         args
+    }
+}
+
+/// Сколько последних байт диагностики процесса проброса остаётся для лога.
+const STDERR_TAIL_BYTES: usize = 2048;
+
+/// Запускает долгоживущий процесс проброса и вычитывает его stderr отдельной задачей.
+/// `ssh` пишет туда строку на каждое неудавшееся проброшенное соединение; непрочитанный
+/// канал заполняется за 64 КиБ, клиент встаёт в `write`, и проброс висит при живом процессе.
+fn spawn_tunnel(mut command: Command) -> std::io::Result<tokio::process::Child> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let tail = read_tail(stderr).await;
+            if !tail.is_empty() {
+                tracing::debug!(
+                    kind = "ssh_tunnel_stderr",
+                    tail = %String::from_utf8_lossy(&tail).trim_end(),
+                    "ssh tunnel diagnostics"
+                );
+            }
+        });
+    }
+    Ok(child)
+}
+
+/// Читает поток до конца и возвращает его хвост: память не растёт с объёмом диагностики.
+async fn read_tail(mut reader: impl tokio::io::AsyncRead + Unpin) -> Vec<u8> {
+    let mut tail = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => return tail,
+            Ok(read) => {
+                tail.extend_from_slice(&buffer[..read]);
+                if tail.len() > STDERR_TAIL_BYTES {
+                    tail.drain(..tail.len() - STDERR_TAIL_BYTES);
+                }
+            }
+        }
     }
 }
 
@@ -361,6 +405,34 @@ mod tests {
             "{args:?}"
         );
         assert!(args.iter().any(|arg| arg == "ExitOnForwardFailure=yes"));
+    }
+
+    /// Долгоживущий `ssh -R` пишет строку в stderr на каждое неудавшееся проброшенное
+    /// соединение. Канал вмещает 64 КиБ: если его не читать, `ssh` встаёт в `write`, а
+    /// проброс висит при живом процессе.
+    #[tokio::test]
+    async fn a_tunnel_process_is_never_blocked_by_its_own_diagnostics() {
+        let mut command = Command::new("sh");
+        command.kill_on_drop(true).args([
+            "-c",
+            "i=0; while [ $i -lt 3000 ]; do \
+             echo 'connect_to 192.0.2.1 port 443: failed.' >&2; i=$((i+1)); done",
+        ]);
+        let mut child = spawn_tunnel(command).unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(30), child.wait())
+            .await
+            .expect("the process is stuck writing to an unread stderr pipe")
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[tokio::test]
+    async fn only_the_tail_of_the_diagnostics_is_kept() {
+        let mut text = vec![b'a'; 100 * 1024];
+        text.extend_from_slice(b"the last line");
+        let tail = read_tail(text.as_slice()).await;
+        assert_eq!(tail.len(), STDERR_TAIL_BYTES);
+        assert!(tail.ends_with(b"the last line"));
     }
 
     #[test]
