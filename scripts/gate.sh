@@ -23,6 +23,7 @@
 # завершённого прогона того же HEAD: прошедшие шаги не трогает, упавшие по тестам шаги
 # перезапускает только на этих тестах, упавшие не по тестам — целиком. Каждый тест можно
 # перезапустить не более одного раза на коммит; повторное падение — настоящий провал.
+# Перезапуск с аттестацией принимает только состояние прохода на чистом дереве (tree=clean).
 # Гейт берёт одну аренду gate на весь прогон (scripts/lease.sh). Переменные:
 #   CANTERLOT_TEST_PG_PORT  порт тестовой PostgreSQL (по умолчанию 55441);
 #   CANTERLOT_WORKER_BIN    бинарник воркера для аренды (по умолчанию установка
@@ -388,6 +389,11 @@ if ((attest)) && ! clean_tree; then
     git status --short >&2 || true
     exit 1
 fi
+# Чистота дерева этого прохода уходит в состояние (ключ tree): --no-attest идёт и на грязном
+# дереве, а --rerun-failed берёт прошедшие шаги из состояния как есть. Без метки перезапуск
+# аттестовал бы чистый коммит по шагам, которые проверяли другое содержимое.
+tree_clean=1
+clean_tree || tree_clean=0
 
 printf 'гейт %s: pg=127.0.0.1:%s, логи %s\n' "$short" "$CANTERLOT_TEST_PG_PORT" "$log_dir"
 
@@ -416,6 +422,13 @@ if ((rerun)); then
     [[ "$(state_value "$prev" sha)" == "$sha" ]] \
         || die "--rerun-failed требует состояние для того же коммита $sha, а не для другого"
     clean_tree || die '--rerun-failed требует чистого дерева: рабочая копия грязная'
+    # Состояние без tree=clean — проход на грязном дереве (--no-attest), дерево, ставшее грязным
+    # за проход, или старый формат: его шаги чистый коммит не доказывают. Метка наследуется, чтобы
+    # перезапуск --no-attest её не снял.
+    if [[ "$(state_value "$prev" tree)" != clean ]]; then
+        ((!attest)) || die 'предыдущий прогон шёл на грязном дереве (или его состояние этого не помнит): его шаги не доказывают этот коммит; запустите полный гейт без --rerun-failed'
+        tree_clean=0
+    fi
     prev_started=$(state_value "$prev" started)
     [[ "$(state_value "$prev" seams)" == 1 ]] && seams_active=1
     mapfile -t done_ids < <(state_values "$prev" rerun_done)
@@ -809,6 +822,12 @@ else
 fi
 state_add schema 1
 state_add sha "$sha"
+# Шаги закончились: дерево чистое, только если оно было чистым в начале и осталось таким же
+# на том же HEAD.
+if ((tree_clean)) && { [[ "$(git rev-parse HEAD)" != "$sha" ]] || ! clean_tree; }; then
+    tree_clean=0
+fi
+if ((tree_clean)); then state_add tree clean; else state_add tree dirty; fi
 state_add seams "$seams_active"
 state_add finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 state_add completed 1

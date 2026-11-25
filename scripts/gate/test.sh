@@ -241,6 +241,86 @@ grep -qF $'seams\t1' "$state" || fail 'в состоянии нет отметк
 grep -q 'отчёт о нестабильных тестах' "$out" || fail 'нет отчёта о нестабильных тестах'
 grep -q 'flaky-tests.md' "$out" || fail 'нет напоминания про flaky-tests.md'
 
+# shellcheck disable=SC2016
+fake_check_pass_early='echo "check $GATE_STEP_MODE" >>"$GATE_FAKE_CALLS"; exit 0'
+
+# --- грязное дерево не отмывается перезапуском ---
+# Шаг check «проверяет» рабочую копию: проходит, только когда в src.txt исправленное
+# содержимое. Закоммичено сломанное, поэтому на чистом коммите check обязан упасть.
+# shellcheck disable=SC2016
+fake_check_tree='echo "check ran on: $(cat src.txt)" >>"$GATE_FAKE_CALLS"; grep -qx fixed src.txt'
+tree_env=(
+    env CANTERLOT_NO_LEASE=1 CANTERLOT_GATE_DEPLOY_NEEDED=0
+    CANTERLOT_GATE_STEP_NPM="$fake_npm" CANTERLOT_GATE_STEP_CHECK="$fake_check_tree"
+    CANTERLOT_GATE_STEP_DEPLOY="$fake_deploy" CANTERLOT_GATE_STEP_WEB="$fake_web"
+)
+new_tree_repo() {
+    new_gate_repo "$1"
+    printf 'broken\n' >"$1/src.txt"
+    git -C "$1" add src.txt
+    git -C "$1" commit -qm src
+}
+gd="$tmp/gd"
+new_tree_repo "$gd"
+gdsha=$(git -C "$gd" rev-parse HEAD)
+gdstate="$gd/.superpowers/gate/${gdsha:0:8}/state.tsv"
+gdatt="$gd/.superpowers/gate/$gdsha.ok"
+# Проход --no-attest с незакоммиченной правкой зелёный; состояние помнит, что дерево было грязным.
+printf 'fixed\n' >"$gd/src.txt"
+run 0 "${tree_env[@]}" bash "$gd/scripts/gate.sh" --runner local --no-attest
+grep -qF $'tree\tdirty' "$gdstate" || { cat "$gdstate" >&2; fail 'состояние прохода на грязном дереве не помечено tree=dirty'; }
+# Правку убрали: HEAD тот же, дерево чистое. Перезапуск не вправе аттестовать коммит по шагам,
+# которые прошли на другом содержимом.
+git -C "$gd" checkout -q -- src.txt
+: >"$GATE_FAKE_CALLS"
+run 1 "${tree_env[@]}" bash "$gd/scripts/gate.sh" --runner local --rerun-failed
+grep -q 'грязном дереве' "$out" || { cat "$out" >&2; fail 'нет отказа перезапуску после прохода на грязном дереве'; }
+[[ ! -e "$gdatt" ]] || fail 'перезапуск аттестовал коммит по шагам, пройденным на грязном дереве'
+[[ ! -s "$GATE_FAKE_CALLS" ]] || fail 'после отказа шаги всё же вызывались'
+# Перезапуск без аттестации разрешён, но метку не снимает: следующий перезапуск с аттестацией
+# отказывает так же.
+run 0 "${tree_env[@]}" bash "$gd/scripts/gate.sh" --runner local --rerun-failed --no-attest
+grep -qF $'tree\tdirty' "$gdstate" || fail 'перезапуск --no-attest снял метку грязного дерева'
+run 1 "${tree_env[@]}" bash "$gd/scripts/gate.sh" --runner local --rerun-failed
+[[ ! -e "$gdatt" ]] || fail 'метка грязного дерева отмыта перезапуском --no-attest'
+# Полный гейт на чистом коммите гоняет шаги заново и падает на сломанном содержимом.
+run 1 "${tree_env[@]}" bash "$gd/scripts/gate.sh" --runner local
+grep -qF 'check ran on: broken' "$GATE_FAKE_CALLS" || fail 'полный гейт не проверил закоммиченное содержимое'
+grep -qF $'tree\tclean' "$gdstate" || fail 'проход на чистом дереве не помечен tree=clean'
+[[ ! -e "$gdatt" ]] || fail 'аттестация записана при упавшем check'
+
+# Дерево стало грязным за проход с аттестацией: аттестации нет, и перезапуск после уборки
+# её тоже не даёт.
+# shellcheck disable=SC2016
+fake_check_dirties='echo "check dirties" >>"$GATE_FAKE_CALLS"; : >stray; exit 0'
+ge="$tmp/ge"
+new_gate_repo "$ge"
+gesha=$(git -C "$ge" rev-parse HEAD)
+run 1 "${tree_env[@]}" CANTERLOT_GATE_STEP_CHECK="$fake_check_dirties" bash "$ge/scripts/gate.sh" --runner local
+grep -q 'стала грязной' "$out" || { cat "$out" >&2; fail 'нет отказа в аттестации, когда дерево стало грязным за проход'; }
+grep -qF $'tree\tdirty' "$ge/.superpowers/gate/${gesha:0:8}/state.tsv" || fail 'дерево, ставшее грязным за проход, не помечено tree=dirty'
+rm -f "$ge/stray"
+run 1 "${tree_env[@]}" CANTERLOT_GATE_STEP_CHECK="$fake_check_dirties" bash "$ge/scripts/gate.sh" --runner local --rerun-failed
+[[ ! -e "$ge/.superpowers/gate/$gesha.ok" ]] || fail 'перезапуск аттестовал проход, за который дерево стало грязным'
+
+# Состояние старого формата (без ключа tree) чистоты не доказывает: с аттестацией — отказ.
+gf="$tmp/gf"
+new_gate_repo "$gf"
+gfsha=$(git -C "$gf" rev-parse HEAD)
+run 0 "${tree_env[@]}" CANTERLOT_GATE_STEP_CHECK="$fake_check_pass_early" bash "$gf/scripts/gate.sh" --runner local
+gfstate="$gf/.superpowers/gate/${gfsha:0:8}/state.tsv"
+grep -qF $'tree\tclean' "$gfstate" || fail 'зелёный проход на чистом дереве не помечен tree=clean'
+rm -f "$gf/.superpowers/gate/$gfsha.ok"
+# Состояние чистого прохода перезапуск принимает, как раньше.
+run 0 "${tree_env[@]}" CANTERLOT_GATE_STEP_CHECK="$fake_check_pass_early" bash "$gf/scripts/gate.sh" --runner local --rerun-failed
+[[ -s "$gf/.superpowers/gate/$gfsha.ok" ]] || fail 'перезапуск после чистого прохода не записал аттестацию'
+rm -f "$gf/.superpowers/gate/$gfsha.ok"
+awk -F '\t' '$1!="tree"' "$gfstate" >"$tmp/gf-state-old"
+cp "$tmp/gf-state-old" "$gfstate"
+run 1 "${tree_env[@]}" CANTERLOT_GATE_STEP_CHECK="$fake_check_pass_early" bash "$gf/scripts/gate.sh" --runner local --rerun-failed
+grep -q 'грязном дереве' "$out" || { cat "$out" >&2; fail 'состояние без ключа tree принято перезапуском с аттестацией'; }
+[[ ! -e "$gf/.superpowers/gate/$gfsha.ok" ]] || fail 'перезапуск аттестовал состояние без признака чистого дерева'
+
 # --- идентичности наборов выката ---
 # shellcheck disable=SC2016
 fake_check_pass='echo "check $GATE_STEP_MODE" >>"$GATE_FAKE_CALLS"; exit 0'
