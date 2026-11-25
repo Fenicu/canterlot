@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { untrack } from 'svelte';
   import { getRuntime } from '#lib/app/runtime.js';
   import { errorText } from '#lib/api/errors.js';
   import Button from '#lib/ui/Button.svelte';
@@ -9,7 +9,10 @@
 
   const runtime = getRuntime();
   const store = runtime.snippets;
-  const projectKey = [...runtime.list.items.values()].find((row) => row.workdir)?.workdir ?? '';
+  // В настройках текущей сессии нет: папку проекта выбирает владелец, из папок своих сессий.
+  // Раньше ею молча становилась папка первой строки списка, и заготовка уезжала в чужой проект.
+  const projects = $derived([...new Set([...runtime.list.items.values()].map((row) => row.workdir ?? '').filter(Boolean))].sort());
+  let projectKey = $state('');
 
   let title = $state('');
   let body = $state('');
@@ -19,9 +22,17 @@
   let busy = $state(false);
   let error = $state('');
 
-  onMount(() => {
-    store.setProject(projectKey);
-    void store.load();
+  // Список сессий приходит позже экрана, а выбранная папка может из него уйти.
+  $effect(() => {
+    if (!projects.includes(projectKey)) projectKey = projects[0] ?? '';
+  });
+  // Список ниже показывает заготовки выбранной папки вместе с общими.
+  $effect(() => {
+    const key = projectKey;
+    untrack(() => {
+      store.setProject(key);
+      void store.load();
+    });
   });
 
   const items = $derived(store.ordered());
@@ -98,7 +109,7 @@
 <div class="group">
   <section class="setting">
     <h3>Заготовки сообщений</h3>
-    <p class="note">Текст вставляется в поле ввода одним нажатием и не отправляется сам. Проектные заготовки привязаны к рабочей папке текущей сессии</p>
+    <p class="note">Текст вставляется в поле ввода одним нажатием и не отправляется сам. Проектные заготовки привязаны к рабочей папке: они видны в сессиях этой папки</p>
     {#if error}<p class="error" role="alert">{error}</p>{/if}
 
     <div class="editor">
@@ -107,9 +118,16 @@
       <label>Область
         <select bind:value={scope} disabled={Boolean(editing)} aria-label="Область заготовки">
           <option value="global">Все сессии</option>
-          <option value="project">Проект</option>
+          <option value="project" disabled={projects.length === 0}>Проект</option>
         </select>
       </label>
+      {#if projects.length}
+        <label>Папка проекта
+          <select bind:value={projectKey} aria-label="Папка проекта">
+            {#each projects as folder (folder)}<option value={folder}>{folder}</option>{/each}
+          </select>
+        </label>
+      {/if}
       <div class="editor-actions">
         {#if !title.trim() || !body.trim()}
           <Button disabled reason="Нужны название и текст">{editing ? 'Сохранить правки' : 'Добавить заготовку'}</Button>
@@ -130,7 +148,7 @@
             <div class="row">
               <div class="label">
                 <span>{item.title}</span>
-                <small>{item.scope === 'project' ? 'Проект' : 'Все сессии'}</small>
+                <small>{item.scope === 'project' ? `Проект · ${item.project_key}` : 'Все сессии'}</small>
               </div>
               <IconButton icon="edit" label={`Изменить: ${item.title}`} onclick={() => edit(item)} />
               <IconButton icon="grip" label={`Выше: ${item.title}`} onclick={() => void move(item, -1)} />
@@ -158,7 +176,8 @@
 
 <style>
   .editor { display: grid; gap: var(--s2); margin-top: var(--s3); }
-  .editor label { display: grid; gap: var(--s1); color: var(--secondary); font-size: var(--fs-sm); }
+  /* Длинный путь папки не должен раздвигать форму шире экрана. */
+  .editor label { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s1); color: var(--secondary); font-size: var(--fs-sm); }
   .editor input, .editor select, .editor textarea {
     min-height: var(--target);
     padding: var(--s1) var(--s2);
@@ -173,6 +192,6 @@
   .list { list-style: none; margin: var(--s3) 0 0; padding: 0; display: grid; gap: var(--s1); }
   .row { display: flex; align-items: center; gap: var(--s2); min-height: var(--target); }
   .label { display: grid; flex: 1; min-width: 0; }
-  .label small { color: var(--muted); font-size: var(--fs-xs); }
+  .label small { color: var(--muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
   .error { color: var(--danger); font-size: var(--fs-sm); }
 </style>
