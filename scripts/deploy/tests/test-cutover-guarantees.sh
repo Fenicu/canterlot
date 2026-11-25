@@ -183,6 +183,130 @@ assert_proc_alive "${NEWSUP}" "the new session survived the cutover"
 teardown_case
 case_end
 
+# Кейсы ниже перенесены из test-cutover.sh: та же сверка сессий, в обе стороны от vzdump,
+# стопа и старта воркера.
+# --- B. супервизор без строки хаба появился после preflight: сверка после vzdump
+# (как ворота 1) отказывает до стопа воркера. Новая полноценная сессия со строкой
+# running допустима и входит в снимок (кейс выше).
+case_begin "a new supervisor without a hub row after the preflight aborts before the worker stop"
+setup_cutover supset
+run_cutover_bg
+wait_for_log "${FAKE_ROOT}/cutover.log" "preflight PASS" || case_fail "no preflight marker"
+SUPX_DIR="${WORKER_DATA}/executions/ffffffff-ffff-4fff-8fff-ffffffffffff"
+mkdir -p "${SUPX_DIR}"
+setsid bash -c "exec -a '${WORKER_RELEASES}/${SHA_PREV}/bin/canterlot-worker' '${WORKER_RELEASES}/${SHA_PREV}/bin/canterlot-worker' supervise --exec-dir '${SUPX_DIR}'" >/dev/null 2>&1 <&- &
+rc=0; wait "${CUTOVER_PID}" || rc=$?
+[ "${rc}" != "0" ] && case_ok "exit ${rc} on a supervisor without a hub row" || case_fail "exit 0 with a leaked supervisor"
+assert_contains "${FAKE_ROOT}/cutover.log" "supervisor runs for execution ffffffff-ffff-4fff-8fff-ffffffffffff with no live hub row" "the supervisor is named"
+worker_stopped_ever && case_fail "worker was stopped" || case_ok "worker never stopped"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub flipped"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" fail_codes)" "session_inventory" "result file: code session_inventory"
+assert_proc_alive "${SUP1}" "session 1 alive"
+teardown_case
+case_end
+
+# --- C. сессия умерла после стопа воркера ---
+case_begin "session gone after worker stop"
+setup_cutover stoprace
+# Реальная задержка stop: CLI успевает умереть до сверки тиков после остановки.
+export FAKE_SYSTEMCTL_STOP_DELAY=2
+run_cutover_bg
+wait_for_log "${FAKE_ROOT}/cutover.log" "stopping worker" || case_fail "no stop marker"
+CLI1="$(ps -o pid= --ppid "${SUP1}" 2>/dev/null | tr -s ' ' '\n' | grep -v '^$' | head -1)"
+[ -n "${CLI1}" ] && kill "${CLI1}" || case_fail "no CLI to kill"
+rc=0; wait "${CUTOVER_PID}" || rc=$?
+unset FAKE_SYSTEMCTL_STOP_DELAY
+[ "${rc}" != "0" ] && case_ok "exit nonzero" || case_fail "exit 0 despite gone session"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
+worker_is "${SHA_PREV}" && case_ok "worker still prev" || case_fail "worker moved"
+restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
+pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran after rollback"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
+    && case_ok "worker restarted" || case_fail "worker not restarted"
+assert_proc_alive "${SUP1}" "supervisor alive"
+assert_proc_alive "${SUP2}" "session 2 alive"
+teardown_case
+case_end
+
+# --- O2. записанная сессия пропала во время vzdump: отказ до стопа воркера ---
+case_begin "a recorded session changed during vzdump aborts before any destructive step"
+setup_cutover vzdump-session-gone
+CLI1="$(cli_pid_of "${EXEC1}" "${SUP1}")"
+cat >"${FAKE_ROOT}/kill-cli.sh" <<HOOK
+#!/usr/bin/env bash
+kill ${CLI1} 2>/dev/null || true
+HOOK
+export FAKE_SSH_AFTER_CMD="vzdump ${HUB_CTID}" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/kill-cli.sh"
+: >"${FAKE_ROOT}/state/calls.log"
+if run_cutover; then case_fail "exit 0 although a session changed"; else case_ok "exit nonzero"; fi
+unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK
+grep -q '^vzdump ' "${FAKE_ROOT}/state/calls.log" && case_ok "vzdump ran first" || case_fail "vzdump never ran"
+worker_stopped_ever && case_fail "worker was stopped" || case_ok "worker never stopped"
+pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
+assert_contains "${FAKE_ROOT}/cutover.log" "recorded session process gone (after vzdump)" "the change is named"
+assert_contains "${FAKE_ROOT}/cutover.log" "nothing was stopped or flipped" "nothing to recover"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
+    && case_ok "worker still active" || case_fail "worker not active"
+assert_proc_alive "${SUP2}" "session 2 alive"
+teardown_case
+case_end
+
+# --- O2h. запись пропала после старта воркера: засыпание хаба — ожидаемый уход, иначе жёстко ---
+for flagged in yes no; do
+    case_begin "a recorded session gone after the worker start (hub hibernate flag: ${flagged})"
+    setup_cutover "hibernate-after-start-${flagged}"
+    CLI1="$(cli_pid_of "${EXEC1}" "${SUP1}")"
+    cat >"${FAKE_ROOT}/hibernate-hook.sh" <<HOOK
+#!/usr/bin/env bash
+# Как настоящее засыпание: CLI, mcp-relay и супервизор уходят, строка хаба перестаёт быть running.
+grep -vx "${EXEC1}" "${FAKE_ROOT}/state/live-ids" >"${FAKE_ROOT}/state/live-ids.new" || true
+mv "${FAKE_ROOT}/state/live-ids.new" "${FAKE_ROOT}/state/live-ids"
+pkill -P ${SUP1} 2>/dev/null || true
+kill ${SUP1} 2>/dev/null || true
+for _ in \$(seq 1 50); do kill -0 ${SUP1} 2>/dev/null || kill -0 ${CLI1} 2>/dev/null || exit 0; command sleep 0.05; done
+HOOK
+    [ "${flagged}" = "yes" ] && printf '%s\n' "${EXEC1}" >"${FAKE_ROOT}/state/hibernated-ids"
+    export FAKE_WORKER_START_HOOK="${FAKE_ROOT}/hibernate-hook.sh"
+    if run_cutover; then
+        [ "${flagged}" = "yes" ] && case_ok "exit 0" || case_fail "exit 0 although a session vanished without the flag"
+    else
+        [ "${flagged}" = "yes" ] && { case_fail "exit nonzero for a hibernated session"; tail -5 "${FAKE_ROOT}/cutover.log"; } || case_ok "exit nonzero"
+    fi
+    unset FAKE_WORKER_START_HOOK
+    if [ "${flagged}" = "yes" ]; then
+        assert_contains "${FAKE_ROOT}/cutover.log" "exec ${EXEC1}: hibernated by the hub during the run (expected)" "the departure is logged as expected"
+        assert_not_contains "${FAKE_ROOT}/cutover.log" "HARD-FAIL" "no hard failure"
+        assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" hard_failures)" "0" "result file: hard_failures=0"
+    else
+        assert_contains "${FAKE_ROOT}/cutover.log" "HARD-FAIL: a recorded session process disappeared or changed its start tick after the worker start" "hard failure as before"
+    fi
+    teardown_case
+    case_end
+done
+
+# --- O3. новая сессия стартует во время vzdump (строка starting): отказ до стопа ---
+case_begin "a session starting during vzdump aborts before any destructive step"
+setup_cutover vzdump-session-starting
+NEWID="$(new_exec_id)"
+cat >"${FAKE_ROOT}/start-session.sh" <<HOOK
+#!/usr/bin/env bash
+mkdir -p "${WORKER_DATA}/executions/${NEWID}"
+printf '%s starting\n' "${NEWID}" >>"${FAKE_ROOT}/state/exec-states"
+setsid bash -c "exec -a '${WORKER_RELEASES}/${SHA_PREV}/bin/canterlot-worker' '${WORKER_RELEASES}/${SHA_PREV}/bin/canterlot-worker' supervise --exec-dir '${WORKER_DATA}/executions/${NEWID}'" >/dev/null 2>&1 <&- &
+sleep 0.3
+HOOK
+export FAKE_SSH_AFTER_CMD="vzdump ${HUB_CTID}" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/start-session.sh"
+: >"${FAKE_ROOT}/state/calls.log"
+if run_cutover; then case_fail "exit 0 although a session was starting"; else case_ok "exit nonzero"; fi
+unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK
+worker_stopped_ever && case_fail "worker was stopped" || case_ok "worker never stopped"
+pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
+assert_contains "${FAKE_ROOT}/cutover.log" "session ${NEWID} is starting after vzdump" "the starting session is named"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
+teardown_case
+case_end
+
 # --- блок STOP строится по фактам: до flip хаба, хаб переключён, новый воркер жив ---
 stop_block_of() { result_of "$(R_FILE)" stop_block; }
 
