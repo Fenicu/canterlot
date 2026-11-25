@@ -434,6 +434,21 @@ pub async fn revoke_all_except(
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut tx = crate::db::begin(pool).await?;
     serialize_with_delivery(&mut tx).await?;
+    let revoked = revoke_all_except_in_tx(&mut tx, owner_id, keep, reason).await?;
+    tx.commit().await?;
+    if !revoked.is_empty() {
+        super::notify_changed(pool, "session_revoked").await;
+    }
+    Ok(revoked)
+}
+
+/// Вызывающий уже взял `serialize_with_delivery`.
+async fn revoke_all_except_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    keep: Option<Uuid>,
+    reason: RevokeReason,
+) -> Result<Vec<Uuid>, sqlx::Error> {
     let revoked: Vec<Uuid> = sqlx::query_scalar(
         "update owner_sessions set revoked_at=now(),revoke_reason=$3
          where owner_id=$1 and revoked_at is null and id is distinct from $2
@@ -442,9 +457,43 @@ pub async fn revoke_all_except(
     .bind(owner_id)
     .bind(keep)
     .bind(reason.as_str())
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
-    forget_devices_of(&mut tx, reason, &revoked).await?;
+    forget_devices_of(conn, reason, &revoked).await?;
+    Ok(revoked)
+}
+
+/// Смена пароля одной транзакцией: новый хеш, отзыв остальных сеансов (`revoke`), забытые
+/// известные устройства и свежесть сеанса `keep`. Сбой на любом шаге откатывает всё: по
+/// отдельности запись пароля прошла бы, а отзыв нет, и владелец, менявший пароль из-за
+/// чужого сеанса, остался бы с новым паролем при живом чужом сеансе и с отказом на
+/// повтор по старому. Возвращает отозванные сеансы.
+pub async fn change_password(
+    pool: &PgPool,
+    owner_id: Uuid,
+    phc: &str,
+    keep: Option<Uuid>,
+    revoke: Option<RevokeReason>,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut tx = crate::db::begin(pool).await?;
+    serialize_with_delivery(&mut tx).await?;
+    super::password::store(&mut tx, owner_id, phc).await?;
+    let revoked = match revoke {
+        Some(reason) => revoke_all_except_in_tx(&mut tx, owner_id, keep, reason).await?,
+        None => Vec::new(),
+    };
+    sqlx::query("delete from owner_devices where owner_id=$1")
+        .bind(owner_id)
+        .execute(&mut *tx)
+        .await?;
+    if let Some(keep) = keep {
+        sqlx::query(
+            "update owner_sessions set authenticated_at=now() where id=$1 and revoked_at is null",
+        )
+        .bind(keep)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     if !revoked.is_empty() {
         super::notify_changed(pool, "session_revoked").await;

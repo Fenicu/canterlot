@@ -427,6 +427,82 @@ async fn auth_password_wrong_current_password_counts_as_failure() {
     assert_eq!(me.status, 200);
 }
 
+/// Смена пароля — одна транзакция. База отказала на отзыве остальных сеансов: пароль
+/// остаётся прежним, а не «новый пароль при живых чужих сеансах», и повтор с тем же
+/// `current_password` проходит.
+#[tokio::test]
+async fn auth_password_change_is_all_or_nothing() {
+    let pool = canterlot_hub::testkit::db().await;
+    let hub = AuthHub::new(pool).await;
+    hub.set_password(PASSWORD).await;
+    let (other, _) = hub
+        .session(canterlot_hub::owner_auth::Method::Password, None)
+        .await;
+    let owner = hub.owner();
+    let change = || {
+        let owner = owner.clone();
+        async move {
+            owner
+                .send(
+                    Method::PUT,
+                    "/api/v1/auth/password",
+                    None,
+                    Some(json!({"current_password": PASSWORD,
+                                "new_password": "a brand new password"})),
+                )
+                .await
+        }
+    };
+    let phc = |pool: PgPool, owner_id| async move {
+        sqlx::query_scalar::<_, String>("select phc from owner_passwords where owner_id=$1")
+            .bind(owner_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = phc(hub.pool.clone(), hub.owner_id()).await;
+    // Отзыв сеансов сменой пароля падает в базе, запись пароля — нет.
+    sqlx::raw_sql(
+        "create function refuse_password_revoke() returns trigger language plpgsql as $$
+         begin
+           if new.revoke_reason = 'password_changed' then
+             raise exception 'revoke refused by the test';
+           end if;
+           return new;
+         end $$;
+         create trigger refuse_password_revoke before update on owner_sessions
+           for each row execute function refuse_password_revoke();",
+    )
+    .execute(&hub.pool)
+    .await
+    .unwrap();
+    let failed = change().await;
+    assert_eq!(failed.status, 500, "{:?}", failed.body);
+    assert_eq!(
+        phc(hub.pool.clone(), hub.owner_id()).await,
+        before,
+        "the password is not changed when the other sessions were not revoked"
+    );
+    assert_eq!(hub.revoke_reason(other).await, None);
+
+    sqlx::raw_sql("drop trigger refuse_password_revoke on owner_sessions")
+        .execute(&hub.pool)
+        .await
+        .unwrap();
+    let done = change().await;
+    assert_eq!(done.status, 200, "{:?}", done.body);
+    assert_ne!(phc(hub.pool.clone(), hub.owner_id()).await, before);
+    assert_eq!(
+        hub.revoke_reason(other).await.as_deref(),
+        Some("password_changed")
+    );
+    let me = owner.send(Method::GET, "/api/v1/me", None, None).await;
+    assert_eq!(
+        me.status, 200,
+        "the session that changed the password stays"
+    );
+}
+
 #[tokio::test]
 async fn auth_password_client_ip_needs_a_matched_secret_and_one_valid_header() {
     let pool = canterlot_hub::testkit::db().await;

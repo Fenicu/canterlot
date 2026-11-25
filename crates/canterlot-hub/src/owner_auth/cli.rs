@@ -105,20 +105,19 @@ pub async fn set_password(
         return Err("password_length".into());
     }
     let phc = password::Passwords::default().hash(new_password).await?;
-    let mut conn = pool.acquire().await.map_err(|_| "db_error")?;
-    password::store(&mut conn, owner_id, &phc)
-        .await
-        .map_err(|_| "db_error")?;
-    drop(conn);
-    sessions::forget_all_devices(pool, owner_id)
-        .await
-        .map_err(|_| "db_error")?;
+    // Одной транзакцией: при сбое не остаётся нового пароля с живыми прежними сеансами.
+    let revoked = sessions::change_password(
+        pool,
+        owner_id,
+        &phc,
+        None,
+        revoke.then_some(RevokeReason::Server),
+    )
+    .await
+    .map_err(|_| "db_error")?;
     if !revoke {
         return Ok("password_set".into());
     }
-    let revoked = sessions::revoke_all_except(pool, owner_id, None, RevokeReason::Server)
-        .await
-        .map_err(|_| "db_error")?;
     Ok(format!("password_set revoked={}", revoked.len()))
 }
 

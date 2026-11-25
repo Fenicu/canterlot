@@ -610,18 +610,14 @@ async fn set_password(
         .await
         .map_err(|_| ApiError::new(ErrorCode::Internal))?;
     drop(_permit);
-    let mut conn = state.pool.acquire().await?;
-    password::store(&mut conn, owner.owner_id, &phc).await?;
-    drop(conn);
-    let revoked = sessions::revoke_all_except(
+    let revoked = sessions::change_password(
         &state.pool,
         owner.owner_id,
+        &phc,
         Some(session.id),
-        RevokeReason::PasswordChanged,
+        Some(RevokeReason::PasswordChanged),
     )
     .await?;
-    sessions::forget_all_devices(&state.pool, owner.owner_id).await?;
-    sessions::mark_fresh(&state.pool, session.id).await?;
     tracing::info!(
         kind = "password_changed",
         revoked = revoked.len(),

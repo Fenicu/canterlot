@@ -38,7 +38,7 @@
 | `POST /sessions/revoke-others` | свежий | завершить все остальные сеансы |
 | `POST /logout` | да | завершить текущий сеанс, стереть cookie |
 | `PATCH /settings` | да | `{idle_timeout_days}`: 7, 30, 90, 180 или 365 |
-| `PUT /password` | да | `{current_password?, new_password}`: смена несёт текущий пароль, первый пароль требует свежего сеанса; успех завершает остальные сеансы |
+| `PUT /password` | да | `{current_password?, new_password}`: смена несёт текущий пароль, первый пароль требует свежего сеанса; успех завершает остальные сеансы. Новый пароль, отзыв сеансов, забытые устройства и свежесть текущего сеанса фиксируются одной транзакцией: при сбое пароль остаётся прежним |
 | `POST /reauth/password` | да | `{password}` → сеанс свеж 10 минут; неверный пароль — `403 wrong_password` |
 | `POST /reauth/passkey/start` | да | `{}` → `{challenge_id, options}` |
 | `POST /reauth/passkey/finish` | да | `{challenge_id, credential}` → сеанс свеж 10 минут; неудача — `403 passkey_rejected` |
