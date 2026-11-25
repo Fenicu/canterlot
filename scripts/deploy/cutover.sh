@@ -1801,11 +1801,17 @@ if [ -n "${PWA_FAIL}" ]; then
         log "the web state belongs to someone else: no flip back, no env restore, no recreate"
     else
         WEB_SHA_EFF="${PREV_WEB_SHA}"
+        # Возврат не подтверждён (flip назад упал, после нечитаемого flip ссылка ведёт на третий
+        # релиз или не читается): прежний env поверх неизвестного билда и пересоздание Caddy сломали
+        # бы чужое состояние. Тогда ни env, ни recreate, а в результат идёт фактическая ссылка.
+        WEB_RETURN_UNPROVEN=0
         if [ "${WEB_FLIPPED_BY_US}" = "1" ]; then
             if run_write "web build flip back" web_locked 'cd "$1" && ln -s "releases/$2" build.new && mv -T build.new build' "${WEB_SITES_BASE}" "${PREV_WEB_SHA}"; then
                 log "PWA build flipped back to ${PREV_WEB_SHA}"
             else
-                soft "PWA flip-back failed"
+                WEB_RETURN_UNPROVEN=1
+                WEB_SHA_EFF="$(deployed_sha web 2>/dev/null)" || WEB_SHA_EFF="unknown"
+                soft "PWA flip-back failed (build link now ${WEB_SHA_EFF}): env and Caddy left as they are, needs the owner"
             fi
         elif [ "${WEB_FLIPPED_BY_US}" = "unknown" ]; then
             # Ссылку после flip прочитать не удалось. Под замком хоста: указывает на наш релиз —
@@ -1816,12 +1822,17 @@ if [ -n "${PWA_FAIL}" ]; then
             if [ "${WEB_BACK}" = "releases/${PREV_WEB_SHA}" ] || is_rehearse; then
                 log "PWA build is on ${PREV_WEB_SHA} (flipped back if the unreadable flip had happened)"
             else
-                soft "PWA build link is ${WEB_BACK:-unreadable} after an unreadable flip: it may serve ${SHA} with the previous env, needs the owner"
+                WEB_RETURN_UNPROVEN=1
+                WEB_SHA_EFF="${WEB_BACK##*/}"
+                [ -n "${WEB_SHA_EFF}" ] || WEB_SHA_EFF="unknown"
+                soft "PWA build link is ${WEB_BACK:-unreadable} after an unreadable flip (not ours, not ${PREV_WEB_SHA}): env and Caddy left as they are, needs the owner"
             fi
         else
             log "the web build was not flipped by this run: no flip back"
         fi
-        if [ "${ENV_SWAPPED}" = "1" ] && ssh_web "test -f '${WEB_ENV}.${PREV_WEB_SHA}'"; then
+        if [ "${WEB_RETURN_UNPROVEN}" = "1" ]; then
+            log "the PWA return is not confirmed: no env restore and no Caddy recreate (web build ${WEB_SHA_EFF})"
+        elif [ "${ENV_SWAPPED}" = "1" ] && ssh_web "test -f '${WEB_ENV}.${PREV_WEB_SHA}'"; then
             run_write "restore env + caddy recreate" web_locked 'cp "$1" "$2" && cd "$3" && docker compose up -d "$4"' \
                 "${WEB_ENV}.${PREV_WEB_SHA}" "${WEB_ENV}" "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
                 || soft "PWA env restore failed"

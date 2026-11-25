@@ -503,6 +503,32 @@ hub_is "${SHA_NEW}" && worker_is "${SHA_NEW}" && case_ok "hub and worker stay on
 teardown_case
 case_end
 
+# --- J1c. ссылка нечитаема дважды, а повтор под замком находит третий релиз ---
+# Это чужое состояние: прежний env поверх чужого билда и пересоздание Caddy сломали бы его. Ни env,
+# ни recreate не трогаются, фактическая ссылка идёт в результат.
+case_begin "PWA flip read-back lost twice and a third release found: no env restore, no recreate"
+setup_cutover pwathird
+SHA_THIRD=cccccccccccc
+deploy_release web "${SHA_THIRD}"
+ln -sfn "releases/${SHA_PREV}" "${WEB_BUILD_LINK}"
+drop_web_reads 2
+cat >>"${FAKE_ROOT}/drop-hook.sh" <<EOF
+ln -sfn "releases/${SHA_THIRD}" "${WEB_BUILD_LINK}"
+EOF
+CADDY_ID_SETUP="$(cat "${FAKE_ROOT}/state/caddy-id" 2>/dev/null || echo caddy-id-0)"
+# Чужой билд verify видит как жёсткую ошибку после живого воркера: остановка с докладом, не откат.
+if run_cutover; then case_fail "exit 0 over a foreign PWA state"; else case_ok "exit nonzero"; fi
+undrop_web_reads
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "stop_and_report" "result file: stop and report"
+assert_contains "${FAKE_ROOT}/cutover.log" "the PWA return is not confirmed: no env restore and no Caddy recreate" "the skipped restore is named"
+web_is "${SHA_THIRD}" && case_ok "the third release keeps the build link" || case_fail "the build link moved"
+[ "$(cat "${WEB_ENV}")" = "$(cat "${WEB_ENV}.${SHA_NEW}")" ] && case_ok "the env is not replaced over a foreign build" || case_fail "the previous env was restored over a foreign build"
+assert_eq "$(cat "${FAKE_ROOT}/state/caddy-id" 2>/dev/null || echo caddy-id-0)" "${CADDY_ID_SETUP}" "Caddy was not recreated"
+assert_contains "${FAKE_ROOT}/cutover.log" "releases/${SHA_THIRD}" "the actual link is named"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" web_release)" "${SHA_THIRD}" "result file: the actual web release"
+teardown_case
+case_end
+
 # --- J2. dist csp.txt пропал: отказ ДО любого flip, ничего не тронуто ---
 case_begin "missing dist csp refuses before any flip"
 setup_cutover pwacspmissing
