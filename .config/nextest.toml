@@ -59,7 +59,7 @@ retries = 2
 # зелёный. Вероятно, фоновый пересчёт хаба под нагрузкой сдвигает окно наблюдения между
 # выборками теста; разобрать по порядку тиков проектора, а не по таймингам.
 [[profile.default.overrides]]
-filter = 'package(canterlot-hub) & binary(it) & test(=hung_rescue::an_old_card_cannot_stop_a_later_turn)'
+filter = 'package(canterlot-hub) & binary(/^it_/) & test(=hung_rescue::an_old_card_cannot_stop_a_later_turn)'
 retries = 2
 
 
