@@ -2257,25 +2257,53 @@ async fn live_smoke() {
             .unwrap(),
         adapter::InterruptOutcome::Acknowledged
     ));
+    // С 94abc335 «Прервать» — управляющий запрос interrupt: ход закрывается
+    // как прерванный, процесс CLI остаётся жив (SIGINT только запасной путь).
     loop {
-        if let AdapterEvent::ProcessExited { code, signal } =
-            tokio::time::timeout(Duration::from_secs(60), f.adapter.next_event())
-                .await
-                .unwrap()
+        match tokio::time::timeout(Duration::from_secs(60), f.adapter.next_event())
+            .await
+            .expect("interrupted turn finishes")
         {
-            assert_eq!(
-                canterlot_worker::supervisor::exit_outcome(code, signal, true),
-                ("stopped", "user_stop")
-            );
-            break;
+            AdapterEvent::RunFinished {
+                input_command_id,
+                end,
+                ..
+            } if input_command_id == input.command_id => {
+                assert!(
+                    matches!(end, adapter::RunEnd::Interrupted),
+                    "interrupted turn must end as interrupted"
+                );
+                break;
+            }
+            AdapterEvent::ProcessExited { code, signal } => {
+                panic!("interrupt must keep the CLI alive: code={code:?} signal={signal:?}")
+            }
+            _ => {}
         }
     }
+    let mut next = tx(Uuid::now_v7());
+    next.text = "Reply with exactly STILL-ALIVE, without tools.".into();
+    let events = smoke_turn(&mut f, next).await;
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            AdapterEvent::ProcessExited { .. } | AdapterEvent::CliRestarted { .. }
+        )),
+        "next input after an interrupt goes to the same process"
+    );
+    assert!(
+        events.iter().any(
+            |e| matches!(e,AdapterEvent::BlockFinal {text,..} if text.contains("STILL-ALIVE"))
+        )
+    );
     f.close().await;
     assert!(
         !f.dir.path().join("canterlot-interrupt-smoke.txt").exists(),
         "interrupted command must not finish"
     );
-    eprintln!("CONFIRMED: SIGINT acknowledges aborted_tools and exits as user_stop");
+    eprintln!(
+        "CONFIRMED: interrupt control request acknowledged, turn ends interrupted, the same CLI takes the next input"
+    );
 
     f.adapter = Box::new(
         adapter::claude_code::ClaudeCodeAdapter::new(
