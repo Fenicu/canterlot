@@ -38,6 +38,18 @@ if [ -n "${FAKE_FAIL_CMD:-}" ] && [[ "${cmd}" == *"${FAKE_FAIL_CMD}"* ]]; then
     echo "fake-ssh: injected failure for '${FAKE_FAIL_CMD}'" >&2
     exit 1
 fi
+# Обрыв транспорта ДО удалённой команды, отсчитанное число раз: файл FAKE_SSH_DROP_FILE хранит,
+# сколько ещё команд с FAKE_SSH_DROP_MATCH не дойдут до хоста (клиент получает 255). Файл кладёт
+# сценарий, обычно крючком «после команды»: так обрывается ровно следующее чтение.
+if [ -n "${FAKE_SSH_DROP_MATCH:-}" ] && [ -n "${FAKE_SSH_DROP_FILE:-}" ] && [ -f "${FAKE_SSH_DROP_FILE}" ] \
+    && [[ "${cmd}" == *"${FAKE_SSH_DROP_MATCH}"* ]]; then
+    left="$(cat "${FAKE_SSH_DROP_FILE}")"
+    if [ "${left}" -gt 0 ] 2>/dev/null; then
+        printf '%s\n' "$((left - 1))" >"${FAKE_SSH_DROP_FILE}"
+        echo "fake-ssh: connection lost before the command" >&2
+        exit 255
+    fi
+fi
 export FAKE_HOST="${host}"
 export PATH="${FAKE_ROOT}/fake-bin:${PATH}"
 # Обрыв транспорта при живой удалённой команде: клиент получает 255 сразу, а

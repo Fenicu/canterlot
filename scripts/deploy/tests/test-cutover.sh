@@ -451,6 +451,51 @@ assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
 
+# --- J1b. flip PWA прошёл, а чтение ссылки после него оборвалось по ssh ---
+# Раньше нечитаемая ссылка читалась как «flip не было»: откат возвращал прежний env и пересоздавал
+# Caddy, но ссылку назад не переводил — новый билд отдавался со старым CSP, и PWA не открывалась.
+# drop_web_reads N: следующие N чтений ссылки билда после flip не доходят до хоста.
+drop_web_reads() {
+    cat >"${FAKE_ROOT}/drop-hook.sh" <<EOF
+#!/usr/bin/env bash
+[ ! -e "${FAKE_ROOT}/state/drop-armed" ] || exit 0
+: >"${FAKE_ROOT}/state/drop-armed"
+printf '%s\n' "$1" >"${FAKE_ROOT}/state/drop-left"
+EOF
+    export FAKE_SSH_AFTER_CMD="mv -T build.new build && readlink" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/drop-hook.sh"
+    export FAKE_SSH_DROP_MATCH="${WEB_BUILD_LINK}" FAKE_SSH_DROP_FILE="${FAKE_ROOT}/state/drop-left"
+}
+undrop_web_reads() { unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK FAKE_SSH_DROP_MATCH FAKE_SSH_DROP_FILE; }
+
+case_begin "PWA flip read-back lost once: the link is re-read under the host lock and the run goes on"
+setup_cutover pwareadonce
+drop_web_reads 1
+if run_cutover; then case_ok "exit 0"; else case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
+undrop_web_reads
+assert_eq "$(cat "${FAKE_ROOT}/state/drop-left" 2>/dev/null)" "0" "exactly one read of the build link was dropped"
+assert_contains "${FAKE_ROOT}/cutover.log" "re-read under the host lock" "the unreadable link was re-read under the lock"
+web_is "${SHA_NEW}" && case_ok "web stays on the new build" || case_fail "web not on the new build"
+assert_not_contains "${FAKE_ROOT}/cutover.log" "PWA failure (soft" "a lost read is not a PWA failure"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" web_release)" "${SHA_NEW}" "result file: PWA on the new release"
+[ "$(cat "${WEB_ENV}")" = "$(cat "${WEB_ENV}.${SHA_NEW}")" ] && case_ok "the new env stays with the new build" || case_fail "env and build disagree"
+teardown_case
+case_end
+
+case_begin "PWA flip read-back lost twice: the state is unknown and the build is flipped back with the env"
+setup_cutover pwareadtwice
+drop_web_reads 2
+if run_cutover; then case_ok "exit 0 (PWA failures are soft)"; else case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
+undrop_web_reads
+assert_eq "$(cat "${FAKE_ROOT}/state/drop-left" 2>/dev/null)" "0" "both reads of the build link were dropped"
+assert_contains "${FAKE_ROOT}/cutover.log" "the flip may have happened" "the unknown state is named"
+web_is "${SHA_PREV}" && case_ok "the build link is back on the previous release" || case_fail "new build left with the old env"
+[ "$(cat "${WEB_ENV}")" = "$(cat "${WEB_ENV}.${SHA_PREV}")" ] && case_ok "env restored to prev" || case_fail "env not restored"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" web_release)" "${SHA_PREV}" "result file: PWA stayed on the previous release"
+assert_contains "${FAKE_ROOT}/cutover.log" "verify PASS" "verify passed after the PWA fallback"
+hub_is "${SHA_NEW}" && worker_is "${SHA_NEW}" && case_ok "hub and worker stay on the new release" || case_fail "hub or worker moved"
+teardown_case
+case_end
+
 # --- J2. dist csp.txt пропал: отказ ДО любого flip, ничего не тронуто ---
 case_begin "missing dist csp refuses before any flip"
 setup_cutover pwacspmissing

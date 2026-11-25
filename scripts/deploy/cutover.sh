@@ -1752,8 +1752,24 @@ CADDY_ID_BEFORE="$(ssh_web "docker inspect -f '{{.Id}}' $(shq "${WEB_CONTAINER}"
 if [ -z "${PWA_FAIL}" ]; then
     run_write "web build flip" web_locked "${WEB_FLIP_FWD_SCRIPT}" \
         "${WEB_SITES_BASE}" "${SHA}" "${WEB_BUILD_LINK}" "${PREV_WEB_SHA}" >/dev/null || true
-    WEB_LINK_AFTER="$(ssh_web "readlink '${WEB_BUILD_LINK}'" 2>/dev/null)" || WEB_LINK_AFTER=""
-    if [ "${WEB_LINK_AFTER}" = "releases/${WEB_EXPECT}" ]; then WEB_FLIPPED_BY_US=1; else PWA_FAIL="web build flip failed"; fi
+    # Вывод flip отброшен, успех решает отдельное чтение ссылки. Оборванное чтение — не «flip не
+    # было»: flip мог пройти. Тогда ссылка перечитывается под замком хоста (дождётся ещё идущего
+    # flip), как для хаба в on_end; не прочиталась и так — состояние неизвестно, и откат ниже
+    # возвращает прежний билд, если ссылка указывает на наш релиз.
+    if ! WEB_LINK_AFTER="$(ssh_web "readlink '${WEB_BUILD_LINK}'" 2>/dev/null)"; then
+        if WEB_LINK_AFTER="$(web_locked 'readlink "$1"' "${WEB_BUILD_LINK}" 2>/dev/null)"; then # lint: read-only (lock-wait readback)
+            log "the web build link could not be read after the flip; re-read under the host lock: ${WEB_LINK_AFTER}"
+        else
+            WEB_LINK_AFTER="UNKNOWN"
+        fi
+    fi
+    case "${WEB_LINK_AFTER}" in
+        "releases/${WEB_EXPECT}") WEB_FLIPPED_BY_US=1 ;;
+        UNKNOWN)
+            WEB_FLIPPED_BY_US="unknown"
+            PWA_FAIL="web build link unreadable after the flip (the flip may have happened)" ;;
+        *) PWA_FAIL="web build flip failed" ;;
+    esac
 fi
 if [ -z "${PWA_FAIL}" ]; then
     run_write "caddy recreate" web_locked 'cd "$1" && docker compose up -d "$2"' "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
@@ -1791,6 +1807,17 @@ if [ -n "${PWA_FAIL}" ]; then
             else
                 soft "PWA flip-back failed"
             fi
+        elif [ "${WEB_FLIPPED_BY_US}" = "unknown" ]; then
+            # Ссылку после flip прочитать не удалось. Под замком хоста: указывает на наш релиз —
+            # возвращаем прежний; уже прежний — flip не состоялся; иное — чужое, не трогаем.
+            WEB_BACK="$(run_write "web build flip back (link was unreadable)" web_locked \
+                'cd "$1" && if [ "$(readlink build)" = "releases/$3" ]; then ln -s "releases/$2" build.new && mv -T build.new build; fi && readlink build' \
+                "${WEB_SITES_BASE}" "${PREV_WEB_SHA}" "${SHA}")" || WEB_BACK=""
+            if [ "${WEB_BACK}" = "releases/${PREV_WEB_SHA}" ] || is_rehearse; then
+                log "PWA build is on ${PREV_WEB_SHA} (flipped back if the unreadable flip had happened)"
+            else
+                soft "PWA build link is ${WEB_BACK:-unreadable} after an unreadable flip: it may serve ${SHA} with the previous env, needs the owner"
+            fi
         else
             log "the web build was not flipped by this run: no flip back"
         fi
@@ -1798,7 +1825,7 @@ if [ -n "${PWA_FAIL}" ]; then
             run_write "restore env + caddy recreate" web_locked 'cp "$1" "$2" && cd "$3" && docker compose up -d "$4"' \
                 "${WEB_ENV}.${PREV_WEB_SHA}" "${WEB_ENV}" "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
                 || soft "PWA env restore failed"
-        elif [ "${WEB_FLIPPED_BY_US}" = "1" ]; then
+        elif [ "${WEB_FLIPPED_BY_US}" != "0" ]; then
             run_write "caddy recreate after flip-back" web_locked 'cd "$1" && docker compose up -d "$2"' "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
                 || soft "PWA recreate after flip-back failed"
         fi
