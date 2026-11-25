@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onDestroy } from 'svelte';
 	import { errorText } from '#lib/api/errors.js';
 	import { resolve } from '$app/paths';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
@@ -118,6 +119,13 @@
 
 	let menuOpen = $state(false);
 	const delegated = $derived(hasChildren || pendingItems(chat.spawnQueue).length > 0 || chat.timeline.entries.some((entry) => entry.kind === 'block' && isSubagentCall(entry.block)));
+	// Есть «Делегирование» — есть что показать в панели: на широком столе она открывается сама.
+	$effect.pre(() => {
+		pane.delegated = delegated;
+	});
+	onDestroy(() => {
+		pane.delegated = false;
+	});
 	const alarmCount = $derived(
 		chat.alarms.filter((alarm) => alarm.state === 'armed' || alarm.state === 'failed').length
 	);
@@ -362,7 +370,7 @@
 				<Icon name="list" />
 			</button>
 			{#if pane.desktop && delegated}
-				<button type="button" class="pane-action" aria-pressed={pane.view === 'delegation'} onclick={() => pane.toggleDelegation()}>{running > 0 ? `Делегирование · ${running}` : 'Делегирование'}</button>
+				<button type="button" class="pane-action" aria-pressed={pane.shown === 'delegation'} onclick={() => pane.toggleDelegation()}>{running > 0 ? `Делегирование · ${running}` : 'Делегирование'}</button>
 			{/if}
 			{#if !pane.desktop && delegated && onOpenDelegation}
 				<button
