@@ -588,6 +588,41 @@ diff "${FAKE_ROOT}/hub/backups/can-pre.dump" "${FAKE_ROOT}/state/db.txt" >/dev/n
 teardown_case
 case_end
 
+# R25c: старый хаб на восстановленной базе отвечает readyz не сразу. Одна проба через 3 с объявляла
+# удавшийся откат проваленным, а повтор команды заново сносил и заливал базу.
+case_begin "rollback waits for the old hub readyz instead of probing once"
+setup_rollback slowreadyz
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" stop canterlot-worker >/dev/null
+export FAKE_READYZ_FAIL_FIRST=4
+: >"${FAKE_ROOT}/state/calls.log"
+if bash "${DEPLOY_DIR}/rollback-db.sh" "${FAKE_ROOT}/hub/backups/can-pre.dump" --to "${SHA_PREV}" >"${FAKE_ROOT}/rb.log" 2>&1; then
+    case_ok "exit 0 with a hub that needs four more probes"
+else
+    case_fail "exit nonzero although the hub became ready"; tail -3 "${FAKE_ROOT}/rb.log"
+fi
+unset FAKE_READYZ_FAIL_FIRST
+assert_contains "${FAKE_ROOT}/rb.log" "old hub readyz ok" "readyz ok after the wait"
+assert_eq "$(grep -c '^dropdb ' "${FAKE_ROOT}/state/calls.log")" "1" "the database was restored once"
+teardown_case
+case_end
+
+# R25d: хаб так и не ответил за все опросы — по-прежнему громкий отказ, диктовка не трогается.
+case_begin "rollback fails loudly when the old hub never becomes ready"
+setup_rollback neverready
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" stop canterlot-worker >/dev/null
+export FAKE_READYZ_FAIL_FIRST=1000 READYZ_POLLS=3
+if bash "${DEPLOY_DIR}/rollback-db.sh" "${FAKE_ROOT}/hub/backups/can-pre.dump" --to "${SHA_PREV}" >"${FAKE_ROOT}/rb.log" 2>&1; then
+    case_fail "exit 0 although the hub never answered readyz"
+else
+    case_ok "exit nonzero"
+fi
+unset FAKE_READYZ_FAIL_FIRST READYZ_POLLS
+assert_contains "${FAKE_ROOT}/rb.log" "old hub readyz FAILED after restore" "the failure is loud"
+assert_contains "${FAKE_ROOT}/rb.log" "3 probes" "the number of probes is named"
+assert_eq "$(cat "${FAKE_ROOT}/state/readyz-probes")" "3" "exactly READYZ_POLLS probes were made"
+teardown_case
+case_end
+
 # R26–R28: повтор той же команды после сбоя посреди восстановления. Идентичность задана явно,
 # как в команде, которую печатает cutover: без неё сверка oid не работает вовсе.
 rollback_expect() {

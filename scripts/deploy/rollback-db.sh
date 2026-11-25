@@ -291,14 +291,23 @@ log "pg_restore done"
 
 log "starting hub"
 run_write "start hub" hub_locked 'systemctl start "$1"' "${HUB_UNIT}" || die "hub failed to start after restore"
-sleep 3
-READYZ="$(ssh_hub "curl -fsS -m 5 'http://${HUB_IP}:8080/readyz'" 2>/dev/null || echo FAIL)"
+# Опрос, как в cutover.sh после рестарта хаба: старый хаб на только что залитой базе отвечает не
+# сразу. Одна проба через 3 с объявляла удавшийся откат проваленным, а повтор команды снова
+# останавливал хаб и заново сносил и заливал базу.
+READYZ="FAIL"
+READYZ_TRIES=0
+for _ in $(seq 1 "${READYZ_POLLS:-30}"); do
+    READYZ_TRIES=$((READYZ_TRIES + 1))
+    READYZ="$(ssh_hub "curl -fsS -m 2 'http://${HUB_IP}:8080/readyz'" 2>/dev/null)" || READYZ="FAIL"
+    if [ "${READYZ}" = '{"status":"ok"}' ]; then break; fi
+    sleep 1
+done
 HUB_NOW="$(ssh_hub "readlink '${HUB_CURRENT}'" | sed 's|.*/||')" || HUB_NOW="UNKNOWN"
 if [ "${READYZ}" = '{"status":"ok"}' ]; then
-    log "old hub readyz ok"
+    log "old hub readyz ok (probe ${READYZ_TRIES})"
 else
     log "speech unit ${SPEECH_UNIT}: $(speech_state "${HUB_CURRENT}/bin/canterlot-speech" 2>/dev/null || echo UNKNOWN) (not touched: the hub is not ready)"
-    die "old hub readyz FAILED after restore (got: ${READYZ}): needs the owner loudly"
+    die "old hub readyz FAILED after restore (${READYZ_TRIES} probes, last: ${READYZ:-nothing}): the database IS restored (phase restored), check the hub before running anything again. Needs the owner loudly"
 fi
 # Диктовка следует за релизом хаба: рестарт или, без бинаря в релизе, стоп и
 # выключение юнита. Всё мягкое: откат базы от неё не зависит.

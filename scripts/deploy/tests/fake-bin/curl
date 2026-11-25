@@ -18,6 +18,12 @@ if [[ "${url}" == *readyz* ]]; then
     else
         ok="${FAKE_READYZ_OK:-1}"
     fi
+    # Хаб поднимается не сразу: первые FAKE_READYZ_FAIL_FIRST проб не отвечают (счётчик в state).
+    if [ -n "${FAKE_READYZ_FAIL_FIRST:-}" ]; then
+        probes=$(( $(cat "${FAKE_ROOT}/state/readyz-probes" 2>/dev/null || echo 0) + 1 ))
+        printf '%s\n' "${probes}" >"${FAKE_ROOT}/state/readyz-probes"
+        if [ "${probes}" -le "${FAKE_READYZ_FAIL_FIRST}" ]; then ok="0"; fi
+    fi
     # Остановленный хаб не отвечает. Нет файла состояния (стенд без юнита хаба) — как раньше.
     if [ "$(cat "${FAKE_ROOT}/state/unit-fakehub-canterlot-hub.active" 2>/dev/null || echo 1)" != "1" ]; then ok="0"; fi
     if [ "${want_code}" = "1" ]; then
