@@ -35,6 +35,9 @@ use std::{
 use tokio::time::{Instant, timeout, timeout_at};
 use uuid::Uuid;
 
+/// Причина отказа по влитому сообщению, которое CLI снял с очереди до исполнения.
+const STEER_CANCELLED: &str = "cli_cancelled";
+
 /// Отказ вызову `approve`, чью карточку закрыло прерывание с неизвестным исходом.
 const INTERRUPT_REFUSAL: &str = "The turn is being interrupted";
 
@@ -363,6 +366,20 @@ impl ClaudeCodeAdapter {
         {
             self.events.push_back(AdapterEvent::InputAccepted {
                 command_id: proof.command_id,
+            });
+        }
+        // CLI снял влитое сообщение с очереди, не начав исполнять: точный отказ вместо
+        // «приём не подтверждён» по сроку простоя, дубля тут быть не может.
+        let cancelled = self
+            .queue
+            .as_mut()
+            .map(InputQueue::take_cancelled_steers)
+            .unwrap_or_default();
+        for command_id in cancelled {
+            self.unconfirmed.remove(&command_id);
+            self.events.push_back(AdapterEvent::InputRejected {
+                command_id,
+                reason: STEER_CANCELLED.into(),
             });
         }
         // Успешный `set_model` очередь уже применила: окно Fable винит только своя модель.
@@ -1836,7 +1853,10 @@ impl Adapter for ClaudeCodeAdapter {
                 // Кадр записан, процесс жив: доказательство придёт на границе
                 // шага идущего хода. Это передача, а не неподтверждённый приём;
                 // без доказательства после конца хода ввод станет неподтверждённым.
-                self.unconfirmed.insert(input.command_id);
+                // Уже отменённый CLI ввод доказательства не ждёт: отказ лежит в событиях.
+                if self.queue.as_ref().unwrap().steer_pending(input.command_id) {
+                    self.unconfirmed.insert(input.command_id);
+                }
                 return SteerOutcome::Transmitting;
             }
         }

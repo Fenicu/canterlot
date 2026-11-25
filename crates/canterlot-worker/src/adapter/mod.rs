@@ -593,6 +593,13 @@ pub enum AdapterEvent {
     InputAccepted {
         command_id: Uuid,
     },
+    /// CLI сам снял с очереди уже переданный ввод, не начав его исполнять (влитое
+    /// сообщение отменено вместе с прерванным ходом). Это точный отказ после `steer`,
+    /// вернувшего `Transmitting`: дубля быть не может, ввод возвращается в очередь.
+    InputRejected {
+        command_id: Uuid,
+        reason: String,
+    },
     /// Агент перезапущен между ходами со сменой инструкций; нативный ID тот же.
     CliRestarted {
         cli_pid: u32,
@@ -747,6 +754,11 @@ impl fmt::Debug for AdapterEvent {
             Self::InputAccepted { command_id } => f
                 .debug_struct("InputAccepted")
                 .field("command_id", command_id)
+                .finish(),
+            Self::InputRejected { command_id, reason } => f
+                .debug_struct("InputRejected")
+                .field("command_id", command_id)
+                .field("reason", reason)
                 .finish(),
             Self::CliRestarted {
                 cli_pid,

@@ -488,6 +488,62 @@ fn answer_frame_still_proves_delivery_without_a_lifecycle_frame() {
     assert!(queue.is_proven(id(ALPHA)));
 }
 
+/// Сообщение, записанное во время хода и снятое CLI с очереди при прерывании
+/// (`interrupt.jsonl:89-90`): кадр `command_lifecycle cancelled` и квитанция
+/// прерывания с тем же UUID в `cancelled`.
+const CANCELLED_INPUT: &str = "ffc00768-427e-4748-a759-78defa3488ce";
+
+fn cancelled_after(lines: &[(usize, String)], prepare: impl FnOnce(&mut InputQueue)) -> Vec<Uuid> {
+    let mut queue = InputQueue::new(launch("ask"));
+    let mut parser = Parser::new();
+    queue
+        .steer_frame(&tx(id(CANCELLED_INPUT), 1, "steered into the running turn"))
+        .unwrap();
+    prepare(&mut queue);
+    let mut cancelled = Vec::new();
+    for (_, frame) in lines {
+        for parsed in parser.feed(frame) {
+            queue.on_parsed(&parsed);
+        }
+        cancelled.extend(queue.take_cancelled_steers());
+    }
+    cancelled
+}
+
+#[test]
+fn steer_cancelled_by_the_cli_is_reported_once() {
+    // Кадр жизненного цикла и квитанция называют один и тот же ввод: отказ один.
+    let both = out_lines("interrupt", 89, 90);
+    assert_eq!(both.len(), 2);
+    assert_eq!(cancelled_after(&both, |_| {}), vec![id(CANCELLED_INPUT)]);
+    // Каждый из них достаточен сам по себе.
+    assert_eq!(
+        cancelled_after(&both[..1], |_| {}),
+        vec![id(CANCELLED_INPUT)],
+        "command_lifecycle cancelled"
+    );
+    assert_eq!(
+        cancelled_after(&both[1..], |_| {}),
+        vec![id(CANCELLED_INPUT)],
+        "interrupt receipt"
+    );
+}
+
+#[test]
+fn cancellation_after_the_cli_took_the_steer_is_not_a_refusal() {
+    // CLI уже начал исполнять влитое сообщение: отмена хода его не возвращает.
+    let cancelled = cancelled_after(&out_lines("interrupt", 89, 90), |queue| {
+        let mut parser = Parser::new();
+        let started =
+            json!({"type":"command_lifecycle","command_uuid":CANCELLED_INPUT,"state":"started"});
+        for parsed in parser.feed(&started.to_string()) {
+            queue.on_parsed(&parsed);
+        }
+        assert!(queue.is_steer_proven(id(CANCELLED_INPUT)));
+    });
+    assert!(cancelled.is_empty(), "{cancelled:?}");
+}
+
 #[test]
 fn completed_command_lifecycle_proves_a_replayed_uuid() {
     let mut queue = InputQueue::new(launch("ask"));

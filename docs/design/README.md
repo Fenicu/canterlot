@@ -171,7 +171,7 @@
 | `reconcile(command)` | `accepted_proven(proof)`, `non_acceptance_proven` (только если источник истории гарантирует полноту, §7.2; на закреплённых версиях не возвращает ни один адаптер: у OpenCode полнота достижима при мёртвом сервере, но не доказана тестом), `unknown` |
 | `interrupt()` | `acknowledged`, `undetermined`; затем факт конца хода или выхода процесса. При `undetermined` адаптер сам отказывает всем открытым запросам агента: их карточки сопровождение закрывает как `interrupted` и решений по ним не принимает, а ход, если прерывание не сработало, не должен ждать ответа вечно |
 | `compact()` | `accepted`, `not_applicable`, `failed`; итог событием. По действию владельца между ходами: Claude Code вводом `/compact`, Codex методом `thread/compact/start`, OpenCode `POST .../compact` своего сервера; во время хода `not_applicable` |
-| наблюдение | `phase(...)`, `run_finished`, `request_opened`/`request_closed`, `background_work(count или unknown)`, `service_retry(...)`, блоки ответа, `limit_reached`, фатальные ошибки |
+| наблюдение | `phase(...)`, `run_finished`, `request_opened`/`request_closed`, `input_accepted` и `input_rejected` (позднее доказательство и точный отказ CLI по уже переданному вливанию), `background_work(count или unknown)`, `service_retry(...)`, блоки ответа, `limit_reached`, фатальные ошибки |
 
 **Факты этапа 0** по CLI. CC = [claude-code.md](../stage0/claude-code.md), CX = [codex.md](../stage0/codex.md), OC = [opencode.md](../stage0/opencode.md), § указывает раздел отчёта.
 

@@ -111,6 +111,8 @@ pub struct InputQueue {
     /// своим `uuid`, ход при этом чужой (`active` не трогается).
     steered: VecDeque<Queued>,
     steer_proven: HashMap<Uuid, &'static str>,
+    /// Влитые вводы, которые CLI снял с очереди до исполнения; ждут `take_cancelled_steers`.
+    cancelled_steers: Vec<Uuid>,
     rejected: Vec<(Uuid, &'static str)>,
     proven: HashMap<Uuid, &'static str>,
     weekly_noted: u16,
@@ -144,6 +146,7 @@ impl InputQueue {
             interrupt_request: None,
             steered: VecDeque::new(),
             steer_proven: HashMap::new(),
+            cancelled_steers: Vec::new(),
             rejected: Vec::new(),
             proven: HashMap::new(),
             weekly_noted: 0,
@@ -274,6 +277,27 @@ impl InputQueue {
             settings: None,
         });
         Ok(message)
+    }
+
+    /// Влитые вводы, которые CLI снял с очереди, не начав исполнять; каждый отдаётся один раз.
+    pub fn take_cancelled_steers(&mut self) -> Vec<Uuid> {
+        std::mem::take(&mut self.cancelled_steers)
+    }
+
+    /// Влитый ввод ещё ждёт доказательства: CLI его не взял и не отменил.
+    pub fn steer_pending(&self, command_id: Uuid) -> bool {
+        self.steered
+            .iter()
+            .any(|queued| queued.command_id == command_id)
+    }
+
+    /// CLI отменил команду. Отказ это только для влитого ввода без доказательства: взятый
+    /// ввод из `steered` уже ушёл, а отмена идущего хода — обычный итог прерывания.
+    fn cancel_steer(&mut self, command_id: Uuid) {
+        if self.steer_pending(command_id) {
+            self.drop_steer(command_id);
+            self.cancelled_steers.push(command_id);
+        }
     }
 
     /// Убрать влитый ввод, который уже не дождаться (процесс умер).
@@ -490,6 +514,11 @@ impl InputQueue {
                 }
                 return None;
             }
+            // Судьбу влитого сообщения CLI сообщает дважды: кадром жизненного цикла и
+            // списком `cancelled` квитанции прерывания. Отказ отдаётся по первому из них.
+            Parsed::CommandLifecycle { command_id, state } if state == "cancelled" => {
+                self.cancel_steer(*command_id);
+            }
             Parsed::Event(AdapterEvent::RunAdopted { input_command_id }) => {
                 self.adopted = Some(*input_command_id);
                 self.interrupt = Interrupt::None;
@@ -508,6 +537,9 @@ impl InputQueue {
                 success,
                 interrupt,
             } => {
+                for command_id in interrupt.iter().flat_map(|receipt| &receipt.cancelled) {
+                    self.cancel_steer(*command_id);
+                }
                 if let Some(control) = self
                     .control
                     .take_if(|control| control.request_id == *request_id)

@@ -2884,6 +2884,29 @@ impl Supervisor {
                     }))?;
                 }
             }
+            AdapterEvent::InputRejected { command_id, reason } => {
+                // CLI сам снял влитый ввод с очереди: точный отказ после начала передачи.
+                // Хаб вернёт ввод в очередь, срок простоя и «приём не подтверждён» не нужны.
+                let key = self
+                    .inputs
+                    .iter()
+                    .find(|(key, input)| {
+                        key.0 == command_id
+                            && input.state == InputState::Transmitting
+                            && !input.accepted
+                            && self.pending_steers.contains_key(key)
+                    })
+                    .map(|(key, _)| *key);
+                if let Some(key) = key {
+                    self.pending_steers.remove(&key);
+                    self.inputs.remove(&key);
+                    self.record(Body::InputRejected(InputRejected {
+                        command_id: key.0.to_string(),
+                        dispatch_attempt: key.1,
+                        reason: reason.chars().take(128).collect(),
+                    }))?;
+                }
+            }
             AdapterEvent::CliRestarted {
                 cli_pid,
                 cli_start_ticks,
@@ -4424,6 +4447,73 @@ mod tests {
             body,
             Body::InputAccepted(accepted) if accepted.command_id == key.0.to_string()
         )));
+    }
+
+    /// CLI снял влитое сообщение с очереди: это точный отказ, а не «приём не
+    /// подтверждён». Ввод больше не ждёт доказательства и не тревожит владельца
+    /// предупреждением о возможном дубле.
+    #[tokio::test]
+    async fn steer_cancelled_by_the_cli_is_an_exact_rejection_not_an_unconfirmed_one() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().steer_transmitting = true;
+        supervisor.steer_grace = Duration::ZERO;
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        let deliver = steer_deliver(&supervisor, first.0, "dropped by the cli");
+        let key = steer_key(&deliver);
+        supervisor.on_steer(deliver).await.unwrap();
+        assert_eq!(supervisor.pending_steers.get(&key), Some(&None));
+        supervisor
+            .on_adapter_event(AdapterEvent::InputRejected {
+                command_id: key.0,
+                reason: "cli_cancelled".into(),
+            })
+            .await
+            .unwrap();
+        assert!(supervisor.pending_steers.is_empty());
+        assert!(!supervisor.inputs.contains_key(&key));
+        // Конец хода и истёкший срок простоя уже ничего не добавляют.
+        supervisor
+            .on_adapter_event(AdapterEvent::RunFinished {
+                input_command_id: first.0,
+                usage: Vec::new(),
+                context_tokens: 0,
+                context_window_tokens: 0,
+                end: crate::adapter::RunEnd::Interrupted,
+            })
+            .await
+            .unwrap();
+        supervisor.expire_pending_steers().unwrap();
+        let bodies = shipped_bodies(&mut supervisor);
+        let rejected: Vec<_> = bodies
+            .iter()
+            .filter_map(|body| match body {
+                Body::InputRejected(rejected) if rejected.command_id == key.0.to_string() => {
+                    Some((rejected.dispatch_attempt, rejected.reason.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rejected, vec![(key.1, "cli_cancelled")], "{bodies:?}");
+        assert!(
+            bodies
+                .iter()
+                .all(|body| !matches!(body, Body::AcceptanceUnconfirmed(_))),
+            "no duplicate warning: {bodies:?}"
+        );
+        // Повторный отказ по тому же вводу и отказ по неизвестному вводу ничего не пишут.
+        supervisor
+            .on_adapter_event(AdapterEvent::InputRejected {
+                command_id: key.0,
+                reason: "cli_cancelled".into(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            shipped_bodies(&mut supervisor)
+                .iter()
+                .all(|body| !matches!(body, Body::InputRejected(_)))
+        );
     }
 
     #[tokio::test]

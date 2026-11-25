@@ -3008,6 +3008,45 @@ async fn steer_with_a_slow_replay_is_transmitting_until_the_proof() {
     f.close().await;
 }
 
+/// CLI снял влитое сообщение с очереди, не начав его исполнять: владелец получает
+/// точный отказ, а не «приём не подтверждён» по сроку простоя.
+#[tokio::test]
+async fn steer_cancelled_by_the_cli_is_reported_as_an_exact_rejection() {
+    use canterlot_worker::adapter::SteerOutcome;
+    let steered = Uuid::now_v7();
+    let mut f = Fake::with_timers(
+        vec![vec![
+            json!({"type":"stream_event","user_message_uuids":["@input"],"event":{"type":"message_start","message":{"id":"m1","model":"claude-haiku-test","usage":{}}}}),
+            json!("@stdin"),
+            json!({"type":"command_lifecycle","command_uuid":steered,"session_id":"s","state":"cancelled","uuid":Uuid::now_v7().to_string()}),
+            json!("@wait"),
+        ]],
+        Duration::from_millis(300),
+        WAIT,
+    );
+    f.start().await;
+    f.send(&tx(Uuid::now_v7())).await;
+    let outcome = tokio::time::timeout(WAIT, f.adapter.steer(&tx(steered)))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, SteerOutcome::Transmitting),
+        "the frame is written, the proof is not there yet: {outcome:?}"
+    );
+    let mut events = vec![];
+    let rejected = loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), f.adapter.next_event())
+            .await
+            .unwrap_or_else(|_| panic!("the cancellation must reach the owner, got {events:?}"));
+        if let AdapterEvent::InputRejected { command_id, reason } = &event {
+            break (*command_id, reason.clone());
+        }
+        events.push(event);
+    };
+    assert_eq!(rejected, (steered, "cli_cancelled".to_owned()));
+    f.close().await;
+}
+
 #[tokio::test]
 async fn interrupt_after_a_torn_steer_falls_back_to_sigint() {
     use canterlot_worker::adapter::claude_code::input::CONTROL_TIMEOUT;
