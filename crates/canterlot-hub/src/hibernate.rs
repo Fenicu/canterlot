@@ -376,6 +376,12 @@ pub async fn wake_in_tx(
     if !hibernated && !hibernate_requested && !rebooted {
         return Ok(false);
     }
+    // Остановку владельца не отменяет ни перезагрузка машины, ни пришедший ввод: пауза
+    // `user_stop` ставится раньше команды остановки и снимается только владельцем.
+    // Иначе машина, перезагрузившаяся до применения остановки, подняла бы процесс снова.
+    if pauses.0.contains(&PauseReason::UserStop) {
+        return Ok(false);
+    }
     if executions::live(&mut *conn, conversation_id)
         .await?
         .is_some()

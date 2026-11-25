@@ -1108,3 +1108,36 @@ async fn stop_fact_applies_when_the_wake_cannot_start() -> TestResult {
     assert_eq!(stops, 0, "the journal went on without a stop");
     Ok(())
 }
+
+/// Владелец остановил сессию, а машина перезагрузилась раньше, чем остановка применилась.
+/// Ввод в очереди процесс не поднимает: остановка владельца ждёт владельца.
+#[tokio::test]
+async fn reboot_does_not_restart_a_session_the_owner_stopped() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let seed = testkit::seed(&pool).await;
+    let run = start_running(&pool, &seed).await;
+    request_stop_execution(
+        &pool,
+        seed.owner_id,
+        seed.conversation_id,
+        false,
+        &Uuid::now_v7().to_string(),
+        Uuid::now_v7(),
+    )
+    .await?;
+    let submitted = owner_input(&pool, seed.conversation_id, "потом").await?;
+    stop_by_reboot(&pool, &seed, &run).await;
+    assert_eq!(live_executions(&pool, seed.conversation_id).await?, 0);
+    assert_eq!(input_state(&pool, submitted.input_id).await?, "queued");
+    assert!(
+        queued_pauses(&pool, seed.conversation_id)
+            .await?
+            .as_array()
+            .is_some_and(|pauses| pauses.iter().any(|pause| pause["reason"] == "user_stop")),
+        "the owner's stop is still in force"
+    );
+    // И следующее сообщение не будит: решение владельца не отменяет ни перезагрузка, ни ввод.
+    owner_input(&pool, seed.conversation_id, "ещё").await?;
+    assert_eq!(live_executions(&pool, seed.conversation_id).await?, 0);
+    Ok(())
+}
