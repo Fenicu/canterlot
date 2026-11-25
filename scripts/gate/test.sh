@@ -298,6 +298,119 @@ run 1 "${web_real_env[@]}" bash "$g8/scripts/gate.sh" --rerun-failed --no-attest
 grep -qF 'check-web full' "$GATE_FAKE_CALLS" || fail 'перезапуск не повторил весь веб'
 if grep -qE '^(npm|check) ' "$GATE_FAKE_CALLS"; then fail 'перезапуск задел прошедшие шаги npm/check'; fi
 
+# --- логи проходов, причины падений и отчёт о нестабильных тестах ---
+# Подмена check печатает вывод nextest, как он ложится в check.log: заголовок FAIL, блоки
+# stdout/stderr и итоговые блоки `--- STDERR:`. Следом она, как check.sh --all, прогоняет
+# canterlot-speech с тем же профилем и перезаписывает junit.xml зелёным отчётом: упавшие
+# тесты воркспейса остаются только в check.log. FAKE_CHECK_FAIL — имена упавших тестов
+# через пробел (none — всё зелёно); mod::long печатает 16 строк паники.
+fake_nextest="$tmp/fake-nextest-check.sh"
+cat >"$fake_nextest" <<'FAKE'
+#!/usr/bin/env bash
+echo "check $GATE_STEP_MODE [$GATE_STEP_SELECTION]" >>"$GATE_FAKE_CALLS"
+mkdir -p target/nextest/default
+if [[ "$FAKE_CHECK_FAIL" == none ]]; then
+    echo '     Summary [   1.000s] 1 tests run: 1 passed, 0 skipped'
+    printf '%s\n' '<testsuites><testsuite name="canterlot-speech"><testcase name="speech::ok"/></testsuite></testsuites>' \
+        >target/nextest/default/junit.xml
+    exit 0
+fi
+echo '    Starting 5330 tests across 80 binaries'
+n=0
+for t in $FAKE_CHECK_FAIL; do
+    n=$((n + 1))
+    echo "        FAIL [   0.028s] ($n/5330) crate-a $t"
+    echo '  stdout ───'
+    echo
+    echo '    running 1 test'
+    echo "    test $t ... FAILED"
+    echo
+    echo '  stderr ───'
+    echo
+    echo "    thread '$t' panicked at src/lib.rs:10:5:"
+    echo '    assertion `left == right` failed'
+    echo '      left: 1'
+    echo '     right: 2'
+    echo
+done
+echo '------------'
+echo "     Summary [   1.000s] 5330 tests run: 5329 passed, $n failed, 0 skipped"
+for t in $FAKE_CHECK_FAIL; do
+    echo "        FAIL [   0.028s] (4385/5330) crate-a $t"
+done
+for t in $FAKE_CHECK_FAIL; do
+    echo "--- STDERR:              crate-a $t ---"
+    if [[ "$t" == mod::long ]]; then
+        for i in $(seq 1 16); do echo "thread '$t' panicked at src/long.rs:$i:1:"; done
+    else
+        echo "thread '$t' panicked at src/lib.rs:10:5:"
+        echo 'assertion `left == right` failed'
+        echo '  left: 1'
+        echo ' right: 2'
+        echo 'note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace'
+    fi
+    echo
+done
+printf '%s\n' '<testsuites><testsuite name="canterlot-speech"><testcase name="speech::ok"/></testsuite></testsuites>' \
+    >target/nextest/default/junit.xml
+exit 1
+FAKE
+nextest_env=(
+    env CANTERLOT_NO_LEASE=1 CANTERLOT_GATE_DEPLOY_NEEDED=0
+    CANTERLOT_GATE_STEP_NPM="$fake_npm" CANTERLOT_GATE_STEP_CHECK="bash $fake_nextest"
+    CANTERLOT_GATE_STEP_DEPLOY="$fake_deploy" CANTERLOT_GATE_STEP_WEB="$fake_web"
+)
+g9="$tmp/g9"
+new_gate_repo "$g9"
+g9short=$(git -C "$g9" rev-parse --short=8 HEAD)
+g9dir="$g9/.superpowers/gate/$g9short"
+export FAKE_CHECK_FAIL="mod::flaky mod::long mod::c mod::d mod::e mod::f mod::g"
+run 1 "${nextest_env[@]}" bash "$g9/scripts/gate.sh" --no-attest
+# Упавшие тесты берутся и из check.log: junit.xml перезаписан отчётом canterlot-speech.
+grep -qF $'rust_fail\trust|crate-a|mod::flaky' "$g9dir/state.tsv" \
+    || fail 'упавший тест воркспейса потерян, когда junit.xml перезаписан отчётом другого прогона'
+grep -qF $'check_failed\ttests' "$g9dir/state.tsv" || fail 'падение check при перезаписанном junit не отнесено к тестам'
+[[ $(grep -c '^rust_fail' "$g9dir/state.tsv") == 7 ]] || fail 'в состоянии не семь упавших тестов'
+# Сводка: причины падений первых пяти тестов, не больше 12 строк на тест.
+grep -qF 'причины падений' "$out" || { cat "$out" >&2; fail 'сводка не печатает причины падений'; }
+grep -qF "panicked at src/lib.rs:10:5:" "$out" || fail 'в сводке нет строки panicked at'
+grep -qF 'left: 1' "$out" || fail 'в сводке нет строк assertion left/right'
+if grep -qF 'RUST_BACKTRACE' "$out"; then fail 'в причины попала строка note про backtrace'; fi
+grep -qF 'mod::e' "$out" || fail 'в сводке нет пятого упавшего теста'
+if grep -qE ' mod::f$' "$g9dir/failures.txt"; then fail 'причины показаны для шестого теста'; fi
+grep -qF 'и ещё 2' "$out" || { cat "$out" >&2; fail 'нет пометки о непоказанных тестах'; }
+[[ $(grep -c 'src/long.rs' "$out") == 12 ]] || { cat "$out" >&2; fail 'причина одного теста не обрезана до 12 строк'; }
+[[ -s "$g9dir/failures.txt" ]] || fail 'причины не сохранены в failures.txt'
+[[ ! -d "$g9dir/pass-1" ]] || fail 'после первого прохода уже есть pass-1'
+
+# Зелёный перезапуск: упавший в первом проходе вывод остаётся в pass-1, верхний уровень —
+# последний проход.
+export FAKE_CHECK_FAIL=none
+run 0 "${nextest_env[@]}" bash "$g9/scripts/gate.sh" --rerun-failed --no-attest
+[[ -f "$g9dir/pass-1/check.log" ]] || fail 'нет pass-1/check.log'
+grep -qF "panicked at src/lib.rs:10:5:" "$g9dir/pass-1/check.log" || fail 'в pass-1/check.log нет падения первого прохода'
+[[ -f "$g9dir/pass-1/result.txt" && -f "$g9dir/pass-1/state.tsv" ]] || fail 'в pass-1 нет result.txt или state.tsv'
+if grep -qF 'panicked at' "$g9dir/check.log"; then fail 'check.log верхнего уровня не относится к последнему проходу'; fi
+[[ -f "$g9dir/web.log" && -f "$g9dir/npm-ci.log" ]] || fail 'пропущенные шаги потеряли логи на верхнем уровне'
+grep -qF 'check tests [' "$GATE_FAKE_CALLS" || fail 'перезапуск не в режиме tests'
+grep -qF 'binary_id(=crate-a) & test(=mod::flaky)' "$GATE_FAKE_CALLS" || fail 'в фильтр перезапуска не попал тест из check.log'
+[[ -f "$g9dir/failures.txt" ]] && fail 'failures.txt последнего зелёного прохода не убран'
+# Отчёт: тест назван нестабильным, рядом путь к логу первого прохода и причина.
+sed -n '/отчёт о нестабильных тестах/,$p' "$out" >"$tmp/flaky-report"
+grep -qF 'rust|crate-a|mod::flaky' "$tmp/flaky-report" || { cat "$out" >&2; fail 'в отчёте нет нестабильного теста'; }
+grep -qF ".superpowers/gate/$g9short/pass-1/check.log" "$tmp/flaky-report" || { cat "$tmp/flaky-report" >&2; fail 'в отчёте нет пути к логу первого прохода'; }
+grep -qF 'panicked at src/lib.rs:10:5:' "$tmp/flaky-report" || fail 'в отчёте нет причины первого прохода'
+if grep -qF '  нет' "$tmp/flaky-report"; then fail 'отчёт пуст при нестабильном тесте'; fi
+grep -qF $'flaky\trust|crate-a|mod::flaky\tpass-1' "$g9dir/state.tsv" || fail 'в состоянии нет прохода с падением'
+# Старое состояние без третьего поля читается: тест остаётся в списке, пути нет.
+awk -F '\t' -v OFS='\t' '$1=="flaky"{print $1,$2;next}{print}' "$g9dir/state.tsv" >"$tmp/g9-state-old"
+cp "$tmp/g9-state-old" "$g9dir/state.tsv"
+rm -rf "$g9dir/pass-1"
+run 0 "${nextest_env[@]}" bash "$g9/scripts/gate.sh" --rerun-failed --no-attest
+sed -n '/отчёт о нестабильных тестах/,$p' "$out" >"$tmp/flaky-report"
+grep -qF 'rust|crate-a|mod::flaky' "$tmp/flaky-report" || fail 'старое состояние: тест пропал из отчёта'
+[[ -d "$g9dir/pass-1" ]] || fail 'повторный перезапуск не сохранил проход'
+
 # Битый индекс: git status падает, и проверка чистоты обязана провалиться, а не
 # пропустить аттестацию из-за пустого вывода.
 printf 'garbage' >"$scratch/.git/index"
