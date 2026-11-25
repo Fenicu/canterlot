@@ -3,8 +3,8 @@
 	import { fmt } from '#lib/format/ru.js';
 	import { durationMs } from '#lib/motion.js';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
-	import Icon from '#lib/ui/Icon.svelte';
-	import StageTrack from '#lib/ui/StageTrack.svelte';
+	import SlimStrip from '#lib/ui/SlimStrip.svelte';
+	import type { TodoStatus } from '#lib/stores/todos.svelte.js';
 	import { TODO_STATUS_LABEL, todoView } from './todo';
 	import { readTodoOpen, writeTodoOpen } from './todoOpen';
 
@@ -16,6 +16,14 @@
 	const view = $derived(shown ? todoView(shown) : null);
 	// Движение отражает настоящую работу: между ходами активная точка не пульсирует.
 	const working = $derived(chat.activity?.state === 'working');
+
+	/** Тон слова в строке — тот же, что у слова пункта в раскрытом списке. */
+	const WORD_TONE: Record<TodoStatus, 'accent' | 'success' | 'warning' | 'muted'> = {
+		in_progress: 'accent',
+		completed: 'success',
+		cancelled: 'warning',
+		pending: 'muted'
+	};
 
 	function omittedNote(count: number): string {
 		return `Ещё ${count} ${fmt.plural(count, ['пункт', 'пункта', 'пунктов'])} не поместилось`;
@@ -39,26 +47,19 @@
 {#if shown && view}
 	<section class="todo" aria-label="Список задач агента">
 		<div class="panel">
-			<div class="head">
-				<StageTrack
-					stages={view.stages}
-					index={view.index}
-					state={view.allDone || working ? 'active' : 'held'}
-					label="Выполнение задач"
-					status={`${view.done} из ${view.total}`}
-				/>
-				<button
-					type="button"
-					class="toggle"
-					aria-expanded={expanded}
-					aria-controls={listId}
-					onclick={toggle}
-				>
-					<span class="word" data-status={view.headlineStatus}>{TODO_STATUS_LABEL[view.headlineStatus]}</span>
-					<span class="now">{view.headline}</span>
-					<span class="chevron" class:open={expanded}><Icon name="chevron" /></span>
-				</button>
-			</div>
+			<!-- Свёрнутый список — та же тонкая строка, что полоса плана; касание раскрывает пункты. -->
+			<SlimStrip
+				progress={view.total > 0 ? (view.done / view.total) * 100 : 0}
+				count={`${view.done}/${view.total}`}
+				word={TODO_STATUS_LABEL[view.headlineStatus]}
+				text={view.headline}
+				wordTone={WORD_TONE[view.headlineStatus]}
+				gaugeLabel="Выполнение задач"
+				label={`Задачи агента: готово ${view.done} из ${view.total}. ${TODO_STATUS_LABEL[view.headlineStatus]}: ${view.headline}`}
+				{expanded}
+				controls={listId}
+				onclick={toggle}
+			/>
 			{#if expanded}
 				<div transition:slide={{ duration: durationMs('--duration-expand') }}>
 					<!-- Длинный список прокручивается: без фокуса клавиатуре до него не добраться. -->
@@ -84,57 +85,13 @@
 <style>
 	.todo {
 		box-sizing: border-box;
-		padding: var(--s2) var(--gutter) var(--s3);
+		padding: var(--s2) var(--gutter) var(--s0);
 	}
 
 	.panel {
-		border-radius: var(--radius-card);
+		border-radius: var(--radius-sm);
 		background: var(--surface);
 		overflow: hidden;
-	}
-
-	.head {
-		position: relative;
-		display: flex;
-		align-items: center;
-		gap: var(--s4);
-		min-height: var(--target);
-		padding-inline: var(--s6) var(--s3);
-	}
-
-	.head :global(.st) {
-		flex: none;
-	}
-
-	.toggle {
-		flex: 1;
-		display: flex;
-		align-items: center;
-		gap: var(--s3);
-		min-width: var(--s0);
-		min-height: var(--target);
-		padding: var(--s0);
-		background: var(--transparent);
-		color: var(--text);
-		font-size: var(--fs-sm);
-		text-align: start;
-	}
-
-	/* Касание дорожки тоже раскрывает список: кнопка растянута на всю шапку. */
-	.toggle::after {
-		content: '';
-		position: absolute;
-		inset: var(--s0);
-	}
-
-	.toggle:focus-visible {
-		outline: none;
-	}
-
-	.toggle:focus-visible::after {
-		outline: var(--focus-width) solid var(--accent);
-		outline-offset: calc(var(--focus-width) * -1);
-		border-radius: var(--radius-card);
 	}
 
 	.word {
@@ -154,31 +111,6 @@
 
 	.word[data-status='cancelled'] {
 		color: var(--warning);
-	}
-
-	.now {
-		flex: 1;
-		min-width: var(--s0);
-		overflow: hidden;
-		white-space: nowrap;
-		text-overflow: ellipsis;
-	}
-
-	.chevron {
-		flex: none;
-		display: grid;
-		place-items: center;
-		color: var(--muted);
-		transition: transform var(--duration-fast) var(--ease);
-	}
-
-	.chevron :global(svg) {
-		width: var(--icon-small);
-		height: var(--icon-small);
-	}
-
-	.chevron.open {
-		transform: rotate(90deg);
 	}
 
 	.items {

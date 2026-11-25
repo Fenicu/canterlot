@@ -23,25 +23,20 @@ describe("screens/chat/todo", () => {
 
   it("cancelled_item_leaves_the_progress_but_stays_in_the_list", () => {
     const view = todoView(listOf(["completed", "cancelled", "in_progress"]));
-    expect(view).toMatchObject({ done: 1, total: 2, allDone: false, index: 1 });
+    expect(view).toMatchObject({ done: 1, total: 2, allDone: false });
     expect(view.current?.text).toBe("пункт 3");
-    expect(view.stages.map((stage) => stage.label)).toEqual([
-      "пункт 1",
-      "пункт 3",
-      "Готово",
-    ]);
   });
 
   it("list_with_nothing_left_but_cancelled_items_is_finished", () => {
     const view = todoView(listOf(["completed", "cancelled"]));
-    expect(view).toMatchObject({ done: 1, total: 1, allDone: true, index: 1 });
+    expect(view).toMatchObject({ done: 1, total: 1, allDone: true });
     expect(view.headline).toBe("Все пункты выполнены");
     expect(view.headlineStatus).toBe("completed");
   });
 
   it("fully_cancelled_list_says_so", () => {
     const view = todoView(listOf(["cancelled", "cancelled"]));
-    expect(view).toMatchObject({ done: 0, total: 0, allDone: true, index: 0 });
+    expect(view).toMatchObject({ done: 0, total: 0, allDone: true });
     expect(view.headline).toBe("Все пункты отменены");
     expect(view.headlineStatus).toBe("cancelled");
   });
@@ -50,13 +45,6 @@ describe("screens/chat/todo", () => {
     const view = todoView(listOf(["completed", "in_progress", "pending"]));
     expect(view).toMatchObject({ done: 1, total: 3, allDone: false });
     expect(view.current?.text).toBe("пункт 2");
-    expect(view.index).toBe(1);
-    expect(view.stages.map((stage) => stage.label)).toEqual([
-      "пункт 1",
-      "пункт 2",
-      "пункт 3",
-      "Готово",
-    ]);
   });
 
   it("order_of_work_does_not_matter_for_progress", () => {
@@ -70,32 +58,20 @@ describe("screens/chat/todo", () => {
     expect(view.current?.text).toBe("пункт 2");
   });
 
-  it("finished_list_lands_on_the_last_point", () => {
+  it("finished_list_has_no_current_item", () => {
     const view = todoView(listOf(["completed", "completed"]));
-    expect(view).toMatchObject({ done: 2, total: 2, allDone: true, index: 2 });
+    expect(view).toMatchObject({ done: 2, total: 2, allDone: true });
     expect(view.current).toBeNull();
   });
 
-  it("long_list_shows_a_real_window_of_points_around_the_progress", () => {
+  it("long_list_counts_every_item_and_names_the_one_in_work", () => {
     const statuses: TodoStatus[] = [
       ...Array<TodoStatus>(12).fill("completed"),
       "in_progress",
       ...Array<TodoStatus>(7).fill("pending"),
     ];
     const view = todoView(listOf(statuses));
-    expect(view.stages).toHaveLength(5);
-    expect(view.stages[view.index]?.label).toBe("пункт 13");
-    expect(new Set(view.stages.map((stage) => stage.id)).size).toBe(5);
-  });
-
-  it("window_reaches_the_finish_point_only_at_the_end", () => {
-    const statuses = Array<TodoStatus>(20).fill("completed");
-    statuses[19] = "in_progress";
-    const nearEnd = todoView(listOf(statuses));
-    expect(nearEnd.stages.at(-1)?.label).toBe("Готово");
-    expect(nearEnd.index).toBeLessThan(nearEnd.stages.length - 1);
-    const finished = todoView(listOf(Array<TodoStatus>(20).fill("completed")));
-    expect(finished.index).toBe(finished.stages.length - 1);
+    expect(view).toMatchObject({ done: 12, total: 20, allDone: false, headline: "пункт 13" });
   });
 
   it("headline_tells_what_is_going_on_in_every_state", () => {

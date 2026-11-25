@@ -1,5 +1,4 @@
 import type { TodoItem, TodoList, TodoStatus } from '#lib/stores/todos.svelte.js';
-import type { Stage } from '#lib/ui/stage-track.js';
 
 export const TODO_STATUS_LABEL: Record<TodoStatus, string> = {
 	pending: 'ожидает',
@@ -7,9 +6,6 @@ export const TODO_STATUS_LABEL: Record<TodoStatus, string> = {
 	completed: 'готово',
 	cancelled: 'отменено'
 };
-
-/** Столько точек дорожки помещается рядом со счётчиком и текстом на телефоне. */
-const POINTS = 5;
 
 export interface TodoView {
 	done: number;
@@ -20,8 +16,6 @@ export interface TodoView {
 	/** Строка свёрнутой панели. */
 	headline: string;
 	headlineStatus: TodoStatus;
-	stages: Stage[];
-	index: number;
 }
 
 export function todoView(list: TodoList): TodoView {
@@ -41,19 +35,5 @@ export function todoView(list: TodoList): TodoView {
 		current?.text ??
 		(allCancelled ? 'Все пункты отменены' : allDone ? 'Все пункты выполнены' : 'Остальные пункты не поместились');
 	const headlineStatus = current?.status ?? (allCancelled ? 'cancelled' : allDone ? 'completed' : 'pending');
-	// Последняя точка — финиш: иначе дорожка считала бы последний пункт уже выполненным.
-	const points = [...items.map((item) => item.text), 'Готово'];
-	const start = Math.max(0, Math.min(done - 2, points.length - POINTS));
-	return {
-		done,
-		total,
-		allDone,
-		current,
-		headline,
-		headlineStatus,
-		stages: points
-			.slice(start, start + POINTS)
-			.map((label, k) => ({ id: String(start + k), label })),
-		index: done - start
-	};
+	return { done, total, allDone, current, headline, headlineStatus };
 }

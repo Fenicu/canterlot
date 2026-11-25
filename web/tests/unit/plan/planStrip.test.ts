@@ -54,8 +54,8 @@ describe('plan/PlanStrip', () => {
 		const target = show(onopen);
 		const strip = target.querySelector<HTMLElement>('[data-role="plan-strip"]')!;
 		expect(strip.dataset.tone).toBe('default');
-		expect(strip.querySelector('[data-role="plan-strip-count"]')?.textContent).toBe('1/4');
-		expect(strip.querySelector('[data-role="plan-strip-task"]')?.textContent).toBe('на проверке Codex 0.172.0: schema check');
+		expect(strip.querySelector('[data-role="strip-count"]')?.textContent).toBe('1/4');
+		expect(strip.querySelector('[data-role="strip-task"]')?.textContent).toBe('на проверке Codex 0.172.0: schema check');
 		expect(strip.querySelector('[role="meter"]')?.getAttribute('aria-valuenow')).toBe('25');
 		const button = strip.querySelector<HTMLButtonElement>('button')!;
 		expect(button.title).toBe('План: 1 на проверке');
@@ -67,8 +67,9 @@ describe('plan/PlanStrip', () => {
 		tasks = [task('in_review', 'Проверка'), task('blocked', 'Ждёт ответа гейта'), task('cancelled')];
 		const strip = show().querySelector<HTMLElement>('[data-role="plan-strip"]')!;
 		expect(strip.dataset.tone).toBe('warning');
-		expect(strip.querySelector('[data-role="plan-strip-count"]')?.textContent).toBe('0/2');
-		expect(strip.querySelector('[data-role="plan-strip-task"]')?.textContent).toBe('заблокирована Ждёт ответа гейта');
+		expect(strip.querySelector('[data-role="strip-count"]')?.textContent).toBe('0/2');
+		expect(strip.querySelector('[data-role="strip-task"]')?.textContent).toBe('заблокирована Ждёт ответа гейта');
+		expect(strip.querySelector('[data-role="strip-task"] .word')?.getAttribute('data-tone')).toBe('warning');
 	});
 
 	it('nothing_to_decide_draws_nothing', () => {
