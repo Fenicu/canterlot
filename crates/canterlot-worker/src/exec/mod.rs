@@ -348,6 +348,8 @@ pub(crate) struct Shared {
     pub actor_restarts: Mutex<HashMap<Uuid, u32>>,
     #[cfg(feature = "fault-injection")]
     pub fail_actor: Mutex<usize>,
+    #[cfg(feature = "fault-injection")]
+    pub fail_replay_reads: Mutex<usize>,
 }
 
 /// Сроки уборки сборки в рабочих копиях (`[machine].idle_cache_hours`,
@@ -769,6 +771,8 @@ impl ExecutionManager {
                 actor_restarts: Mutex::default(),
                 #[cfg(feature = "fault-injection")]
                 fail_actor: Mutex::new(0),
+                #[cfg(feature = "fault-injection")]
+                fail_replay_reads: Mutex::new(0),
             }),
             shutdown,
         }
@@ -795,6 +799,16 @@ impl ExecutionManager {
     #[cfg(feature = "fault-injection")]
     pub fn fail_actor_commands(&self, count: usize) {
         *self.shared.fail_actor.lock().expect("actor fault lock") = count;
+    }
+
+    /// Следующие `count` чтений сохранённых команд при перезапуске актора отказывают.
+    #[cfg(feature = "fault-injection")]
+    pub fn fail_replay_reads(&self, count: usize) {
+        *self
+            .shared
+            .fail_replay_reads
+            .lock()
+            .expect("replay fault lock") = count;
     }
 
     pub fn configure_adapters(

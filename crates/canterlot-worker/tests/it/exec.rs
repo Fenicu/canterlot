@@ -1379,6 +1379,34 @@ async fn actor_failure_with_a_live_supervisor_restarts_the_actor() {
     env.stop().await;
 }
 
+/// Перезапущенный актор не смог прочитать сохранённые команды. Отказ чтения не равен пустому
+/// списку: доигрывание повторяется, и команда, на которой упал прежний актор, доходит до CLI.
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn a_failed_replay_read_after_an_actor_restart_is_retried() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    env.manager().fail_actor_commands(1);
+    env.manager().fail_replay_reads(1);
+    let input = Uuid::now_v7();
+    env.send(deliver_command(
+        input,
+        1,
+        env.execution,
+        1,
+        env.conversation,
+        &script(r#"{"delta":"replayed"}"#),
+    ))
+    .await;
+    env.wait("the turn of the input stored before the restart", |b| {
+        finished(b, input)
+    })
+    .await;
+    env.stop().await;
+}
+
 /// У живого исполнения нет актора (он упал и больше не поднялся). Остановка такой сессии не
 /// гасится молча: сопровождение её не получило бы никогда. Команда остаётся в хранилище и
 /// исполняется, когда актор появляется снова.

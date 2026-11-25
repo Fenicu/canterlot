@@ -1580,12 +1580,24 @@ impl Actor {
         );
         // Команды читаются после смены актора: всё, что пришло раньше, уже в хранилище, а
         // повтор той же команды актор и сопровождение различают, как при рестарте воркера.
-        let commands = self
-            .shared
-            .store
-            .call(|store| Ok(open(store)?.stored_commands()?))
-            .await
-            .unwrap_or_default();
+        // Отказ чтения не равен пустому списку: сохранённая остановка иначе не дошла бы до
+        // CLI до следующего рестарта службы. Чтение повторяется, пока хранилище не ответит
+        // или служба не остановится.
+        let mut delay = Duration::from_millis(250);
+        let mut shutdown = self.shutdown.clone();
+        let commands = loop {
+            match self.read_replay().await {
+                Ok(commands) => break commands,
+                Err(error) => {
+                    tracing::warn!(execution_id = %id, kind = "actor_replay_failed", reason = %error, "stored commands are read again");
+                    tokio::select! {
+                        () = tokio::time::sleep(delay) => {}
+                        _ = shutdown.wait_for(|stopping| *stopping) => return true,
+                    }
+                    delay = (delay * 2).min(Duration::from_secs(30));
+                }
+            }
+        };
         let sender = self
             .shared
             .actors
@@ -1602,6 +1614,26 @@ impl Actor {
             }
         }
         true
+    }
+
+    async fn read_replay(&self) -> Result<Vec<Command>, ExecError> {
+        #[cfg(feature = "fault-injection")]
+        {
+            let mut left = self
+                .shared
+                .fail_replay_reads
+                .lock()
+                .expect("replay fault lock");
+            if *left > 0 {
+                *left -= 1;
+                return Err(io::Error::other("injected replay read failure").into());
+            }
+        }
+        Ok(self
+            .shared
+            .store
+            .call(|store| Ok(open(store)?.stored_commands()?))
+            .await?)
     }
 
     async fn run_inner(&mut self, start: Start) -> Result<(), ExecError> {
