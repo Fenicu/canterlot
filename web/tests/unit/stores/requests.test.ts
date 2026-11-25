@@ -413,7 +413,7 @@ describe('RequestsModel', () => {
     expect(model.items.get('open')!.state).toBe('closed');
   });
 
-  it('turn_interrupt_event_closes_pending_requests', () => {
+  it('request_closed_interrupted_closes_pending_requests', () => {
     const model = new RequestsModel('conv-1');
     model.items.set('req-open', {
       id: 'req-open',
@@ -437,25 +437,14 @@ describe('RequestsModel', () => {
       payload: {}
     });
 
-    const interruptEvent = {
-      v: 1,
-      id: 'ev-int-1',
-      scope: 'conversation:conv-1',
-      scope_seq: '6',
-      scope_seq_from: '6',
-      committed_at: '2026-10-29T12:00:00Z',
-      committed_at_from: '2026-10-29T12:00:00Z',
-      conversation_id: 'conv-1',
-      execution_id: 'exec-1',
-      correlation_id: 'corr-1',
-      kind: 'interrupt_state_changed',
-      payload: {
-        command_id: 'cmd-1',
-        status: 'completed'
-      }
-    } as unknown as HubEvent;
-
-    model.applyInterrupt(interruptEvent);
+    // Прерванный ход: машина закрывает его открытые запросы, хаб присылает request_closed
+    // на каждый. По запросу в терминальном состоянии события нет.
+    for (const id of ['req-open', 'req-sending']) {
+      model.applyClosed({
+        kind: 'request_closed',
+        payload: { request_id: id, reason: 'interrupted' }
+      } as unknown as HubEvent);
+    }
 
     expect(model.items.get('req-open')!.state).toBe('closed');
     expect(model.items.get('req-open')!.closedReason).toBe('interrupted');

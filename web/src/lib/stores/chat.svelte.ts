@@ -1305,13 +1305,10 @@ export class ChatStore {
         return;
       case "interrupt_state_changed":
         if (event.kind === "interrupt_state_changed") {
+          // Запросы прерванного хода закрывает машина, и на каждый приходит request_closed.
+          // Сами их не закрываем: одобрение запуска, предложение настройки и облачное окно
+          // к ходу не привязаны, хаб их при прерывании не трогает.
           this.interrupt = { ...event.payload };
-          if (
-            event.payload.status === "completed" ||
-            event.payload.status === "acknowledged"
-          ) {
-            this.requests.applyInterrupt(event);
-          }
         }
         return;
       case "request_opened":

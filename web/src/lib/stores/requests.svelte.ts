@@ -293,16 +293,6 @@ export class RequestsModel {
     }
   }
 
-  applyInterrupt(event?: HubEvent): void {
-    void event;
-    for (const item of this.items.values()) {
-      if (item.state === 'open' || item.state === 'sending') {
-        item.state = 'closed';
-        item.closedReason = 'interrupted';
-      }
-    }
-  }
-
   async submitDecision(
     requestId: string,
     decision: DecisionBody,

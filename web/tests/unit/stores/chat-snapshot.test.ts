@@ -131,6 +131,50 @@ describe("снимок тёплого чата", () => {
   });
 });
 
+describe("прерывание хода и открытые запросы", () => {
+  const request = (id: string, kind: string) => ({ id, conversation_id: CONV, kind, state: "open", request_payload: {} });
+  const states = (chat: ChatStore): Record<string, string> =>
+    Object.fromEntries([...chat.requests.items.values()].map((item) => [item.id, item.state]));
+
+  it("запросы закрывает событие хаба, а не само прерывание", () => {
+    const chat = chatOf();
+    snapshot(chat, {
+      open_requests: [
+        request("r-perm", "permission"),
+        request("r-ask", "question"),
+        request("r-spawn", "spawn_approval"),
+        request("r-set", "settings_change"),
+        request("r-cloud", "cloud_window"),
+      ],
+    });
+    apply(chat, ev("interrupt_state_changed", { command_id: "c1", status: "acknowledged" }, "5"));
+    apply(chat, ev("interrupt_state_changed", { command_id: "c1", status: "completed" }, "6"));
+    // Одобрение запуска, настройку и облачное окно хаб при прерывании не трогает: они ждут ответа.
+    expect(states(chat)).toEqual({
+      "r-perm": "open",
+      "r-ask": "open",
+      "r-spawn": "open",
+      "r-set": "open",
+      "r-cloud": "open",
+    });
+
+    // Запросы самого хода закрывает машина: на каждый приходит request_closed.
+    apply(
+      chat,
+      ev("request_closed", { request_id: "r-perm", reason: "interrupted" }, "7"),
+      ev("request_closed", { request_id: "r-ask", reason: "interrupted" }, "8"),
+    );
+    expect(states(chat)).toEqual({
+      "r-perm": "closed",
+      "r-ask": "closed",
+      "r-spawn": "open",
+      "r-set": "open",
+      "r-cloud": "open",
+    });
+    expect(chat.requests.items.get("r-perm")!.closedReason).toBe("interrupted");
+  });
+});
+
 describe("цена хода: событие новее ответа истории", () => {
   const RUN = "00000000-0000-4000-8000-0000000000b1";
   const usage = (cost: number) => [
