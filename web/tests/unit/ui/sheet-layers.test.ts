@@ -88,4 +88,39 @@ describe('ui/sheet layers', () => {
     await vi.waitFor(() => expect(openDialogs()).toHaveLength(0));
     expect(shell.inert).toBe(false);
   });
+
+  it('takes its history entry back when the host removes a cancelled confirmation', async () => {
+    host.confirm = true;
+    flushSync();
+    await vi.waitFor(() => expect(page.state.sheet).toBeDefined());
+
+    click('Отмена');
+
+    await vi.waitFor(() => expect(page.state.sheet).toBeUndefined());
+    expect(host.log).toEqual(['confirm closed']);
+  });
+
+  it('returns to the entry of the sheet under a cancelled confirmation, then to the page', async () => {
+    await openDetails();
+    await openConfirm();
+
+    click('Отмена');
+    await vi.waitFor(() => expect(page.state.sheet).toBe('session-details'));
+    expect(openDialogs()).toHaveLength(1);
+
+    click('Закрыть');
+    await vi.waitFor(() => expect(page.state.sheet).toBeUndefined());
+  });
+
+  it('runs the confirmed action only after its history entry is gone', async () => {
+    await openDetails();
+    await openConfirm();
+
+    click('Завершить');
+
+    // Действие хозяина видит страницу уже без записи подтверждения: его переход или новый лист под шаг назад не попадёт.
+    await vi.waitFor(() => expect(host.log).toEqual(['confirmed at session-details', 'details closed']));
+    await vi.waitFor(() => expect(page.state.sheet).toBeUndefined());
+    expect(openDialogs()).toHaveLength(0);
+  });
 });

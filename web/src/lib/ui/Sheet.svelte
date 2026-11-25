@@ -7,7 +7,7 @@
   import { dropLayer, isTopLayer, pushLayer } from './layers';
   // `marker` — приглушённая пометка в строке заголовка: заголовок тогда держится одной строкой и режется многоточием.
   // `feed` — лист с лентой чата: фон ленты, тело без своей прокрутки и отступов, прокручивает сама лента.
-  let { open, title, subtitle, marker, feed = false, routeKey, onclose, onrevive, actions, children }: { open: boolean; title: string; subtitle?: string; marker?: string; feed?: boolean; routeKey?: string; onclose: () => void; onrevive?: () => void; actions?: Snippet; children: Snippet } = $props();
+  let { open, title, subtitle, marker, feed = false, routeKey, onclose, onrevive, actions, children }: { open: boolean; title: string; subtitle?: string; marker?: string; feed?: boolean; routeKey?: string; onclose: (released: Promise<void>) => void; onrevive?: () => void; actions?: Snippet; children: Snippet } = $props();
   const id = $props.id();
   let dialog: HTMLDialogElement;
   let heading: HTMLHeadingElement | undefined;
@@ -20,16 +20,38 @@
     layer = null;
     opener?.focus({ preventScroll: true });
   }
+  /**
+   * Снять свою запись истории. «Назад» отрабатывает отдельной задачей, и до неё переход или новый лист хозяина
+   * попал бы под этот шаг: обещание выполняется, когда страница уже стоит на прежней записи.
+   */
+  function release(): Promise<void> {
+    const key = routeKey;
+    const own = entry && key !== undefined && page.state.sheet === key;
+    entry = false;
+    if (!own) return Promise.resolve();
+    history.back();
+    return new Promise((resolve) => {
+      const stop = $effect.root(() => {
+        $effect(() => {
+          if (page.state.sheet === key) return;
+          resolve();
+          queueMicrotask(() => stop());
+        });
+      });
+    });
+  }
   /** Закрытый лист ещё доигрывает уход: скрыт для чтения с экрана и ничего не принимает. */
   function retire() {
     dialog.setAttribute('aria-hidden', 'true');
   }
   // Хозяин убрал лист из документа: закрыть сразу, а узел остаётся на время ухода (см. `ui/exit.ts`).
+  // Запись истории снимается и здесь: иначе после каждого такого листа «Назад» один раз ничего не делает.
   function leaving(): boolean {
     const wasOpen = dialog.open;
     if (wasOpen) {
       dialog.close();
       restore();
+      void release();
     }
     return wasOpen;
   }
@@ -38,9 +60,7 @@
     dialog.close();
     retire();
     restore();
-    if (entry && routeKey && page.state.sheet === routeKey) history.back();
-    entry = false;
-    onclose();
+    onclose(release());
   }
   function keydown(event: KeyboardEvent) {
     if (event.key === 'Escape') { event.preventDefault(); close(); }
