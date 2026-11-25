@@ -5,7 +5,8 @@
 	import type { InterruptControl } from '#lib/composer/interrupt.svelte.js';
 	import type { Activity } from '#lib/screens/sessions/activityText.js';
 	import StateChip from './StateChip.svelte';
-	import { effectiveActivity } from './stateLine';
+	import { chatStateLine, effectiveActivity } from './stateLine';
+	import { criticalLimit } from './criticalLimit';
 	import { modelAliasNote, modelLabel, resolvedModelLabel } from '#lib/format/labels.js';
 	import { fmt } from '#lib/format/ru.js';
 	import Icon from '#lib/ui/Icon.svelte';
@@ -17,7 +18,6 @@
 	import { theme } from '#lib/theme.js';
 	import { stopSession, resumeSession, continueSessionQueue, resolveOwnerLost, controlBusy, clearSnooze } from './controls';
 	import { RESOLVE_WARNING, runLabel } from './pauseCards';
-	import LimitsStrip from '#lib/screens/sessions/LimitsStrip.svelte';
 	import { goalState, goalUsage } from './goalView';
 	import type { ProviderLimits } from '#lib/stores/limits.js';
 	import { limitThresholds } from '#lib/stores/limitThresholds.svelte.js';
@@ -176,10 +176,20 @@
 	});
 	// Знак шапки по тем же правилам, что у строки списка: кольцо, точка или серый кружок без процесса.
 	const mark = $derived(stateMark(effectiveActivity(chat.activity as Activity | null, chat.phase, (chat.execution as { state?: string })?.state)));
+	// Та же строка, что у знака состояния: полный текст уходит в подсказку, на экране — короткие слова.
+	const stateLine = $derived(chatStateLine(
+		chat.activity as Activity | null,
+		chat.phase,
+		(chat.execution as { state?: string })?.state,
+		now,
+		pending
+	));
 	const harnessTitle = $derived(detail?.harness?.title || 'Claude Code');
 	const machineName = $derived(detail?.machine?.name || 'workstation');
 	const provider = $derived(detail?.harness?.provider || 'claude');
 	const nudgeText = $derived(chat.nudge ? nudgeStateText(chat.nudge) : '');
+	// Лимиты в чате молчат, пока окно провайдера этой сессии не дошло до тревожного порога.
+	const limitAlert = $derived(criticalLimit(providers, provider, now, limitThresholds));
 	const goalSupported = $derived(!!detail?.harness?.goals);
 	const goal = $derived(goalSupported ? chat.goal : null);
 	const goalStateView = $derived(goal ? goalState(goal.status) : null);
@@ -210,6 +220,10 @@
 			: pendingModel
 				? `${harnessTitle} · ${effectiveModel} → ${pendingModel} со следующего хода · ${machineName}`
 				: `${harnessTitle} · ${effectiveModel} · ${machineName}`
+	);
+
+	const metaTitle = $derived(
+		[stateLine.quiet ? '' : stateLine.text, subtitle, aliasNote].filter(Boolean).join('\n')
 	);
 
 	// Тихая строка вместо погашенного состояния: сколько машина уже не на связи.
@@ -286,7 +300,7 @@
 
 
 <div class="chat-header" role="region" aria-label="Шапка чата" data-top-chrome>
-	<div class="topbar" class:tall={!!parentId || !!route || !!nudgeText || !!goal} class:context={!!route || !!nudgeText || !!goal}>
+	<div class="topbar" class:tall={!!goal} class:context={!!goal}>
 		{#if !pane.desktop}
 			<a
 				class="icon-button back"
@@ -308,7 +322,8 @@
 					<span class="skeleton" style:width="var(--bar-56)"></span>
 				{/if}
 			</div>
-			<div class="sub-row">
+			<!-- Одна строка: короткое состояние акцентом, затем агент, модель и машина. Полный текст — в подсказке. -->
+			<div class="meta-row" data-role="header-meta" title={metaTitle} data-model-alias={aliasNote || undefined}>
 				{#if detail}
 					<StateChip
 						activity={chat.activity as Activity | null}
@@ -316,28 +331,13 @@
 						executionState={(chat.execution as { state?: string })?.state}
 						now={now}
 						{pending}
+						short
 					/>
-					<div class="subtitle" title={aliasNote ? `${subtitle}\n${aliasNote}` : subtitle} data-model-alias={aliasNote || undefined}>{subtitle}</div>
+					<span class="subtitle">{#if !stateLine.quiet}<span class="meta-sep" aria-hidden="true">&nbsp;·&nbsp;</span>{/if}{subtitle}</span>
 				{:else}
 					<span class="skeleton" style:width="var(--bar-74)"></span>
 				{/if}
 			</div>
-			{#if parentId}
-				<div class="parent-row">
-					<a class="parent-link" data-parent-link href={resolve(`c/${parentId}`)}><span class="parent-text">Запущена сессией {parentTitle || 'без названия'}</span></a>
-				</div>
-			{/if}
-			{#if route || nudgeText}
-				<div class="context-row">
-					{#if route}
-						<button type="button" class="context-link route-link" data-role="route-state-line" aria-label={`Маршрут: ${routeTitle}`} onclick={onOpenRoute}><span class="context-text">{routeTitle}</span></button>
-					{/if}
-					{#if route && nudgeText}<span class="context-sep" aria-hidden="true">·</span>{/if}
-					{#if nudgeText}
-						<button type="button" class="context-link nudge-link" data-role="nudge-state-line" onclick={onOpenNudge}><span class="context-text">{nudgeText}</span></button>
-					{/if}
-				</div>
-			{/if}
 			{#if goal && goalStateView}
 				<button type="button" class="goal-row" data-role="goal-state-line" data-tone={goalStateView.tone}
 					aria-label={`Цель: ${goal.objective}. ${goalStateView.text}`} onclick={onOpenGoal}>
@@ -425,16 +425,13 @@
 		<p class="header-status machine-down" data-machine-down>{machineDown}</p>
 	{/if}
 
-	{#if providers.length > 0}
-		<div class="header-limits">
-			<LimitsStrip
-				providers={providers}
-				now={now}
-				thresholds={limitThresholds}
-				prefer={provider}
-				compact
-			/>
-		</div>
+	{#if limitAlert}
+		<p class="header-status limit-line" role="status">
+			<a class="limit-alert" data-role="limit-alert" href={resolve('limits')}>
+				<Icon name="warning" />
+				<span class="limit-text">{limitAlert.text}</span>
+			</a>
+		</p>
 	{/if}
 
 	{#if menuOpen}
@@ -443,6 +440,24 @@
 				{#if actionError}
 					<div class="action-error" role="alert">{actionError}</div>
 				{/if}
+
+				<!-- Откуда сессия и как её ведут: родитель, маршрут и автопинок ушли сюда из шапки. -->
+				{#if parentId}
+					<MenuItem icon="up" href={resolve(`c/${parentId}`)} onclick={() => { menuOpen = false; }}>
+						<span data-role="menu-parent">Запущена сессией {parentTitle || 'без названия'}</span>
+					</MenuItem>
+				{/if}
+				{#if route && onOpenRoute}
+					<MenuItem icon="branch" onclick={() => { menuOpen = false; onOpenRoute(); }}>
+						<span data-role="menu-route">Маршрут: {routeTitle}</span>
+					</MenuItem>
+				{/if}
+				{#if nudgeText && onOpenNudge}
+					<MenuItem icon="pin" onclick={() => { menuOpen = false; onOpenNudge(); }}>
+						<span data-role="menu-nudge">{nudgeText}</span>
+					</MenuItem>
+				{/if}
+				{#if parentId || (route && onOpenRoute) || (nudgeText && onOpenNudge)}<div class="menu-divider" role="separator"></div>{/if}
 
 				{#if onOpenSheet}
 					<MenuItem icon="pin" onclick={() => { menuOpen = false; onOpenSheet(); }}>Название, цвет и группы</MenuItem>
@@ -463,10 +478,6 @@
 
 				{#if onOpenSettings && !systemChat}
 					<MenuItem icon="sliders" onclick={() => { menuOpen = false; onOpenSettings(); }}>Настройки сессии</MenuItem>
-				{/if}
-
-				{#if chat.nudge && onOpenNudge}
-					<MenuItem icon="pin" onclick={() => { menuOpen = false; onOpenNudge(); }}>Автопинок</MenuItem>
 				{/if}
 
 				{#if onOpenSearch}
@@ -589,7 +600,7 @@
 	.topbar.tall {
 		align-items: flex-start;
 	}
-	/* Цели маршрута и автопинка растут вниз: оставляем им место до полосы лимитов. */
+	/* Цель строки цели растёт вниз: оставляем ей место, чтобы касание не ложилось на ленту. */
 	.topbar.context {
 		margin-bottom: calc(var(--s10) + var(--s1));
 	}
@@ -643,53 +654,48 @@
 	.mark.dim { background: var(--transparent); border: var(--s1) solid var(--muted); }
 	/* Усыплённая сессия: полый холодный кружок, процесс не жив. */
 	.mark[data-state='hibernated'].dim { border-color: var(--blue); }
-	/* Длинное состояние уводит подзаголовок на свою строку, а не сжимает его до буквы. */
-	.sub-row {
+	/* Состояние и подпись делят одну строку: состояние держит свои слова, подпись режется многоточием. */
+	.meta-row {
 		display: flex;
-		flex-wrap: wrap;
 		align-items: center;
-		gap: var(--s1) var(--s3);
 		min-width: 0;
 		padding-left: calc(var(--mark-large) + var(--s3));
+		font-size: var(--fs-sm);
+		line-height: var(--lh-tight);
+		white-space: nowrap;
 	}
 	.subtitle {
-		flex: 1 0 calc(var(--s4) * 8);
+		flex: 1 1 0;
 		min-width: 0;
-		font-size: var(--fs-sm);
 		color: var(--muted);
-		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	.parent-row {
+	/* Лимит на исходе — одна строка тревоги; касание ведёт на экран лимитов. */
+	.limit-line {
+		margin-top: calc(var(--s3) * -1);
+		margin-bottom: var(--s0);
+	}
+	.limit-alert {
+		display: flex;
+		align-items: center;
+		gap: var(--s2);
 		min-width: 0;
-		margin-top: var(--s1);
-		padding-left: calc(var(--mark-large) + var(--s3));
+		min-height: var(--target);
+		color: var(--danger);
 	}
-	.parent-link {
-		position: relative;
-		display: block;
-		line-height: var(--lh-tight);
-		font-size: var(--fs-sm);
-		color: var(--accent-link);
+	.limit-alert :global(svg) {
+		flex: none;
+		width: var(--icon-small);
+		height: var(--icon-small);
 	}
-	/* Многоточие живёт на внутренней строке: якорь не обрезает свою цель 44 px. */
-	.parent-text {
-		display: block;
+	.limit-text {
+		min-width: 0;
 		overflow: hidden;
 		white-space: nowrap;
 		text-overflow: ellipsis;
 	}
-	/* Цель 44px растёт вверх, в неинтерактивный подзаголовок, и не двигает строки. */
-	.parent-link::after {
-		content: '';
-		position: absolute;
-		left: var(--s0);
-		right: var(--s0);
-		top: calc(100% - var(--target));
-		height: var(--target);
-	}
-	.parent-link:focus-visible {
+	.limit-alert:focus-visible {
 		outline: var(--focus-width) solid var(--accent);
 	}
 	.header-actions {
@@ -868,68 +874,6 @@
 	}
 	.goal-row:hover .goal-objective,
 	.goal-row:focus-visible .goal-objective {
-		text-decoration: underline;
-		text-underline-offset: var(--s1);
-	}
-
-	/* Маршрут и автопинок — одна тихая строка с двумя целями: строка в одну текстовую
-	   высоту, а 44 px каждой цели растут вниз, в запас до полосы лимитов. */
-	.context-row {
-		display: flex;
-		align-items: center;
-		gap: var(--s1);
-		min-width: 0;
-		margin-top: var(--s1);
-		padding-left: calc(var(--mark-large) + var(--s3));
-	}
-	.context-link {
-		position: relative;
-		display: block;
-		min-width: 0;
-		padding: var(--s0);
-		border: var(--s0);
-		background: transparent;
-		color: var(--muted);
-		font-size: var(--fs-sm);
-		line-height: var(--lh-tight);
-		text-align: left;
-	}
-	.context-text {
-		display: block;
-		overflow: hidden;
-		white-space: nowrap;
-		text-overflow: ellipsis;
-	}
-	/* Цель 44px растёт вниз от строки, не меняя её высоту. */
-	.context-link::after {
-		content: '';
-		position: absolute;
-		left: var(--s0);
-		right: var(--s0);
-		top: var(--s0);
-		height: var(--target);
-	}
-	/* Название маршрута забирает свободное место, автопинок — свою короткую строку. */
-	.route-link {
-		flex: 1 1 0;
-	}
-	.nudge-link {
-		flex: 0 0 auto;
-		max-width: 60%;
-	}
-	.context-link:only-child {
-		flex: 1 1 0;
-		max-width: 100%;
-	}
-	.context-sep {
-		flex: none;
-		color: var(--muted);
-		font-size: var(--fs-sm);
-		line-height: var(--lh-tight);
-	}
-	.context-link:hover,
-	.context-link:focus-visible {
-		color: var(--secondary);
 		text-decoration: underline;
 		text-underline-offset: var(--s1);
 	}

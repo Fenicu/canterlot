@@ -10,7 +10,8 @@
 		phase = null,
 		executionState = null,
 		now = Date.now(),
-		pending = null
+		pending = null,
+		short = false
 	}: {
 		activity?: Activity | null;
 		phase?: { phase?: string } | null;
@@ -18,9 +19,12 @@
 		now?: number;
 		/** Открытый запрос: его вид и возраст важнее общей фразы «Ждёт ответа». */
 		pending?: WaitFacts | null;
+		/** Короткие слова состояния для строки шапки; полный текст остаётся подсказкой строки. */
+		short?: boolean;
 	} = $props();
 
 	const line = $derived(chatStateLine(activity, phase, executionState, now, pending));
+	const shown = $derived(short ? line.short : line.text);
 
 	let prevText: string | null = null;
 	$effect(() => {
@@ -37,7 +41,7 @@
 		<span class="live-dot" aria-hidden="true"></span>
 	{/if}
 	<!-- Слово сменяется движением только при смене состояния сессии, а не на каждом инструменте: инструменты ведёт строка хода. -->
-	<span class="state-text" use:swapOn={{ text: line.text, key: `${activity?.state ?? ''}:${line.tone}` }}></span>
+	<span class="state-text" use:swapOn={{ text: shown, key: `${activity?.state ?? ''}:${line.tone}` }}></span>
 </div>
 
 <style>

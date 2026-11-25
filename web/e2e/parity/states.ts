@@ -673,9 +673,11 @@ export const SCREENS: Screen[] = [
     await expect(opened.locator('[data-queue-node]').first()).toBeVisible();
   })),
   screen('route-sheet', false, PHONE, 'dark', (page) => orchestrator(page, async (opened) => {
-    await opened.locator('[data-role="route-state-line"]').click();
+    // Маршрут живёт среди первых пунктов меню сессии, а не строкой шапки.
+    await opened.getByRole('button', { name: 'Меню сессии' }).click();
+    await opened.getByRole('menuitem', { name: /^Маршрут:/ }).click();
     await expect(opened.getByRole('dialog', { name: 'Выбор маршрута' })).toBeVisible();
-    // Строка в шапке под указателем меняет цвет переходом: проверка смотрит на устоявшийся цвет.
+    // Уходящее меню гаснет переходом: проверка смотрит на устоявшийся экран.
     await opened.waitForFunction(() => document.getAnimations().every((animation) => animation.playState !== 'running'));
   }, 'child')),
   screen('search', false, PHONE, 'dark', (page) => historySearch(page)),

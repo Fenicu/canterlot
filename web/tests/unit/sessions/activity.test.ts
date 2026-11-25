@@ -286,3 +286,25 @@ describe("background work", () => {
     expect(turnRunning(idle(2))).toBe(false);
   });
 });
+
+describe("chatStateLine short", () => {
+  const tool = (evidence: Record<string, unknown>) => ({ state: "working" as const, evidence: { phase: "running_tool", ...evidence } });
+
+  it("running_tool_drops_the_argument_and_the_clock", () => {
+    const line = chatStateLine(tool({ tool_name: "shell", summary: "shell: cd /srv/worktrees/a1 && cargo test" }), null, "running", 0);
+    expect(line.text).toMatch(/^Выполняет shell: cd \/srv\/worktrees\/a1 && cargo test · /);
+    expect(line.short).toBe("Выполняет shell");
+  });
+
+  it("running_tool_without_a_colon_summary_names_the_tool", () => {
+    expect(chatStateLine(tool({ tool_name: "Bash", summary: "cargo nextest run" }), null, "running", 0).short).toBe("Выполняет Bash");
+    expect(chatStateLine(tool({ summary: "cargo test" }), null, "running", 0).short).toBe("Выполняет cargo test");
+    expect(chatStateLine(tool({}), null, "running", 0).short).toBe("Выполняет инструмент");
+  });
+
+  it("other_states_keep_their_words", () => {
+    const failed = { state: "failed" as const, evidence: { reason: "process_exited" } };
+    const line = chatStateLine(failed, null, null, 0);
+    expect(line.short).toBe(line.text);
+  });
+});
