@@ -103,57 +103,8 @@ grep -q '^fail_codes=' "${R}" && case_ok "result file: fail_codes key present" |
 [ ! -e "${R}.codes" ] && case_ok "codes log removed" || case_fail "codes log left behind"
 [ ! -e "${R}.hard" ] && case_ok "hard log removed" || case_fail "hard log left behind"
 grep -q 'docker fakeweb exec -i' "${FAKE_ROOT}/state/calls.log" && case_fail "loopback probe started" || case_ok "loopback probe never started"
-teardown_case
-case_end
-
-# --- V3: цель (staged-деревья против dist и база не впереди) проверяется в чистом
-# прогоне выше; здесь остаются отказы цели.
-
-case_begin "a staged-tree mismatch fails the rehearsal like the dry-run"
-setup_cutover rehearse-staged-mismatch
-printf 'tampered\n' >>"${WEB_RELEASES}/${SHA_NEW}/_app/immutable/chunks/probe.js"
-: >"${FAKE_ROOT}/state/calls.log"
-if run_rehearse; then case_fail "rehearsal passed with a tampered staged tree"; else case_ok "rehearsal failed"; fi
-assert_contains "${FAKE_ROOT}/rehearse.log" "staged tree differs from the dist" "mismatch named"
-assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" status)" "fail" "result file: status fail on a refused rehearsal"
-assert_not_contains "${FAKE_ROOT}/rehearse.log" "CONFIRM=" "no token printed"
-assert_not_contains "${FAKE_ROOT}/rehearse.log" "WOULD-WRITE #" "refused before the write path"
-assert_eq "$(mutations)" "" "no mutating command"
-teardown_case
-case_end
-
-case_begin "a database ahead of the target fails the rehearsal like the dry-run"
-setup_cutover rehearse-db-ahead
-sed -i 's/^MIGR_MAX=.*/MIGR_MAX=42/' "${FAKE_ROOT}/state/db.txt"
-: >"${FAKE_ROOT}/state/calls.log"
-if run_rehearse; then case_fail "rehearsal passed with the DB ahead"; else case_ok "rehearsal failed"; fi
-assert_contains "${FAKE_ROOT}/rehearse.log" "database is ahead of the target release: migrations max 42 > target migrations_last 41" "DB ahead named"
-assert_not_contains "${FAKE_ROOT}/rehearse.log" "CONFIRM=" "no token printed"
-assert_eq "$(mutations)" "" "no mutating command"
-teardown_case
-case_end
-
-case_begin "the real run refuses a staged-tree mismatch before touching anything"
-setup_cutover execute-staged-mismatch
-TOKEN="$(confirm_for "${SHA_NEW}")"
-printf 'tampered\n' >>"${WORKER_RELEASES}/${SHA_NEW}/RELEASE"
-: >"${FAKE_ROOT}/state/calls.log"
-if bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${TOKEN}" --source "${REPO_ROOT}" \
-        --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1; then
-    case_fail "real run accepted a tampered staged tree"
-else
-    case_ok "real run refused"
-fi
-assert_contains "${FAKE_ROOT}/cutover.log" "worker ${SHA_NEW}: staged tree differs from the dist" "mismatch named"
-assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "refused" "result file: refused before any write"
-assert_eq "$(mutations)" "" "nothing stopped, dumped or flipped"
-hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
-teardown_case
-case_end
-
-case_begin "the rehearsal token unlocks the real run of the same plan"
-setup_cutover rehearse-execute
-if run_rehearse; then case_ok "rehearsal exit 0"; else case_fail "rehearsal failed"; tail -10 "${FAKE_ROOT}/rehearse.log"; fi
+# Токен этой репетиции открывает боевой прогон того же плана (бывший отдельный кейс: та же
+# репетиция, тот же стенд).
 TOKEN="$(token_from "${FAKE_ROOT}/rehearse.log")"
 if bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${TOKEN}" --source "${REPO_ROOT}" \
         --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1; then
@@ -162,45 +113,47 @@ else
     case_fail "real run failed"; tail -10 "${FAKE_ROOT}/cutover.log"
 fi
 assert_contains "${FAKE_ROOT}/cutover.log" "confirm token accepted" "token accepted"
-hub_is "${SHA_NEW}" && case_ok "hub on new" || case_fail "hub not new"
-worker_is "${SHA_NEW}" && case_ok "worker on new" || case_fail "worker not new"
+hub_is "${SHA_NEW}" && case_ok "hub on new after the real run" || case_fail "hub not new"
+worker_is "${SHA_NEW}" && case_ok "worker on new after the real run" || case_fail "worker not new"
 teardown_case
 case_end
 
-case_begin "a token refuses the real run after the plan changed"
-setup_cutover rehearse-plan-changed
-run_rehearse || true
-TOKEN="$(token_from "${FAKE_ROOT}/rehearse.log")"
-printf '\n' >>"${DIST_DIR}/SHA256SUMS"
+# --- V3: цель (staged-деревья против dist и база не впереди) проверяется в чистом
+# прогоне выше; здесь остаются отказы цели.
+
+# Несовпадение залитого дерева и база впереди цели: target-check собирает оба отказа, репетиция
+# проваливается до пути записи, а боевой прогон с верным токеном отказывает, ничего не тронув
+# (бывшие три кейса на трёх стендах).
+case_begin "a staged-tree mismatch and a database ahead fail the rehearsal like the dry-run, and the real run refuses before touching anything"
+setup_cutover rehearse-staged-mismatch
+TOKEN="$(confirm_for "${SHA_NEW}")"
+printf 'tampered\n' >>"${WEB_RELEASES}/${SHA_NEW}/_app/immutable/chunks/probe.js"
+printf 'tampered\n' >>"${WORKER_RELEASES}/${SHA_NEW}/RELEASE"
+sed -i 's/^MIGR_MAX=.*/MIGR_MAX=42/' "${FAKE_ROOT}/state/db.txt"
+: >"${FAKE_ROOT}/state/calls.log"
+if run_rehearse; then case_fail "rehearsal passed with a tampered staged tree and the DB ahead"; else case_ok "rehearsal failed"; fi
+assert_contains "${FAKE_ROOT}/rehearse.log" "staged tree differs from the dist" "mismatch named"
+assert_contains "${FAKE_ROOT}/rehearse.log" "database is ahead of the target release: migrations max 42 > target migrations_last 41" "DB ahead named"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" status)" "fail" "result file: status fail on a refused rehearsal"
+assert_not_contains "${FAKE_ROOT}/rehearse.log" "CONFIRM=" "no token printed"
+assert_not_contains "${FAKE_ROOT}/rehearse.log" "WOULD-WRITE #" "refused before the write path"
+assert_eq "$(mutations)" "" "no mutating command"
 if bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${TOKEN}" --source "${REPO_ROOT}" \
         --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1; then
-    case_fail "real run accepted a token of another plan"
+    case_fail "real run accepted a tampered staged tree"
 else
     case_ok "real run refused"
 fi
-assert_contains "${FAKE_ROOT}/cutover.log" "the plan changed since the token was issued" "plan change reported"
-assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "refused" "result file: a rejected token is refused"
-assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" mode)" "execute" "result file: mode execute"
-assert_eq "$(grep -cE 'stop canterlot-worker|^vzdump ' "${FAKE_ROOT}/state/calls.log" || true)" "0" "nothing stopped or backed up"
+assert_contains "${FAKE_ROOT}/cutover.log" "worker ${SHA_NEW}: staged tree differs from the dist" "mismatch named by the real run"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "refused" "result file: refused before any write"
+assert_eq "$(mutations)" "" "nothing stopped, dumped or flipped"
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 teardown_case
 case_end
 
-case_begin "an expired token refuses the real run"
-setup_cutover expired
-OLD="$(issue_token "${SHA_NEW}" "${FAKE_ROOT}/dist" "$(( $(date -u +%s) - 7300 ))")"
-if bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${OLD}" --source "${REPO_ROOT}" \
-        --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1; then
-    case_fail "expired token accepted"
-else
-    case_ok "expired token refused"
-fi
-assert_contains "${FAKE_ROOT}/cutover.log" "token expired" "expiry reported"
-worker_is "${SHA_PREV}" && case_ok "worker untouched" || case_fail "worker moved"
-teardown_case
-case_end
-
-case_begin "a failing rehearsal prints no token and writes nothing"
+# Провал проверки в репетиции: без токена и без записей, код по области и один отказ на чтение
+# (бывшие «a failing rehearsal…» и «a verify failure is coded…»: один и тот же сломанный сайт).
+case_begin "a failing rehearsal prints no token, writes nothing and codes the verify failure once per read"
 setup_cutover rehearse-fail
 export FAKE_SITE_FAIL=meeting.example.com
 : >"${FAKE_ROOT}/state/calls.log"
@@ -213,6 +166,10 @@ assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" token)" "" "result file: n
 assert_not_contains "${FAKE_ROOT}/rehearse.log" "STOP-AND-REPORT" "no recovery report in a rehearsal"
 assert_eq "$(mutations)" "" "no mutating command after the failure either"
 worker_is "${SHA_PREV}" && case_ok "worker untouched" || case_fail "worker moved"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "verify_site" "result file: verify_site without unknown"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" hard_failures)" "2" "result file: one hard failure per read"
+N="$(grep -c 'HARD-FAIL: site meeting.example.com' "${FAKE_ROOT}/rehearse.log" || true)"
+assert_eq "${N}" "2" "two HARD-FAIL lines from the two reads"
 teardown_case
 case_end
 
@@ -248,31 +205,26 @@ assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "session_stop
 teardown_case
 case_end
 
-case_begin "a verify failure is coded by area and counted once per read"
-setup_cutover codes-verify-site
-export FAKE_SITE_FAIL=meeting.example.com
-if run_rehearse; then case_fail "rehearsal passed with a broken site"; else case_ok "rehearsal failed"; fi
-unset FAKE_SITE_FAIL
-assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "verify_site" "result file: verify_site without unknown"
-assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" hard_failures)" "2" "result file: one hard failure per read"
-N="$(grep -c 'HARD-FAIL: site meeting.example.com' "${FAKE_ROOT}/rehearse.log" || true)"
-assert_eq "${N}" "2" "two HARD-FAIL lines from the two reads"
-teardown_case
-case_end
-
-case_begin "a rejected token is coded and happens before any write"
+# Отвергнутый токен: просроченный, чужого плана, испорченный — отказ до любой записи с кодом
+# (бывшие отдельные кейсы просроченного токена и изменённого плана — на этом же стенде).
+case_begin "an expired, a changed-plan and a malformed token refuse the real run before any write, coded"
 setup_cutover codes-token
 OLD="$(issue_token "${SHA_NEW}" "${FAKE_ROOT}/dist" "$(( $(date -u +%s) - 7300 ))")"
 bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${OLD}" --source "${REPO_ROOT}" \
     --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1 && case_fail "expired token accepted" || case_ok "expired token refused"
 R="${FAKE_ROOT}/cutover.result"
+assert_contains "${FAKE_ROOT}/cutover.log" "token expired" "expiry reported"
 assert_eq "$(result_of "${R}" status)/$(result_of "${R}" phase)/$(result_of "${R}" fail_codes)" "refused/token/token_expired" "result file: expired token before any write"
+worker_is "${SHA_PREV}" && case_ok "worker untouched by the expired token" || case_fail "worker moved"
 run_rehearse || true
 TOKEN="$(token_from "${FAKE_ROOT}/rehearse.log")"
 printf '\n' >>"${DIST_DIR}/SHA256SUMS"
 bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${TOKEN}" --source "${REPO_ROOT}" \
     --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1 && case_fail "changed plan accepted" || case_ok "changed plan refused"
+assert_contains "${FAKE_ROOT}/cutover.log" "the plan changed since the token was issued" "plan change reported"
 assert_eq "$(result_of "${R}" status)/$(result_of "${R}" phase)/$(result_of "${R}" fail_codes)" "refused/token/token_plan_changed" "result file: changed plan before any write"
+assert_eq "$(result_of "${R}" mode)" "execute" "result file: mode execute"
+hub_is "${SHA_PREV}" && case_ok "hub untouched by the changed-plan token" || case_fail "hub moved"
 bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm 1-2-3 --source "${REPO_ROOT}" \
     --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1 && case_fail "malformed token accepted" || case_ok "malformed token refused"
 assert_eq "$(result_of "${R}" fail_codes)" "token_invalid" "result file: token_invalid"

@@ -622,11 +622,20 @@ case_end
 # --- L3. NRestarts воркера после старта не 0: STOP-and-report ---
 case_begin "worker NRestarts after the start stops and reports"
 setup_cutover nrestarts
+# Служба диктовки установлена: отчёт называет её состояние и ручной шаг (бывший кейс
+# test-speech.sh «stop report includes the speech unit»).
+install_fake_speech "${SHA_PREV}"
+install_fake_speech "${SHA_NEW}"
+install_speech_unit
 export FAKE_WORKER_NRESTARTS=2
 if run_cutover; then case_fail "exit 0 with NRestarts=2"; else case_ok "exit nonzero"; fi
 unset FAKE_WORKER_NRESTARTS
 assert_contains "${FAKE_ROOT}/cutover.log" "worker NRestarts is '2', expected 0" "NRestarts reported"
 assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "post-flip stop-and-report"
+assert_contains "${FAKE_ROOT}/cutover.log" "speech unit        = canterlot-speech: load=loaded active=active enabled=enabled config=present binary=present" "speech unit state in the report"
+assert_contains "${FAKE_ROOT}/cutover.log" "restart canterlot-speech if the release has bin/canterlot-speech" "manual speech step after a hub flip back"
+assert_contains "${FAKE_ROOT}/cutover.log" "remove [dictation] from" "[dictation] rollback rule printed"
+assert_contains "${FAKE_ROOT}/cutover.log" "0091_dictation_terms" "dictation migration follows the DB restore row"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
     && case_fail "worker running (not proven good: must stop)" || case_ok "worker stays stopped"
 teardown_case

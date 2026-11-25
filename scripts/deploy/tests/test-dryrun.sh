@@ -180,12 +180,26 @@ fi
 assert_not_contains "${FAKE_ROOT}/dry.log" "would run: CANTERLOT_OLD_RELEASE_BIN" "spec_compat is not only printed"
 assert_contains "${FAKE_ROOT}/dry.log" "dry-run mode: checking TARGET ${TARGET}" "preflight announces the target"
 fs_unchanged "preflight dry-run wrote nothing"
+# D11 на том же стенде: dry-run без SHA цели не подставляет развёрнутый релиз молча.
+for tool in cutover preflight; do
+    if bash "${DEPLOY_DIR}/${tool}.sh" --dry-run --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
+        case_fail "${tool} --dry-run without a SHA exited 0"
+    else
+        case_ok "${tool} --dry-run without a SHA exits nonzero"
+    fi
+    assert_contains "${FAKE_ROOT}/dry.log" "dry-run needs the TARGET sha" "${tool}: usage names the target"
+    assert_not_contains "${FAKE_ROOT}/dry.log" "checks against deployed release" "${tool}: no silent substitution"
+done
 teardown_case
 case_end
 
-# D2: cutover --dry-run: план печатается, ворота проходятся, записей нет.
+# D2: cutover --dry-run: план печатается, ворота проходятся, записей нет. Тот же прогон
+# (бывшие D9 и D15): план перечисляет NOT RUN шаги записи, а версия PWA читается внутри
+# контейнера — чужой version.json по пути хоста её не подменяет.
 case_begin "cutover dry-run"
 setup_dryrun cutover
+printf '{"version":"zzzzzzzzzzzz"}' >"${WEB_RELEASES}/${DEPLOYED}/_app/version.json"
+SNAP_BEFORE="$(snapshot_tree)"
 watch_start
 if bash "${DEPLOY_DIR}/cutover.sh" "${TARGET}" --dry-run --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
     case_ok "exit 0"
@@ -220,6 +234,10 @@ if grep -Eq 'compose (run|up)|^vzdump |^pg_dump |^dropdb |^pg_restore |^createdb
 else
     case_ok "no mutating calls (stop/dump/restore/compose)"
 fi
+assert_contains "${FAKE_ROOT}/dry.log" "NOT RUN (write steps" "NOT RUN section printed"
+assert_contains "${FAKE_ROOT}/dry.log" "worker stop" "worker stop listed as NOT RUN"
+assert_contains "${FAKE_ROOT}/dry.log" "every read-only preflight/verify gate ran" "all read-only gates reported as run"
+assert_contains "${FAKE_ROOT}/state/calls.log" "docker fakeweb exec caddy cat /srv/canterlot/web/build/_app/version.json" "version.json read via docker exec in the container, not the host path"
 fs_unchanged "cutover dry-run wrote nothing"
 teardown_case
 case_end
@@ -276,69 +294,25 @@ fs_unchanged "failed dry-run wrote nothing"
 teardown_case
 case_end
 
-# D6: неизвестный ключ worker.toml — dry-run обязан выполнить preflight и упасть.
-case_begin "cutover dry-run runs preflight config gate"
-setup_dryrun preflightconfig
+# D6: ворота preflight (неизвестный ключ worker.toml, битый ownership) и verify (код сайта)
+# выполняются в dry-run: провал preflight не обрывает прогон, verify идёт следом и тоже ловит
+# свой сбой (бывшие D6, D7, D8 — один стенд с тремя сбоями).
+case_begin "cutover dry-run runs the preflight config and ownership gates and the verify gates"
+setup_dryrun gates
 printf 'bogus_key = 1\n' >>"${WORKER_CONFIG}"
-SNAP_BEFORE="$(snapshot_tree)"
-watch_start
-if bash "${DEPLOY_DIR}/cutover.sh" "${TARGET}" --dry-run --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
-    case_fail "exit 0 despite unknown worker config key"
-else
-    case_ok "exit nonzero"
-fi
-watch_stop
-assert_contains "${FAKE_ROOT}/dry.log" "unknown key" "preflight config gate ran in dry-run"
-fs_unchanged "failed dry-run wrote nothing"
-teardown_case
-case_end
-
-# D7: битый ownership — preflight в dry-run обязан это поймать.
-case_begin "cutover dry-run runs ownership gate"
-setup_dryrun preflightownership
 printf 'seq = 0\nrecords = [[999]]\n' >"${WORKER_DATA}/ownership/snapshot.toml"
-SNAP_BEFORE="$(snapshot_tree)"
-watch_start
-if bash "${DEPLOY_DIR}/cutover.sh" "${TARGET}" --dry-run --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
-    case_fail "exit 0 despite corrupt ownership"
-else
-    case_ok "exit nonzero"
-fi
-watch_stop
-assert_contains "${FAKE_ROOT}/dry.log" "ownership journal decode failed" "ownership gate ran in dry-run"
-fs_unchanged "failed dry-run wrote nothing"
-teardown_case
-case_end
-
-# D8: verify-ворота (код сайта) тоже выполняются в dry-run.
-case_begin "cutover dry-run runs verify gates"
-setup_dryrun verifygate
 export FAKE_SITE_FAIL=meeting.example.com
-watch_start
 if bash "${DEPLOY_DIR}/cutover.sh" "${TARGET}" --dry-run --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
-    case_fail "exit 0 despite failing verify site gate"
+    case_fail "exit 0 despite failing gates"
 else
     case_ok "exit nonzero"
 fi
-watch_stop
 unset FAKE_SITE_FAIL
+assert_contains "${FAKE_ROOT}/dry.log" "unknown key" "preflight config gate ran in dry-run"
+assert_contains "${FAKE_ROOT}/dry.log" "ownership journal decode failed" "ownership gate ran in dry-run"
 assert_contains "${FAKE_ROOT}/dry.log" "site meeting.example.com: 500, expected 200" "verify site gate ran in dry-run"
 assert_contains "${FAKE_ROOT}/dry.log" "verification read 1" "verify itself ran in dry-run"
-fs_unchanged "failed dry-run wrote nothing"
-teardown_case
-case_end
-
-# D9: план явно перечисляет NOT RUN write-шаги и говорит, что все чтения прошли.
-case_begin "cutover dry-run lists NOT RUN write steps"
-setup_dryrun notrunlist
-if bash "${DEPLOY_DIR}/cutover.sh" "${TARGET}" --dry-run --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
-    case_ok "exit 0"
-else
-    case_fail "exit nonzero"; tail -3 "${FAKE_ROOT}/dry.log"
-fi
-assert_contains "${FAKE_ROOT}/dry.log" "NOT RUN (write steps" "NOT RUN section printed"
-assert_contains "${FAKE_ROOT}/dry.log" "worker stop" "worker stop listed as NOT RUN"
-assert_contains "${FAKE_ROOT}/dry.log" "every read-only preflight/verify gate ran" "all read-only gates reported as run"
+assert_not_contains "${FAKE_ROOT}/dry.log" "CONFIRM=" "a failed dry-run prints no token"
 teardown_case
 case_end
 
@@ -389,35 +363,8 @@ assert_not_contains "${FAKE_ROOT}/dry.log" "OTHER" "record value not printed"
 teardown_case
 case_end
 
-# D10b: csp.txt цели не выведен из финального билда (старый хэш скрипта) — провал до любого flip.
-case_begin "dry-run refuses a target csp.txt that does not match the final build"
-setup_dryrun cspstale
-printf "default-src 'self'; script-src 'sha256-STALEHASH'; connect-src wss://hub.example.com\n" >"${FAKE_ROOT}/dist/${TARGET}/csp.txt"
-(cd "${FAKE_ROOT}/dist/${TARGET}" && find . -type f ! -name 'SHA256SUMS*' -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
-if bash "${DEPLOY_DIR}/cutover.sh" "${TARGET}" --dry-run --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
-    case_fail "exit 0 with a stale CSP hash"
-else
-    case_ok "exit nonzero"
-fi
-assert_contains "${FAKE_ROOT}/dry.log" "target CSP is not derived from the dist build" "stale CSP reported"
-teardown_case
-case_end
-
-
-# D11: dry-run без SHA цели не подставляет развёрнутый релиз молча.
-case_begin "dry-run never substitutes the deployed release for a missing target"
-setup_dryrun nosha
-for tool in cutover preflight; do
-    if bash "${DEPLOY_DIR}/${tool}.sh" --dry-run --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
-        case_fail "${tool} --dry-run without a SHA exited 0"
-    else
-        case_ok "${tool} --dry-run without a SHA exits nonzero"
-    fi
-    assert_contains "${FAKE_ROOT}/dry.log" "dry-run needs the TARGET sha" "${tool}: usage names the target"
-    assert_not_contains "${FAKE_ROOT}/dry.log" "checks against deployed release" "${tool}: no silent substitution"
-done
-teardown_case
-case_end
+# Устаревший хэш в csp.txt цели проверяет test-cutover.sh (J2b): тот же target-check в общей
+# предпроверке боевого прогона отказывает до любой записи. Dry-run без SHA цели — в D1.
 
 # D12: цель ещё не залита — NOT RUN на каждом хосте, провал без --allow-skipped.
 case_begin "dry-run reports a target that is not staged as NOT RUN"
@@ -438,30 +385,15 @@ fi
 teardown_case
 case_end
 
-# D13: залитый релиз не совпадает с dist (испорченный файл, лишний top-level, чужая
-# версия) и база впереди цели — жёстко, с названием причины.
-case_begin "dry-run catches a damaged staged target and a database ahead of it"
-setup_dryrun damaged
-printf 'tampered\n' >>"${WEB_RELEASES}/${TARGET}/200.html"
-echo junk >"${WEB_RELEASES}/${TARGET}/EXTRA"
-printf 'tampered-bin\n' >>"${HUB_RELEASES}/${TARGET}/bin/canterlot-hub"
-printf 'MIGR_MAX=50\nFAILED=0\npayload\n' >"${FAKE_ROOT}/state/db.txt"
-if bash "${DEPLOY_DIR}/cutover.sh" "${TARGET}" --dry-run --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
-    case_fail "exit 0 with a damaged staged target"
-else
-    case_ok "exit nonzero"
-fi
-assert_contains "${FAKE_ROOT}/dry.log" "web ${TARGET} staged top entries differ from the dist" "extra web top-level entry caught"
-assert_contains "${FAKE_ROOT}/dry.log" "web ${TARGET}: staged tree differs from the dist" "web file hash caught"
-assert_contains "${FAKE_ROOT}/dry.log" "hub ${TARGET}: staged tree differs from the dist" "hub binary hash caught"
-assert_contains "${FAKE_ROOT}/dry.log" "database is ahead of the target release" "DB ahead of the target caught"
-teardown_case
-case_end
-
-# D13b: после ручного слияния старых immutable-чанков залитый web шире dist, и это норма;
+# D13: target-check цели на одном стенде, вызовом напрямую. Dry-run, репетиция и боевой прогон
+# зовут тот же target-check в общей предпроверке и падают на его HARD (D12 выше, test-rehearse.sh,
+# J2b в test-cutover.sh), поэтому отказы цели проверяются здесь без полного dry-run на каждый.
+# Порядок: сначала то, что требует чистого стенда, потом порча, накопительно.
+tc() { bash "${DEPLOY_DIR}/target-check.sh" "${TARGET}" "$@" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/tc.log" 2>&1; }
+case_begin "target-check: merged older chunks pass; other extras, damaged staged trees, a database ahead, EXPECT and a damaged dist are refused"
+setup_dryrun targetcheck
+# После ручного слияния старых immutable-чанков залитый web шире dist, и это норма;
 # лишний файл вне _app/immutable по-прежнему провал.
-case_begin "target-check accepts merged older immutable chunks and refuses other extras"
-setup_dryrun merged
 mkdir -p "${WEB_RELEASES}/${TARGET}/_app/immutable/assets"
 echo old >"${WEB_RELEASES}/${TARGET}/_app/immutable/assets/old.css"
 if bash "${DEPLOY_DIR}/target-check.sh" "${TARGET}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/tc.log" 2>&1; then
@@ -485,58 +417,35 @@ if bash "${DEPLOY_DIR}/target-check.sh" "${TARGET}" --dist "${FAKE_ROOT}/dist" >
 else
     case_ok "changed dist file: exit nonzero"
 fi
+# Залитый релиз не совпадает с dist (испорченный файл, лишний top-level, чужой бинарь)
+# и база впереди цели — жёстко, с названием причины.
+printf 'tampered\n' >>"${WEB_RELEASES}/${TARGET}/200.html"
+echo junk >"${WEB_RELEASES}/${TARGET}/EXTRA"
+printf 'tampered-bin\n' >>"${HUB_RELEASES}/${TARGET}/bin/canterlot-hub"
+printf 'MIGR_MAX=50\nFAILED=0\npayload\n' >"${FAKE_ROOT}/state/db.txt"
+if tc --source "${REPO_ROOT}"; then case_fail "exit 0 with a damaged staged target"; else case_ok "damaged staged target: exit nonzero"; fi
+assert_contains "${FAKE_ROOT}/tc.log" "web ${TARGET} staged top entries differ from the dist" "extra web top-level entry caught"
+assert_contains "${FAKE_ROOT}/tc.log" "web ${TARGET}: staged tree differs from the dist" "web file hash caught"
+assert_contains "${FAKE_ROOT}/tc.log" "hub ${TARGET}: staged tree differs from the dist" "hub binary hash caught"
+assert_contains "${FAKE_ROOT}/tc.log" "database is ahead of the target release" "DB ahead of the target caught"
+# EXPECT цели сверяется с `capabilities` боевого воркера dist (решение владельца 4).
+d="${FAKE_ROOT}/dist/${TARGET}"
+printf 'format=1\ncapabilities=claude_histories_v1 path_probe_v1\nharnesses=claude_code codex\n' >"${d}/EXPECT"
+(cd "${d}" && find . -type f ! -name 'SHA256SUMS*' -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
+tc --source "${REPO_ROOT}" || true
+assert_contains "${FAKE_ROOT}/tc.log" "target dist EXPECT equals the worker's own capabilities: 2 capabilities, harnesses claude_code codex" "EXPECT matches the binary"
+printf 'format=1\ncapabilities=claude_histories_v1\nharnesses=claude_code codex\n' >"${d}/EXPECT"
+(cd "${d}" && find . -type f ! -name 'SHA256SUMS*' -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
+tc --source "${REPO_ROOT}" || true
+assert_contains "${FAKE_ROOT}/tc.log" "target dist EXPECT differs from 'canterlot-worker capabilities'" "EXPECT mismatch caught"
+# Dist цели повреждён (SHA256SUMS не сходится, чужая версия в RELEASE).
+printf 'tampered\n' >>"${d}/web/200.html"
+sed -i "s/^sha=.*/sha=dddddddddddd/" "${d}/RELEASE"
+if tc --source "${REPO_ROOT}"; then case_fail "exit 0 with a damaged target dist"; else case_ok "damaged target dist: exit nonzero"; fi
+assert_contains "${FAKE_ROOT}/tc.log" "dist RELEASE sha dddddddddddd is not the target ${TARGET}" "RELEASE sha mismatch caught"
+assert_contains "${FAKE_ROOT}/tc.log" "target dist SHA256SUMS does not verify" "dist hashes caught"
 teardown_case
 case_end
-
-# D14: dist цели повреждён (SHA256SUMS не сходится, чужая версия в RELEASE).
-case_begin "dry-run catches a damaged target dist"
-setup_dryrun baddist
-printf 'tampered\n' >>"${FAKE_ROOT}/dist/${TARGET}/web/200.html"
-sed -i "s/^sha=.*/sha=dddddddddddd/" "${FAKE_ROOT}/dist/${TARGET}/RELEASE"
-if bash "${DEPLOY_DIR}/cutover.sh" "${TARGET}" --dry-run --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
-    case_fail "exit 0 with a damaged target dist"
-else
-    case_ok "exit nonzero"
-fi
-assert_contains "${FAKE_ROOT}/dry.log" "dist RELEASE sha dddddddddddd is not the target ${TARGET}" "RELEASE sha mismatch caught"
-assert_contains "${FAKE_ROOT}/dry.log" "target dist SHA256SUMS does not verify" "dist hashes caught"
-teardown_case
-case_end
-
-# D15: версия PWA читается внутри контейнера, не по пути хоста: при чужом хостовом
-# build/_app/version.json и верном контейнере проверка проходит, при чужом контейнере — нет.
-case_begin "dry-run reads the served PWA version inside the container"
-setup_dryrun containerver
-printf '{"version":"zzzzzzzzzzzz"}' >"${WEB_RELEASES}/${DEPLOYED}/_app/version.json"
-if bash "${DEPLOY_DIR}/cutover.sh" "${TARGET}" --dry-run --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
-    case_ok "host-path version.json is not consulted for the served version"
-else
-    case_fail "host path was read"; grep -E 'HARD|SOFT' "${FAKE_ROOT}/dry.log" | head -3
-fi
-assert_contains "${FAKE_ROOT}/state/calls.log" "docker fakeweb exec caddy cat /srv/canterlot/web/build/_app/version.json" "version.json read via docker exec in the container"
-teardown_case
-case_end
-
-# D16: EXPECT цели сверяется с `capabilities` боевого воркера dist (решение владельца 4).
-for variant in match differ; do
-    case_begin "target-check compares the dist EXPECT with the dist worker (${variant})"
-    setup_dryrun "expect-${variant}"
-    d="${FAKE_ROOT}/dist/${TARGET}"
-    if [ "${variant}" = "match" ]; then
-        printf 'format=1\ncapabilities=claude_histories_v1 path_probe_v1\nharnesses=claude_code codex\n' >"${d}/EXPECT"
-    else
-        printf 'format=1\ncapabilities=claude_histories_v1\nharnesses=claude_code codex\n' >"${d}/EXPECT"
-    fi
-    (cd "${d}" && find . -type f ! -name 'SHA256SUMS*' -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
-    bash "${DEPLOY_DIR}/target-check.sh" "${TARGET}" --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/tc.log" 2>&1 || true
-    if [ "${variant}" = "match" ]; then
-        assert_contains "${FAKE_ROOT}/tc.log" "target dist EXPECT equals the worker's own capabilities: 2 capabilities, harnesses claude_code codex" "EXPECT matches the binary"
-    else
-        assert_contains "${FAKE_ROOT}/tc.log" "target dist EXPECT differs from 'canterlot-worker capabilities'" "EXPECT mismatch caught"
-    fi
-    teardown_case
-    case_end
-done
 
 printf 'dryrun harness: %s passed, %s failed\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]
