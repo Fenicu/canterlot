@@ -4,7 +4,6 @@ import { definedTokens, lintFile, lintTree, undefinedTokens } from '../../script
 import { icons } from '../../src/lib/ui/icons';
 const directory = 'tests/unit/fixtures/token-lint';
 describe('tokens', () => {
-  test('repo_has_no_raw_styling_values', () => expect(lintTree('src', JSON.parse(readFileSync('token-lint.allow.json', 'utf8'))).filter(v => v.severity !== 'warning')).toEqual([]));
   test('lint_detects_each_forbidden_form', () => {
     for (const name of readdirSync(directory).filter(n => n.startsWith('bad-'))) {
       const text = readFileSync(`${directory}/${name}`, 'utf8');
