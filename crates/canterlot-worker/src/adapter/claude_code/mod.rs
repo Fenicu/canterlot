@@ -35,6 +35,9 @@ use std::{
 use tokio::time::{Instant, timeout, timeout_at};
 use uuid::Uuid;
 
+/// Отказ вызову `approve`, чью карточку закрыло прерывание с неизвестным исходом.
+const INTERRUPT_REFUSAL: &str = "The turn is being interrupted";
+
 /// Отказ модели на `ExitPlanMode` в сессии `read_only`.
 pub const READ_ONLY_EXIT_PLAN: &str = "This session is read-only by design and cannot leave plan mode. \
     Do not call ExitPlanMode; finish by writing your final answer as plain text.";
@@ -1387,6 +1390,65 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Записать запрос прерывания и дождаться исхода хода.
+    async fn interrupt_turn(&mut self, line: Value) -> InterruptOutcome {
+        // Управляющий запрос останавливает ход, процесс жив: следующий ввод
+        // уйдёт в тот же CLI без перезапуска. SIGINT — только запасной.
+        let written = matches!(
+            timeout(self.deadline, self.cli.as_mut().unwrap().write_line(&line)).await,
+            Ok(Ok(()))
+        );
+        let mut sigint_sent = false;
+        let mut until = Instant::now() + self.deadline;
+        if !written {
+            // stdin не принял запрос целиком: дальше только сигнал.
+            if self.send_sigint().is_err() {
+                return InterruptOutcome::Undetermined;
+            }
+            sigint_sent = true;
+            until = Instant::now() + self.deadline;
+        }
+        loop {
+            if self.queue.as_ref().unwrap().interrupt_acknowledged() {
+                return InterruptOutcome::Acknowledged;
+            }
+            // Обычный итог после квитанции тоже закрывает ход: ждать нечего.
+            if self.queue.as_ref().unwrap().turn_over() {
+                return InterruptOutcome::Undetermined;
+            }
+            if self.eof {
+                return InterruptOutcome::Undetermined;
+            }
+            if !sigint_sent && self.queue.as_ref().unwrap().interrupt_receipt_expired() {
+                // Запасной путь: квитанции нет в срок, останавливаем ход сигналом.
+                if self.send_sigint().is_err() {
+                    return InterruptOutcome::Undetermined;
+                }
+                sigint_sent = true;
+                // У сигнала своё окно: иначе его итог никто бы не дождался.
+                until = Instant::now() + self.deadline;
+            }
+            // Пока квитанции нет, ожидание идёт до её срока, даже если срок
+            // передачи короче: иначе запасной SIGINT никогда бы не наступил.
+            let receipt = self
+                .queue
+                .as_ref()
+                .unwrap()
+                .interrupt_receipt_bound()
+                .filter(|_| !sigint_sent);
+            match receipt {
+                Some(bound) => {
+                    let _ = timeout_at(bound, self.pump()).await;
+                }
+                None => {
+                    if timeout_at(until, self.pump()).await.is_err() {
+                        return InterruptOutcome::Undetermined;
+                    }
+                }
+            }
+        }
+    }
+
     /// Просроченное сжатие отпускает очередь, висеть вечно нельзя. Без границы это отказ;
     /// с границей сжатие удалось, ждался только служебный итог. Открытый эпизод закроет
     /// своя граница, если придёт: второй строки сжатия не будет.
@@ -1822,68 +1884,26 @@ impl Adapter for ClaudeCodeAdapter {
         else {
             return InterruptOutcome::NotApplicable;
         };
-        for request_id in self.requests.keys() {
+        let open: Vec<String> = self.requests.keys().cloned().collect();
+        for request_id in &open {
             self.events.push_back(AdapterEvent::RequestClosed {
                 request_id: request_id.clone(),
                 reason: "interrupted".into(),
             });
         }
         self.requests.clear();
-        // Управляющий запрос останавливает ход, процесс жив: следующий ввод
-        // уйдёт в тот же CLI без перезапуска. SIGINT — только запасной.
-        let written = matches!(
-            timeout(self.deadline, self.cli.as_mut().unwrap().write_line(&line)).await,
-            Ok(Ok(()))
-        );
-        let mut sigint_sent = false;
-        let mut until = Instant::now() + self.deadline;
-        if !written {
-            // stdin не принял запрос целиком: дальше только сигнал.
-            if self.send_sigint().is_err() {
-                return InterruptOutcome::Undetermined;
-            }
-            sigint_sent = true;
-            until = Instant::now() + self.deadline;
-        }
-        loop {
-            if self.queue.as_ref().unwrap().interrupt_acknowledged() {
-                return InterruptOutcome::Acknowledged;
-            }
-            // Обычный итог после квитанции тоже закрывает ход: ждать нечего.
-            if self.queue.as_ref().unwrap().turn_over() {
-                return InterruptOutcome::Undetermined;
-            }
-            if self.eof {
-                return InterruptOutcome::Undetermined;
-            }
-            if !sigint_sent && self.queue.as_ref().unwrap().interrupt_receipt_expired() {
-                // Запасной путь: квитанции нет в срок, останавливаем ход сигналом.
-                if self.send_sigint().is_err() {
-                    return InterruptOutcome::Undetermined;
-                }
-                sigint_sent = true;
-                // У сигнала своё окно: иначе его итог никто бы не дождался.
-                until = Instant::now() + self.deadline;
-            }
-            // Пока квитанции нет, ожидание идёт до её срока, даже если срок
-            // передачи короче: иначе запасной SIGINT никогда бы не наступил.
-            let receipt = self
-                .queue
-                .as_ref()
-                .unwrap()
-                .interrupt_receipt_bound()
-                .filter(|_| !sigint_sent);
-            match receipt {
-                Some(bound) => {
-                    let _ = timeout_at(bound, self.pump()).await;
-                }
-                None => {
-                    if timeout_at(until, self.pump()).await.is_err() {
-                        return InterruptOutcome::Undetermined;
-                    }
-                }
+        let outcome = self.interrupt_turn(line).await;
+        // Исход неизвестен, карточки супервизор закрыл и решений больше не примет: если
+        // ход на самом деле жив, вызовы `approve` не должны ждать вечно. Вызов, который
+        // CLI уже отменил сам, брокер забыл, и отказ по нему — пустая операция.
+        if matches!(outcome, InterruptOutcome::Undetermined)
+            && let Some(broker) = self.broker.as_mut()
+        {
+            for request_id in &open {
+                broker.refuse(request_id, INTERRUPT_REFUSAL).await;
             }
         }
+        outcome
     }
     async fn next_event(&mut self) -> AdapterEvent {
         loop {

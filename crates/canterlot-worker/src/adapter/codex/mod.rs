@@ -2314,7 +2314,11 @@ impl Adapter for CodexAdapter {
             "turn/interrupt",
             input::interrupt_params(&self.thread_id(), &active.turn_id),
         );
+        // Исход неизвестен, карточки супервизор закрыл и решений больше не примет: если
+        // ход на самом деле жив, его запросы не должны ждать вечно. Запрос, который
+        // сервер уже снял сам, лишний ответ переживает.
         if !self.write_request(message).await {
+            self.pending_writes.extend(self.requests.refuse_all());
             return InterruptOutcome::Undetermined;
         }
         let acknowledged = matches!(
@@ -2323,6 +2327,7 @@ impl Adapter for CodexAdapter {
             Some(Ok(_))
         );
         if !acknowledged {
+            self.pending_writes.extend(self.requests.refuse_all());
             return InterruptOutcome::Undetermined;
         }
         let thread_id = self.thread_id();

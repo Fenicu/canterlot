@@ -418,6 +418,15 @@ impl Requests {
             .collect()
     }
 
+    // Прерывание с неизвестным исходом: карточки закрыты, а сервер запросы мог и не
+    // снять. Отказ получают все, иначе живой ход ждал бы ответа вечно.
+    pub fn refuse_all(&mut self) -> Vec<Value> {
+        let open: Vec<String> = self.pending.keys().cloned().collect();
+        open.iter()
+            .filter_map(|request_id| self.refuse(request_id))
+            .collect()
+    }
+
     // Прерывание: хозяин уже закрыл запросы, главные сервер снимает сам.
     pub fn drop_all(&mut self) {
         self.pending.clear();

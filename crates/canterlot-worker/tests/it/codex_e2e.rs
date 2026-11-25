@@ -1827,6 +1827,44 @@ async fn interrupt_refuses_open_subagent_requests() {
     fake.close().await;
 }
 
+/// `turn/interrupt` остался без ответа: исход неопределённый, супервизор закрывает
+/// карточки и решений больше не принимает. Открытые запросы — и главного хода, и
+/// субагента — получают отказ, иначе живой ход ждал бы ответа, которого дать некому.
+#[tokio::test]
+async fn undetermined_interrupt_refuses_every_open_request() {
+    use canterlot_worker::adapter::InterruptOutcome;
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.push(w_out(
+        json!({"id": 30, "method": "item/commandExecution/requestApproval",
+        "params": {"threadId": "thread-mini", "turnId": "turn-1", "itemId": "exec-main",
+            "command": "cargo test", "cwd": "/tmp"}}),
+    ));
+    lines.push(child_approval(31));
+    lines.push(w_in(11, "turn/interrupt", json!({})));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    fake.start_turn("run").await;
+    let mut opened = 0;
+    while opened < 2 {
+        if matches!(fake.event().await, AdapterEvent::RequestOpened { .. }) {
+            opened += 1;
+        }
+    }
+    match tokio::time::timeout(WAIT, fake.adapter.interrupt())
+        .await
+        .unwrap()
+    {
+        InterruptOutcome::Undetermined => {}
+        other => panic!("interrupt: {other:?}"),
+    }
+    let (main, _) = fake.reply_to(30).await;
+    assert_eq!(main["result"], json!({"decision": "decline"}));
+    let (child, _) = fake.reply_to(31).await;
+    assert_eq!(child["result"], json!({"decision": "decline"}));
+    fake.close().await;
+}
+
 #[tokio::test]
 async fn mcp_tool_approval_waits_for_the_owner_in_ask_mode() {
     let request = serde_json::from_str::<Value>(

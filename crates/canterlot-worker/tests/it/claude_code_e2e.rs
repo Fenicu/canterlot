@@ -1450,6 +1450,61 @@ async fn request_closed_by_interrupt_is_not_closed_again_on_relay_disconnect() {
     f.close().await;
 }
 
+/// Прерывание без квитанции и без итога хода — исход неопределённый: супервизор
+/// закрывает карточки и решений больше не принимает. Вызов `approve` при этом
+/// обязан получить отказ, иначе живой CLI ждал бы ответа, которого дать некому.
+#[tokio::test]
+async fn undetermined_interrupt_refuses_the_open_request_to_the_cli() {
+    use canterlot_worker::adapter::claude_code::input::CONTROL_TIMEOUT;
+    let _sigint =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+    let id = Uuid::now_v7();
+    let mut f = Fake::with_timers(
+        vec![vec![
+            json!({"type":"stream_event","user_message_uuid":id,"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+            json!("@request:0"),
+            json!("@wait"),
+        ]],
+        CONTROL_TIMEOUT / 2,
+        WAIT,
+    );
+    std::fs::write(
+        f.dir.path().join("relay-exe"),
+        env!("CARGO_BIN_EXE_canterlot-worker"),
+    )
+    .unwrap();
+    let call = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"approve",
+        "arguments":{"tool_name":"Bash","input":{"command":"touch held.txt"},"tool_use_id":"toolu_held"},
+        "_meta":{"claudecode/toolUseId":"toolu_held"}}});
+    std::fs::write(
+        f.dir.path().join("mcp-calls.json"),
+        serde_json::to_vec(&vec![call]).unwrap(),
+    )
+    .unwrap();
+    // Двойник занят ожиданием ответа MCP: управляющий запрос не читает, сигнал не останавливает ход.
+    std::fs::write(f.dir.path().join("sigint-ignored"), "1").unwrap();
+    f.start().await;
+    f.send(&tx(id)).await;
+    loop {
+        if let AdapterEvent::RequestOpened { request_id, .. } = f.event().await {
+            assert_eq!(request_id, "toolu_held");
+            break;
+        }
+    }
+    let outcome = tokio::time::timeout(Duration::from_secs(30), f.adapter.interrupt())
+        .await
+        .expect("interrupt is bounded by the receipt wait and the signal window");
+    assert!(
+        matches!(outcome, adapter::InterruptOutcome::Undetermined),
+        "{outcome:?}"
+    );
+    // Двойник дошёл до `@wait` только после ответа на вызов MCP.
+    f.wait_point().await;
+    let reply = mcp_reply_text(&f);
+    assert_eq!(reply["behavior"], "deny", "{reply}");
+    f.close().await;
+}
+
 #[tokio::test]
 async fn command_lifecycle_proves_delivery_before_a_slow_first_answer_frame() {
     let id = Uuid::now_v7();

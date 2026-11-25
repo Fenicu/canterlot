@@ -25,6 +25,8 @@ def emit(v):
     if v.get('subtype')=='init': v=dict(v,session_id=sid)
     print(json.dumps(v),flush=True)
 def interrupted(*_):
+    # CLI пережил сигнал и ход не остановил: исход прерывания остаётся неопределённым.
+    if (d/'sigint-ignored').exists(): return
     for v in json.loads((d/'interrupt.json').read_text()): emit(v)
     sys.exit(0)
 signal.signal(signal.SIGINT,interrupted)
