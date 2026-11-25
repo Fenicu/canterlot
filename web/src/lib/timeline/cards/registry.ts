@@ -51,7 +51,7 @@ import { shell } from './defs/shell';
 import { todo } from './defs/todo';
 import { context7, question, quiet, skill, subagent, taiga } from './defs/tools';
 import { fetchPage, search } from './defs/web';
-import { sessionLink } from './links';
+import { safeLink, sessionLink } from './links';
 import { outcomeWord, type Outcome } from './outcome';
 import { toolFamily, toolId } from './toolId';
 import type { IconName } from '#lib/ui/icons.js';
@@ -82,7 +82,7 @@ export function card<D>(logic: CardLogic<D>, component: Component<CardProps<D>> 
           def: self,
           data,
           line,
-          link: logic.link?.(call, data) ?? null,
+          link: safeLink(logic.link?.(call, data) ?? null),
           word: logic.word ? logic.word(call, data, now) : defaultWord(call),
           icon: self.icon,
           view: { data, render: component }

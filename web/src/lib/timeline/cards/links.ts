@@ -8,6 +8,21 @@ export function sessionLink(call: CardCall, id: string, fallback = ''): CardLink
   return { text: quoted(sessionTitle(call, id, fallback)), href: `/c/${id}` };
 }
 
+/**
+ * Внешняя ссылка карточки открывается в новой вкладке, а её адрес приходит из аргументов
+ * вызова или ответа инструмента. Наружу ведёт только http(s): `intent://` и схемы приложений
+ * на телефоне по касанию открыли бы чужую программу. Остальное остаётся текстом строки.
+ */
+export function safeLink(link: CardLink | null): CardLink | null {
+  if (!link?.external) return link;
+  try {
+    const { protocol } = new URL(link.href);
+    return protocol === 'http:' || protocol === 'https:' ? link : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Строка, разбитая вокруг ссылки: до, ссылка, после. Ссылки нет в строке — она целиком текстом. */
 export function splitLink(line: string, link: CardLink | null): { before: string; link: CardLink | null; after: string } {
   if (!link) return { before: line, link: null, after: '' };

@@ -248,6 +248,18 @@ describe('share, limits, web, tools', () => {
     expect(page.link).toEqual({ text: 'svelte.dev', href: 'https://www.svelte.dev/docs/svelte/svelte-boundary', external: true });
   });
 
+  it('external_card_links_are_http_only_other_schemes_stay_text', () => {
+    // Адрес приходит из аргументов вызова: схема приложения по касанию открыла бы чужую программу.
+    for (const url of ['intent://scan.example/#Intent;scheme=zxing;package=com.example;end', 'myapp://open.example/path', 'ftp://files.example/a']) {
+      const page = resolveCard(made('WebFetch', { url, prompt: 'x' }, 'Text'), NOW)!;
+      expect(page.line, url).toContain(new URL(url).hostname);
+      expect(page.link, url).toBeNull();
+    }
+    const story = resolveCard(made('mcp__plugin_taiga_taiga__taiga_userstory_update', { ref: 123, subject: 'Карточки ленты' }, hub({ ref: 123, subject: 'Карточки ленты', permalink: 'intent://taiga.example/project/x/us/123#Intent;end' })), NOW)!;
+    expect(story.line).toBe('Taiga · обновила историю #123 «Карточки ленты»');
+    expect(story.link).toBeNull();
+  });
+
   it('skill_taiga_context7', () => {
     expect(resolveCard(made('Skill', { skill: 'superpowers:brainstorming' }, 'Launching skill'), NOW)!.line).toBe('Навык: brainstorming');
     expect(resolveCard(made('skill', { name: 'brainstorming' }, ''), NOW)!.line).toBe('Навык: brainstorming');
