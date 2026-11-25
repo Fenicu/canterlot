@@ -1958,7 +1958,14 @@ async fn smoke_turn_raw(
     {
         TransmitOutcome::Accepted(p) => {
             assert_eq!(p.command_id, input.command_id);
-            assert_eq!(p.kind, "claude_code_answer_frame");
+            assert!(
+                matches!(
+                    p.kind,
+                    "claude_code_answer_frame" | "claude_code_command_lifecycle"
+                ),
+                "unexpected proof kind {}",
+                p.kind
+            );
         }
         other => panic!("delivery: {other:?}"),
     }
@@ -2093,16 +2100,22 @@ async fn live_smoke() {
     eprintln!(
         "CONFIRMED: init matches chosen native id, canterlot MCP connected, text streamed; model={model}"
     );
-    let five_hour = events.iter().find_map(|e| match e {
+    // Поток шлёт одно определяющее окно; у плана без пятичасового лимита это недельное.
+    let observed = events.iter().find_map(|e| match e {
         AdapterEvent::Limit(adapter::LimitFact::Observed {
-            window: adapter::LimitWindow::FiveHour,
+            window,
             used_permille,
             resets_at_ms: Some(reset),
-        }) => Some((*used_permille, *reset)),
+        }) => Some((*window, *used_permille, *reset)),
         _ => None,
     });
-    let (used, reset) = five_hour.expect("live rate_limit_event gives a five-hour observation");
-    eprintln!("CONFIRMED: rate_limit_event observed five-hour {used}‰, resets_at_ms={reset}");
+    let (window, used, reset) = observed.expect("live rate_limit_event gives a window observation");
+    let window_name = match window {
+        adapter::LimitWindow::FiveHour => "five-hour",
+        adapter::LimitWindow::Weekly => "weekly",
+        adapter::LimitWindow::WeeklyFable => "weekly fable",
+    };
+    eprintln!("CONFIRMED: rate_limit_event observed {window_name} {used}‰, resets_at_ms={reset}");
 
     // Только команда записи: чтение (printf, echo, ls, sleep) CLI разрешает сам,
     // не спрашивая --permission-prompt-tool.
@@ -2128,7 +2141,7 @@ async fn live_smoke() {
     let events = smoke_turn(&mut f, input).await;
     assert!(
         events.iter().any(
-            |e| matches!(e, AdapterEvent::BlockFinal {text, ..} if text.contains("five-hour window"))
+            |e| matches!(e, AdapterEvent::BlockFinal {text, ..} if text.contains(&format!("{window_name} window")))
         ),
         "canterlot_limits answers from the live observations"
     );
