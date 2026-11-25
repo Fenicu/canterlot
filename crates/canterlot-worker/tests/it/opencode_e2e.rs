@@ -98,10 +98,13 @@ stop_retry = "200ms"
 
 impl Env {
     async fn new(script: Option<Script>) -> Self {
+        Self::with_fake(script.map(Fake::new)).await
+    }
+
+    async fn with_fake(fake: Option<Fake>) -> Self {
         let root = TempDir::new().unwrap();
         let work = root.path().join("work");
         fs::create_dir(&work).unwrap();
-        let fake = script.map(Fake::new);
         let table = fake.as_ref().map_or(String::new(), |fake| {
             format!(
                 "[opencode]\nexecutable = \"{}\"\nowner_config = \"{}\"\n",
@@ -285,9 +288,10 @@ impl Env {
         id
     }
 
-    async fn pump(&mut self, within: Duration) -> bool {
-        match timeout(within, self.relay.recv()).await {
-            Ok(Some(batch)) => {
+    /// Следующая пачка журнала; `false` — канал закрыт, больше ничего не придёт.
+    async fn pump(&mut self) -> bool {
+        match self.relay.recv().await {
+            Some(batch) => {
                 let mut last = 0;
                 for record in batch.records {
                     last = last.max(record.seq);
@@ -300,20 +304,24 @@ impl Env {
                 self.manager().on_sj_ack(batch.journal_id, last);
                 true
             }
-            _ => false,
+            None => false,
         }
     }
 
+    // Молчание журнала до срока не конец: на старте адаптера супервизор ничего не отдаёт,
+    // пока сервер не ответит, а под fsync соседей на общем диске это секунды.
     async fn wait(&mut self, what: &str, wanted: impl Fn(&[Body]) -> bool) {
-        let outcome = timeout(WAIT, async {
-            loop {
-                if wanted(&self.bodies) {
-                    return true;
-                }
-                if !self.pump(Duration::from_secs(5)).await {
-                    return wanted(&self.bodies);
+        self.wait_within(WAIT, what, wanted).await;
+    }
+
+    async fn wait_within(&mut self, limit: Duration, what: &str, wanted: impl Fn(&[Body]) -> bool) {
+        let outcome = timeout(limit, async {
+            while !wanted(&self.bodies) {
+                if !self.pump().await {
+                    return false;
                 }
             }
+            true
         })
         .await;
         assert!(
@@ -336,7 +344,11 @@ impl Env {
     }
 
     async fn wait_running(&mut self) {
-        self.wait("running", |bodies| {
+        self.wait_running_within(WAIT).await;
+    }
+
+    async fn wait_running_within(&mut self, limit: Duration) {
+        self.wait_within(limit, "running", |bodies| {
             bodies
                 .iter()
                 .any(|body| matches!(body, Body::ExecutionState(f) if f.state == "running"))
@@ -494,6 +506,27 @@ async fn start_execution_reaches_running_through_a_real_supervisor() {
         env.fake().boot()["env"]["OPENCODE_CONFIG_DIR"],
         env.exec_dir().join("opencode-config").to_str().unwrap()
     );
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Пока адаптер запускается, супервизор не отдаёт журнал вовсе: строка готовности, проверка
+// версии и создание сессии идут внутри одного шага, и fsync соседних тестов на общем диске
+// растягивает этот шаг на секунды. Молчание короче срока ожидания провалом не считается.
+#[tokio::test]
+async fn slow_server_start_within_the_deadline_still_reaches_running() {
+    let mut script = ready();
+    let prompt = script
+        .steps
+        .iter()
+        .rposition(|step| step.expected_path().is_some())
+        .unwrap();
+    script.steps.truncate(prompt);
+    // Дольше прежних 5 с тишины; срок ожидания сверх задержки тот же, что у остальных.
+    let delay = Duration::from_secs(6);
+    let mut env = Env::with_fake(Some(Fake::slow_serve(script, delay))).await;
+    env.start("bypass").await;
+    env.wait_running_within(WAIT + delay).await;
     env.stop().await;
     env.fake().wait_gone().await;
 }
