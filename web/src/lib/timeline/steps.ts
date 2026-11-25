@@ -7,7 +7,7 @@ import { isSubagentCall, type BlockLinks } from "./rows";
 
 const MIN_STEPS = 3;
 
-type BlockEntry = Extract<TimelineEntry, { kind: "block" }>;
+export type BlockEntry = Extract<TimelineEntry, { kind: "block" }>;
 
 export interface StepGroup {
   kind: "group";
@@ -81,12 +81,14 @@ function running(block: BlockModel, ctx: FoldContext): boolean {
   return toolTiming(block, ctx.links.result(block.id), ctx.working, ctx.links.background(block.id)).running;
 }
 
-function stepName(block: BlockModel, ctx: FoldContext): string {
+/** Имя шага в счётчике и в живом окне: одно и то же у группы и у окна. */
+export function stepName(block: BlockModel, ctx: Pick<FoldContext, "label">): string {
   if (isSubagentCall(block)) return "Субагент";
   return ctx.label?.(block) || toolTitle(block).name || "Шаг";
 }
 
-function tallyOf(tools: BlockEntry[], ctx: FoldContext): string {
+/** Счётчик вызовов хода: «Правка 7 · Команда 5». Общий у свёрнутой группы и шапки живого окна. */
+export function tallyOf(tools: BlockEntry[], ctx: Pick<FoldContext, "label">): string {
   const counts = new Map<string, number>();
   for (const { block } of tools) counts.set(stepName(block, ctx), (counts.get(stepName(block, ctx)) ?? 0) + 1);
   return [...counts]

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { blockEndLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
   import { cacheHintText, costLine } from '#lib/format/cost.js';
@@ -11,8 +12,11 @@
   import { liveLineQuiet } from '#lib/timeline/reasoning.js';
   import { apiErrorView } from '#lib/timeline/system.js';
   import { shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
-  import { foldSteps } from '#lib/timeline/steps.js';
+  import { foldSteps, type CardItem } from '#lib/timeline/steps.js';
+  import { liveWindow } from '#lib/timeline/liveWindow.js';
+  import LiveWindow from '#lib/timeline/LiveWindow.svelte';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
+  import { rowFold, rowFoldWhen } from '#lib/ui/fold.js';
   import type { InterruptControl } from '#lib/composer/interrupt.svelte.js';
   import type { LeaseWait } from '#lib/format/lease.js';
   import NoticeBlock from '#lib/timeline/NoticeBlock.svelte';
@@ -72,8 +76,7 @@
     markable?: boolean;
   } = $props();
 
-  const all = $derived(entries.flatMap((entry) => (entry.kind === 'block' ? [entry.block] : [])));
-  // Текст рассуждения читается здесь один раз: токен меняет строку только тогда, когда пустое рассуждение обретает текст.
+  const all = $derived(entries.flatMap((entry) => (entry.kind === 'block' ? [entry.block] : [])));  // Текст рассуждения читается здесь один раз: токен меняет строку только тогда, когда пустое рассуждение обретает текст.
   const hollow = $derived(entries.filter((entry) => entry.kind === 'block' && !shownInCard(entry.block)).map((entry) => entry.key).join(' '));
   const blocks = $derived.by(() => {
     const empty = new Set(hollow.split(' '));
@@ -99,8 +102,45 @@
   const quietLiveLine = $derived(liveLineQuiet(phase, ownReasoning));
   const report = (block: BlockModel) => block.parentId === laneRoot && block.kind === 'tool_result' && isMainAgent(block.agent);
   // Карточки делегирования, плана и файлов не прячутся в свёрнутые шаги: реестр говорит, какие.
-  const items = $derived(foldSteps(blocks, { links, working, live, folds, stays: (block) => report(block) || cardStays(block), quiet: cardQuiet, label: cardLabel, fold: cardFold }));
+  const stays = (block: BlockModel) => report(block) || cardStays(block);
+  const items = $derived(foldSteps(blocks, { links, working, live, folds, stays, quiet: cardQuiet, label: cardLabel, fold: cardFold }));
   const view = $derived(folds.view(cardKey, items, live));
+  // Живое окно: пока ход идёт, шаги текут хвостом, а не сворачиваются на глазах.
+  const windowState = $derived(liveWindow(blocks, { links, working, stays, label: cardLabel, harness }));
+  const windowFull = $derived(folds.isOpen(`window:${cardKey}`));
+  const windowShown = $derived(live && windowState.stream.length > 0);
+  // Вступление живёт вне ветки окна: на конце хода Svelte держит уходящую ветку до конца
+  // движения, и те же строки вставали бы дважды. Ключи те же, что у строк полного вида.
+  const introItems = $derived(windowState.before.map((entry): CardItem => ({ kind: 'entry', key: entry.key, entry })));
+  const introKeys = $derived(new Set(introItems.map((item) => item.key)));
+  const windowRest = $derived(view.shown.filter((item) => !introKeys.has(item.key)));
+  // Под окном — только запросы; в полном списке и в законченном виде — хвост ленты,
+  // где запросы стоят на своём месте. Ключи строк одни и те же, поэтому конец хода
+  // не повторяет запрос: та же строка переезжает, а не рождается заново.
+  const tailItems = $derived(
+    windowShown && !windowFull
+      ? windowState.requests.map((entry): CardItem => ({ kind: 'entry', key: entry.key, entry }))
+      : windowRest
+  );
+  // Ход кончился: окно уступает сегодняшнему виду, а лента у хвоста остаётся прижатой.
+  // Строки нового вида въезжают тем же движением, что уходит окно: высота карточки
+  // меняется в одну сторону, без горба из старого окна и нового списка сразу.
+  let wasLive = untrack(() => live);
+  let tailArrived = false;
+  const tailFold = rowFoldWhen(() => tailArrived);
+  $effect.pre(() => {
+    if (live) {
+      wasLive = true;
+      return;
+    }
+    if (!wasLive) return;
+    wasLive = false;
+    tailArrived = true;
+    folds.autoChange(true);
+  });
+  function toggleWindow(): void {
+    folds.toggle(`window:${cardKey}`, windowFull);
+  }
   const topBlocks = $derived(all.filter((block) => block.parentId === null));
   const anchor = $derived(bookmarkAnchor(topBlocks));
   // Отмеченным карточка считается по любому верхнему блоку, а снимает все такие отметки.
@@ -132,23 +172,38 @@
   {/if}
 {/snippet}
 
-<article class="card">
-  {#each view.shown as item (item.key)}
-    {#if item.key === view.seam}
-      <button type="button" class="more" onclick={() => folds.reveal(cardKey)}>Показать ещё {view.hidden} {fmt.plural(view.hidden, ['шаг', 'шага', 'шагов'])}</button>
+{#snippet itemRow(item: CardItem)}
+  <div class="entry" data-key={item.key}>
+    {#if item.kind === 'group'}
+      <StepGroupRow group={item} {folds} row={entryRow} />
+    {:else if item.kind === 'quiet'}
+      <QuietRow group={item} {folds} row={entryRow} />
+    {:else}
+      {@render entryRow(item.entry)}
     {/if}
-    <div class="entry" data-key={item.key}>
-      {#if item.kind === 'group'}
-        <StepGroupRow group={item} {folds} row={entryRow} />
-      {:else if item.kind === 'quiet'}
-        <QuietRow group={item} {folds} row={entryRow} />
-      {:else}
-        {@render entryRow(item.entry)}
+  </div>
+{/snippet}
+
+<article class="card">
+  {#each introItems as item (item.key)}
+    {@render itemRow(item)}
+  {/each}
+  {#if windowShown}
+    <div class="live-fold" out:rowFold>
+      <LiveWindow view={windowState} {now} open={windowFull} onToggle={toggleWindow} />
+    </div>
+  {/if}
+  {#each tailItems as item (item.key)}
+    <div class="tail-row" in:tailFold>
+      {#if item.key === view.seam}
+        <button type="button" class="more" onclick={() => folds.reveal(cardKey)}>Показать ещё {view.hidden} {fmt.plural(view.hidden, ['шаг', 'шага', 'шагов'])}</button>
       {/if}
+      {@render itemRow(item)}
     </div>
   {/each}
   {#if live && head}
-    <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} {interrupt} waiting={working ? leaseWait : null} quiet={quietLiveLine} />
+    <!-- В окне рассуждение идёт строкой без своей подписи: фазу называет строка хода. -->
+    <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} {interrupt} waiting={working ? leaseWait : null} quiet={windowShown && !windowFull ? false : quietLiveLine} />
   {/if}
   {#if head}
     <footer class="byline" data-role="answer-footer">
@@ -207,6 +262,9 @@
   .hint { display: block; max-width: 100%; margin-top: var(--s0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .footer-actions { display: flex; align-items: center; gap: var(--s1); }
   .entry { min-width: 0; }
+  /* Окно хода складывается тем же движением, что раскрытая строка ленты. */
+  .live-fold { min-width: 0; }
+  .tail-row { min-width: 0; }
   .entry:has(> :global(.text)) { margin-block: var(--s2); }
   .report { display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s2); }
   h3 { margin: var(--s0); font-size: var(--fs-body); font-weight: var(--weight-semibold); }

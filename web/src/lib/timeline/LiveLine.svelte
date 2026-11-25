@@ -17,15 +17,17 @@
   // Процесс стоит в очереди тяжёлых задач машины: место в очереди важнее имени инструмента.
   const text = $derived(waiting ? leaseWaitText(waiting) : liveLineText(phase, Math.max(0, now - startedAt), tool));
   // Занятие («Генерирует», «Выполняет Bash») сменяется подписью, а часы хода после « · » тикают на месте без движения.
+  // Разделитель живёт в подписи: подпись на миг уходит при смене фазы, и «· 12 с» без слова не появляется.
   const parts = $derived.by(() => {
     const cut = waiting ? -1 : text.lastIndexOf(' · ');
-    return cut < 0 ? { label: text, tail: '' } : { label: text.slice(0, cut), tail: text.slice(cut) };
+    return cut < 0 ? { label: text, tail: '' } : { label: text.slice(0, cut), tail: ` ${text.slice(cut + 3)}` };
   });
+  const labelText = $derived(parts.tail ? `${parts.label} ·` : parts.label);
 </script>
 
 <div class="live" data-working data-quiet={quiet ? '' : undefined} data-lease-wait={waiting ? '' : undefined}>
   <!-- В очереди тяжёлых задач ничего ещё не пишется: перо уступает стоящий молоток. -->
-  {#if waiting}<span class="queued" aria-hidden="true"><Icon name="hammer" /></span>{:else}<WorkMotif />{/if}<span class="text" class:sr-only={quiet}><span class="label" use:swapOn={{ text: parts.label, key: parts.label }}></span><span class="tail">{parts.tail}</span></span>
+  {#if waiting}<span class="queued" aria-hidden="true"><Icon name="hammer" /></span>{:else}<WorkMotif />{/if}<span class="text" class:sr-only={quiet}><span class="label" use:swapOn={{ text: labelText, key: parts.label }}></span><span class="tail">{parts.tail}</span></span>
   <!-- Прервать ход можно здесь, вдали от «Отправить»: промах по кнопке отправки не прерывает работу. -->
   {#if interrupt}
     <button type="button" class="stop" data-interrupt aria-busy={interrupt.running} onclick={() => void interrupt.interrupt()}><Icon name="stop" /><span>{interrupt.label}</span></button>
