@@ -98,8 +98,14 @@ else
         -f "$dockerfile" "$wt/docker/gate" || die 'не удалось собрать образ'
 fi
 
-name="canterlot-gate-$sha12-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+run_id="$sha12-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+name="canterlot-gate-$run_id"
+# Свой пустой /tmp на каждый контейнер: каталог создаётся здесь заново и убирается после
+# прогона, поэтому in-container.sh ничего не чистит и чужих файлов не видит.
+run_tmp="$cache/tmp/run-$run_id"
+mkdir "$run_tmp"
 run_pid=""
+remove_run_tmp() { rm -rf "$run_tmp"; }
 # Прерывание (задачу отменили или вышел таймаут): контейнер не должен пережить скрипт.
 on_signal() {
     local code=$1
@@ -107,6 +113,7 @@ on_signal() {
     log "сигнал: убираю контейнер $name"
     "$docker_cmd" kill "$name" >/dev/null 2>&1 || true
     [[ -z "$run_pid" ]] || wait "$run_pid" 2>/dev/null || true
+    remove_run_tmp
     exit "$code"
 }
 trap 'on_signal 130' INT
@@ -125,7 +132,7 @@ run_args=(
     --cpus "$cpus" --memory "${mem_mb}m" --pids-limit 8192
     --shm-size=2g
     --cap-add SYS_PTRACE
-    -v "$cache/tmp:/tmp"
+    -v "$run_tmp:/tmp"
     -v "$wt:/src"
     -v "$git_common:$git_common:ro"
     -v "$cache/cargo:/cache/cargo"
@@ -135,7 +142,7 @@ run_args=(
     -v "$in_container:/build/in-container.sh:ro"
     -e CARGO_HOME=/cache/cargo
     -e npm_config_cache=/cache/npm
-    # Метка «это контейнер гейта»: без неё in-container.sh не чистит /tmp и отказывает.
+    # Метка «это контейнер гейта»: без неё in-container.sh отказывает.
     -e CANTERLOT_GATE_CONTAINER=1
     -w /src
     "${proxy_run[@]}"
@@ -147,6 +154,7 @@ gate_code=0
 run_pid=$!
 wait "$run_pid" || gate_code=$?
 run_pid=""
+remove_run_tmp
 log "гейт завершился с кодом $gate_code"
 
 if [[ -f "$out/state.tsv" ]]; then

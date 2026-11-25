@@ -71,17 +71,14 @@ run 1 bash scripts/gate/in-container.sh --src "$tmp/src" --out "$tmp/full-out" \
     --sha "$sha12"
 grep -q 'не пуст' "$out" || { cat "$out" >&2; fail "нет отказа для непустого --out"; }
 
-# in-container.sh чистит /tmp: вне контейнера это /tmp машины. Отказ обязан стоять до чистки —
-# и по метке контейнера (её ставят только gate-remote.sh и runner-gate.sh), и по чужому HEAD.
-# Порядок сверяется по тексту всегда; само поведение — только в отдельном пространстве
-# монтирования с tmpfs поверх /tmp, чтобы регрессия не снесла настоящий /tmp.
-line_of() { grep -n -m1 -- "$1" scripts/gate/in-container.sh | cut -d: -f1; }
-wipe_line=$(line_of '^find /tmp ')
-mark_line=$(line_of 'CANTERLOT_GATE_CONTAINER')
-head_line=$(line_of 'rev-parse --short=12 HEAD')
-[[ -n "$wipe_line" ]] || fail 'in-container.sh: не найдена чистка /tmp (тест устарел)'
-[[ -n "$mark_line" && "$mark_line" -lt "$wipe_line" ]] || fail 'in-container.sh: метка контейнера не проверяется до чистки /tmp'
-[[ -n "$head_line" && "$head_line" -lt "$wipe_line" ]] || fail 'in-container.sh: HEAD сверяется после чистки /tmp'
+# in-container.sh не чистит /tmp: свой пустой каталог на прогон монтируют gate-remote.sh и
+# runner-gate.sh. Чистка общего /tmp снесла бы файлы выката и сессий машины, поэтому её нет и
+# в тексте. Поведение проверяется только в отдельном пространстве монтирования с tmpfs поверх
+# /tmp, чтобы регрессия не тронула настоящий /tmp: без метки, на чужом HEAD и с непустым /tmp —
+# отказ, и файл в /tmp остаётся.
+if grep -nE '(find|rm)[^#]*/tmp' scripts/gate/in-container.sh | grep -v '^[0-9]*:#'; then
+    fail 'in-container.sh снова чистит /tmp'
+fi
 if unshare -rm true 2>/dev/null; then
     # shellcheck disable=SC2016 # раскрывается во внутреннем bash
     in_ns='
@@ -104,9 +101,13 @@ exit 0
         run 0 env CANTERLOT_GATE_CONTAINER=1 unshare -rm bash -c "$in_ns" ns 000000000000
         grep -q 'HEAD в .* не 000000000000' "$out" || { cat "$out" >&2; fail 'in-container.sh не отказал на чужом HEAD'; }
         grep -qx SENTINEL_KEPT "$out" || { cat "$out" >&2; fail 'in-container.sh на чужом HEAD вычистил /tmp до сверки'; }
+        # Метка и HEAD верны, но /tmp не пуст (чужой каталог): отказ, ничего не удалено.
+        run 0 env CANTERLOT_GATE_CONTAINER=1 unshare -rm bash -c "$in_ns" ns "$sha12"
+        grep -q '/tmp не пуст' "$out" || { cat "$out" >&2; fail 'in-container.sh не отказал на непустом /tmp'; }
+        grep -qx SENTINEL_KEPT "$out" || { cat "$out" >&2; fail 'in-container.sh вычистил непустой /tmp'; }
     fi
 else
-    printf 'пропуск: unshare -rm недоступен, чистка /tmp проверена только по тексту\n'
+    printf 'пропуск: unshare -rm недоступен, /tmp проверен только по тексту\n'
 fi
 
 # --- scripts/gate.sh: отказы и аренда без прогона проверок ---
@@ -829,6 +830,11 @@ grep -qF -- "-v $rwt/scripts/gate/in-container.sh:/build/in-container.sh:ro" <<<
 grep -qE -- "canterlot-gate:[0-9a-f]{12} bash /build/in-container.sh --src /src --out /out --sha ${rsha:0:12}" <<<"$run_line" \
     || fail "runner-gate: не та команда в контейнере: $run_line"
 grep -qF -- ' -e CANTERLOT_GATE_CONTAINER=1 ' <<<"$run_line" || fail "runner-gate: контейнер не получил метку CANTERLOT_GATE_CONTAINER: $run_line"
+# /tmp контейнера — свой пустой каталог этого прогона, после прогона его нет.
+tmp_line=$(grep '^tmp ' "$FAKE_DOCKER_CALLS") || fail 'runner-gate: /tmp не смонтирован'
+[[ "$tmp_line" =~ ^tmp\ $rr/cache/tmp/run-${rsha:0:12}-[0-9a-f]{8}\ empty$ ]] || fail "runner-gate: /tmp не свой пустой каталог прогона: $tmp_line"
+tmp_host=${tmp_line#tmp }; tmp_host=${tmp_host% empty}
+[[ ! -e "$tmp_host" ]] || fail "runner-gate: каталог /tmp прогона остался: $tmp_host"
 if grep -q '^build ' "$FAKE_DOCKER_CALLS"; then fail 'runner-gate: образ пересобран, хотя он есть'; fi
 grep -qx 'runner	runner-a' "$rwt/.gate-out/state.tsv" || fail 'runner-gate: имя раннера не дописано в state.tsv'
 [[ -s "$rwt/.gate-out/result.txt" ]] || fail 'runner-gate: нет result.txt в .gate-out'
@@ -911,6 +917,10 @@ src_host=$(sed -n 's/.* -v \([^ ]*\):\/src .*/\1/p' <<<"$run_line")
 [[ "$src_host" == "$common"/canterlot-gate/src-* ]] || fail "gate-remote --local: рабочая копия не там: $src_host"
 grep -qF -- " -v $common:$common:ro " <<<"$run_line" || fail "gate-remote --local: общий каталог git не смонтирован только на чтение: $run_line"
 grep -qF -- ' -e CANTERLOT_GATE_CONTAINER=1 ' <<<"$run_line" || fail "gate-remote --local: контейнер не получил метку CANTERLOT_GATE_CONTAINER: $run_line"
+tmp_line=$(grep '^tmp ' "$FAKE_DOCKER_CALLS") || fail 'gate-remote --local: /tmp не смонтирован'
+[[ "$tmp_line" =~ ^tmp\ $tmp/gr-cache/tmp/run-[0-9a-f]{12}-[0-9a-f]{8}\ empty$ ]] || fail "gate-remote --local: /tmp не свой пустой каталог прогона: $tmp_line"
+tmp_host=${tmp_line#tmp }; tmp_host=${tmp_host% empty}
+[[ ! -e "$tmp_host" ]] || fail "gate-remote --local: каталог /tmp прогона остался: $tmp_host"
 
 if command -v shellcheck >/dev/null 2>&1; then
     shellcheck scripts/gate.sh scripts/gate-coverage.sh scripts/gate-remote.sh \

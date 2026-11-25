@@ -5,8 +5,8 @@
 #
 #   scripts/gate/in-container.sh --src DIR --out DIR --sha SHA12
 #
-# Только внутри контейнера гейта: скрипт вычищает /tmp и отказывает без метки
-# CANTERLOT_GATE_CONTAINER=1, которую ставят scripts/gate-remote.sh и scripts/gate/runner-gate.sh.
+# Только внутри контейнера гейта: скрипт отказывает без метки CANTERLOT_GATE_CONTAINER=1,
+# которую ставят scripts/gate-remote.sh и scripts/gate/runner-gate.sh, и с непустым /tmp.
 #
 # Окружение готовит scripts/gate-remote.sh:
 #   /src              рабочая копия на проверяемом коммите (сюда же пишется
@@ -17,7 +17,9 @@
 #                     (npm-ci.log, check.log, deploy.log, web.log) из scripts/gate.sh,
 #                     gate.log с его выводом;
 #   /cache/cargo      CARGO_HOME;
-#   /cache/npm        npm_config_cache.
+#   /cache/npm        npm_config_cache;
+#   /tmp              свой пустой каталог этого прогона на ФС хоста (база, сокеты,
+#                     временные каталоги тестов), снаружи создаётся и убирается.
 #
 # Формат result.txt и state.tsv — как у scripts/gate.sh: строка с кодами возврата и
 # временами, затем сводка nextest и первые упавшие тесты.
@@ -44,17 +46,21 @@ done
 [[ -d "$src" ]] || { echo "FATAL: нет каталога исходников $src" >&2; exit 1; }
 [[ -d "$out" ]] || { echo "FATAL: нет каталога вывода $out" >&2; exit 1; }
 [[ -z "$(ls -A "$out")" ]] || { echo "FATAL: каталог вывода $out не пуст" >&2; exit 1; }
-# Ниже скрипт вычищает /tmp. В контейнере это смонтированный каталог кэша, а на машине — её
-# /tmp с файлами состояния идущего выката и временными каталогами всех сессий. Метку ставят
-# только scripts/gate-remote.sh и scripts/gate/runner-gate.sh через docker run -e; запуск
-# руками по строке использования её не несёт и останавливается здесь.
+# Гейт кладёт в /tmp базу и сокеты и считает его своим. Метку ставят только
+# scripts/gate-remote.sh и scripts/gate/runner-gate.sh через docker run -e; запуск руками по
+# строке использования её не несёт и останавливается здесь.
 [[ "${CANTERLOT_GATE_CONTAINER:-}" == 1 ]] || {
-    echo "FATAL: скрипт запущен не в контейнере гейта (нет CANTERLOT_GATE_CONTAINER=1): он вычищает /tmp. Запускайте через scripts/gate-remote.sh или scripts/gate/runner-gate.sh" >&2
+    echo "FATAL: скрипт запущен не в контейнере гейта (нет CANTERLOT_GATE_CONTAINER=1). Запускайте через scripts/gate-remote.sh или scripts/gate/runner-gate.sh" >&2
     exit 1
 }
-# Дерево с чужим HEAD гейт бы не заметил, поэтому sha проверяется — и тоже до чистки /tmp.
+# Дерево с чужим HEAD гейт бы не заметил, поэтому sha проверяется до любой записи.
 [[ "$(git -C "$src" rev-parse --short=12 HEAD)" == "$want_sha" ]] \
     || { echo "FATAL: HEAD в $src не $want_sha" >&2; exit 1; }
+# /tmp — свой пустой каталог этого прогона: его создают и убирают gate-remote.sh и
+# runner-gate.sh. Скрипт его не чистит (прежняя чистка на общем /tmp снесла бы файлы выката и
+# сессий машины), а непустой /tmp — значит, контейнер получил чужой каталог: отказ.
+[[ -z "$(ls -A /tmp)" ]] \
+    || { echo "FATAL: /tmp не пуст: контейнеру гейта нужен свой пустой /tmp (его создают gate-remote.sh и runner-gate.sh)" >&2; exit 1; }
 
 port=${CANTERLOT_TEST_PG_PORT:-55441}
 export CANTERLOT_TEST_PG_PORT="$port"
@@ -66,9 +72,6 @@ export npm_config_cache=${npm_config_cache:-$HOME/.npm}
 # а не подкаталог: tests/it/exec.rs создаёт runtime через tempdir_in("/tmp"), а
 # уборка в maintenance пускает её только внутри std::env::temp_dir().
 export TMPDIR=/tmp
-# /tmp — смонтированный каталог кэша, он переживает прогон: чистим его, чтобы
-# тесты не увидели чужие временные файлы. Всё в нём создаём мы сами.
-find /tmp -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 
 # uid приходит снаружи (--user), записи о нём в /etc/passwd контейнера нет.
 # libnss-wrapper подставляет запись из файла: она нужна не только initdb и postgres,

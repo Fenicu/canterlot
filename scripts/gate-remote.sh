@@ -95,13 +95,21 @@ script_path="$in_container"
 cache_root=""
 worktree_parent=""
 git_common=""
+run_tmp=""
 cleaned=0
 
-# Уборка повторяется и на выходе по ошибке: рабочая копия и ref не должны
-# пережить упавший прогон. На хосте только git, без rm.
+# Уборка повторяется и на выходе по ошибке: рабочая копия, ref и /tmp прогона не должны
+# пережить упавший прогон. На хосте git и rm только своего каталога /tmp этого прогона.
 cleanup() {
     if ((cleaned)); then return 0; fi
     cleaned=1
+    if [[ -n "$run_tmp" ]]; then
+        if [[ "$mode" == remote ]]; then
+            remote "rm -rf $(q "$run_tmp")" || log "ВНИМАНИЕ: не удалось убрать $run_tmp на $host"
+        else
+            rm -rf "$run_tmp" || log "ВНИМАНИЕ: не удалось убрать $run_tmp"
+        fi
+    fi
     if [[ -z "$src" ]]; then return 0; fi
     if [[ "$mode" == remote ]]; then
         # shellcheck disable=SC2016 # пути раскрывает удалённый shell
@@ -183,8 +191,10 @@ phase_done "рабочая копия"
 
 # --- образ ---
 phase "образ гейта"
+# Свой /tmp этого прогона: имя уникально, каталог создаётся пустым и убирается в cleanup.
+run_tmp="$cache_root/tmp/run-$sha12-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 if [[ "$mode" == remote ]]; then
-    remote "mkdir -p $(q "$remote_tools") $(q "$cache_root/cargo") $(q "$cache_root/target") $(q "$cache_root/npm") $(q "$cache_root/tmp")" \
+    remote "mkdir -p $(q "$remote_tools") $(q "$cache_root/cargo") $(q "$cache_root/target") $(q "$cache_root/npm") $(q "$cache_root/tmp") && mkdir $(q "$run_tmp")" \
         || die "не удалось создать $remote_tools и кэши"
     # Dockerfile и in-container.sh берутся из ЭТОЙ рабочей копии: коммит может быть
     # старше самого гейта.
@@ -203,6 +213,7 @@ if [[ "$mode" == remote ]]; then
     fi
 else
     mkdir -p "$cache_root/cargo" "$cache_root/target" "$cache_root/npm" "$cache_root/tmp"
+    mkdir "$run_tmp"
     if "$docker_cmd" image inspect "$image" >/dev/null 2>&1; then
         log "образ уже есть на этой машине"
     else
@@ -230,11 +241,11 @@ run_args=(
     # даёт всего 64 МБ.
     --shm-size=2g
     --cap-add SYS_PTRACE
-    # /tmp — отдельный каталог кэша, а не overlay контейнера и не tmpfs: на
-    # tmpfs запуск двойников CLI в Rust-тестах растягивается до таймаута, а
-    # overlayfs мешает параллельным тестам. Обычная ФС хоста держит и то,
-    # и другое; каталог чистит in-container.sh в начале прогона.
-    -v "$cache_root/tmp:/tmp"
+    # /tmp — свой пустой каталог на обычной ФС хоста для каждого прогона, а не overlay
+    # контейнера и не tmpfs: на tmpfs запуск двойников CLI в Rust-тестах растягивается до
+    # таймаута, а overlayfs мешает параллельным тестам. Каталог создаётся заново перед
+    # запуском и убирается в cleanup, поэтому in-container.sh ничего не чистит.
+    -v "$run_tmp:/tmp"
     -v "$src:/src"
     # Рабочая копия — связанный worktree: её .git — файл, указывающий в общий каталог git
     # (bare-репозиторий на сборочной машине или .git этой копии). Контейнеру он нужен по
@@ -248,7 +259,7 @@ run_args=(
     -v "$script_path:/build/in-container.sh:ro"
     -e CARGO_HOME=/cache/cargo
     -e npm_config_cache=/cache/npm
-    # Метка «это контейнер гейта»: без неё in-container.sh не чистит /tmp и отказывает.
+    # Метка «это контейнер гейта»: без неё in-container.sh отказывает.
     -e CANTERLOT_GATE_CONTAINER=1
     -w /src
 )

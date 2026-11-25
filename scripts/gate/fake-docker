@@ -13,6 +13,14 @@ case "${1:-}" in
     image) exit "${FAKE_DOCKER_IMAGE_RC:-0}" ;;
     build) exit 0 ;;
     run)
+        # Каталог, смонтированный на /tmp, и пуст ли он в момент запуска: строка в журнал.
+        for arg in "$@"; do
+            if [[ "$arg" == *:/tmp ]]; then
+                host=${arg%:/tmp}
+                if [[ -d "$host" && -z "$(ls -A "$host")" ]]; then state=empty; else state=not-empty; fi
+                printf 'tmp %s %s\n' "$host" "$state" >>"$FAKE_DOCKER_CALLS"
+            fi
+        done
         if [[ -n "${FAKE_DOCKER_WRITE:-}" ]]; then
             for arg in "$@"; do
                 if [[ "$arg" == *:/out ]]; then
