@@ -471,7 +471,8 @@ pub async fn request_compaction(
 }
 
 /// Управление целью идёт командой адаптеру; состояние вернётся записью SJ. Команда
-/// идемпотентна по ключу владельца и по уже выданной команде того же поколения.
+/// идемпотентна по ключу владельца; с другим ключом дублем считается только такая же
+/// команда того же поколения, которую воркер ещё не забрал.
 #[allow(clippy::too_many_arguments)]
 pub async fn request_goal(
     pool: &PgPool,
@@ -552,16 +553,26 @@ pub async fn request_goal(
                     reason: "no_live_execution",
                 });
             };
-            let existing: Option<Uuid> = sqlx::query_scalar(
-                "select id from commands where conversation_id = $1 and kind = 'goal_command'
+            let payload = json!({"action": action.as_str(), "objective": objective,
+                                 "token_budget": token_budget});
+            // Дубль — только последняя команда, которая ещё не ушла воркеру и просит того
+            // же. Сохранённую на машине команду воркер ничем больше не гасит (итог приходит
+            // записью `GoalChanged`), а ожидающая команда с другим действием — не дубль:
+            // иначе «снять цель» после «поставить» молча пропадает.
+            let last: Option<(Uuid, String, Value)> = sqlx::query_as(
+                "select id, delivery_state, payload from commands
+                 where conversation_id = $1 and kind = 'goal_command'
                  and execution_id = $2 and execution_generation = $3
-                 and delivery_state <> 'completed' order by created_at, id limit 1",
+                 order by created_at desc, id desc limit 1",
             )
             .bind(conversation_id)
             .bind(execution_id)
             .bind(generation)
             .fetch_optional(&mut *conn)
             .await?;
+            let existing = last
+                .filter(|(_, state, sent)| state == "pending" && *sent == payload)
+                .map(|(id, _, _)| id);
             let outcome = if let Some(command_id) = existing {
                 GoalOutcome::AlreadyRequested { command_id }
             } else {
@@ -576,8 +587,7 @@ pub async fn request_goal(
                 .bind(conversation_id)
                 .bind(execution_id)
                 .bind(generation)
-                .bind(json!({"action": action.as_str(), "objective": objective,
-                             "token_budget": token_budget}))
+                .bind(&payload)
                 .execute(&mut *conn)
                 .await?;
                 notify_outbox(&mut *conn, machine_id).await?;

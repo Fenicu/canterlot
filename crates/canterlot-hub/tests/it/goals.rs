@@ -201,13 +201,8 @@ async fn owner_command_goes_to_the_worker_and_adapter_event_updates_all_devices(
         .expect("goal in snapshot");
     assert_eq!(stored.objective, "Подготовить отчёт");
 
-    // Остановка цели тем же путём: команда и событие с `goal: null`.
-    // Первую команду хаб уже выдал воркеру — снимаем её из pending.
-    sqlx::query("update commands set delivery_state = 'completed' where conversation_id = $1")
-        .bind(f.conversation)
-        .execute(&f.pool)
-        .await
-        .unwrap();
+    // Остановка цели тем же путём: команда и событие с `goal: null`. Первая команда ещё
+    // не погашена — вторая всё равно обязана уйти.
     let response = f
         .post_goal(json!({"action": "clear"}), "goal-clear-1")
         .await;
@@ -230,6 +225,120 @@ async fn owner_command_goes_to_the_worker_and_adapter_event_updates_all_devices(
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+async fn goal_actions(pool: &PgPool, conversation: Uuid) -> Vec<(Uuid, String, String)> {
+    sqlx::query_as(
+        "select id, payload->>'action', delivery_state from commands
+         where conversation_id = $1 and kind = 'goal_command' order by created_at, id",
+    )
+    .bind(conversation)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Воркер сохранил команду `set` и передал её адаптеру; других фактов о ней он не пишет,
+/// команда навсегда остаётся `stored_on_machine`. Снятие цели в том же исполнении обязано
+/// уйти своей командой, а не получить в ответ идентификатор прежней.
+#[tokio::test]
+async fn second_goal_command_in_the_same_execution_is_sent() {
+    use canterlot_hub::delivery::control::{GoalOutcome, request_goal};
+    use canterlot_proto::goals::GoalAction;
+    let pool = testkit::db().await;
+    let seed = testkit::seed(&pool).await;
+    sqlx::query("update conversations set harness='claude_code' where id=$1")
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let started = executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
+        .await
+        .unwrap();
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(&pool, started.execution_id, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let caps = vec!["goals_v1".to_owned()];
+    let request = |action: GoalAction, objective: Option<&'static str>| {
+        let (pool, caps) = (pool.clone(), caps.clone());
+        async move {
+            request_goal(
+                &pool,
+                seed.owner_id,
+                seed.conversation_id,
+                action,
+                objective,
+                None,
+                &Uuid::now_v7().to_string(),
+                Uuid::now_v7(),
+                &caps,
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let GoalOutcome::Requested { command_id: set } =
+        request(GoalAction::Set, Some("Подготовить отчёт")).await
+    else {
+        panic!("the first goal command is new");
+    };
+    // Та же команда другим ключом, пока первая не ушла: дубль, второй строки нет.
+    assert_eq!(
+        request(GoalAction::Set, Some("Подготовить отчёт")).await,
+        GoalOutcome::AlreadyRequested { command_id: set }
+    );
+    let mut seq = 0;
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Cj,
+            &journal(
+                Uuid::now_v7(),
+                &mut seq,
+                vec![Body::CommandStored(
+                    canterlot_proto::worker::v1::CommandStored {
+                        command_id: set.to_string(),
+                        dispatch_attempt: 0,
+                        machine_time_ms: 1_700_000_000_000,
+                    },
+                )],
+            ),
+        )
+        .await
+        .unwrap();
+    let GoalOutcome::Requested { command_id: clear } = request(GoalAction::Clear, None).await
+    else {
+        panic!("`clear` after a stored `set` must be a new command");
+    };
+    assert_eq!(
+        goal_actions(&pool, seed.conversation_id).await,
+        vec![
+            (set, "set".to_owned(), "stored_on_machine".to_owned()),
+            (clear, "clear".to_owned(), "pending".to_owned()),
+        ]
+    );
+    // Воркер ещё не забрал `clear`, а владелец уже ставит новую цель: это другая команда,
+    // она встаёт следом, а не подменяется ожидающей.
+    let GoalOutcome::Requested { command_id: again } =
+        request(GoalAction::Set, Some("Другая цель")).await
+    else {
+        panic!("a different command behind a pending one must be queued");
+    };
+    assert_eq!(
+        goal_actions(&pool, seed.conversation_id)
+            .await
+            .into_iter()
+            .map(|(id, action, _)| (id, action))
+            .collect::<Vec<_>>(),
+        vec![
+            (set, "set".to_owned()),
+            (clear, "clear".to_owned()),
+            (again, "set".to_owned()),
+        ]
     );
 }
 
