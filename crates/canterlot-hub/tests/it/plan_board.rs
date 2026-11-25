@@ -324,6 +324,20 @@ impl Fx {
         .await
         .unwrap();
     }
+
+    /// Приём доводится до конца: процесс исполнителя остановился, задание уборки архивирует
+    /// сессию. Только после этого задача плана готова.
+    async fn finish_accept(&self) {
+        self.stop_child().await;
+        canterlot_hub::scheduler::Scheduler::new(
+            self.pool.clone(),
+            canterlot_hub::dispatcher::Dispatcher::channel().0,
+            Default::default(),
+        )
+        .tick(Utc::now())
+        .await
+        .unwrap();
+    }
 }
 
 fn no_git() -> Value {
@@ -702,6 +716,12 @@ async fn accept_marks_the_task_done() {
     f.call("sessions.accept", json!({"session_id": f.child}))
         .await
         .unwrap();
+    assert_eq!(
+        f.state(1).await,
+        "blocked",
+        "the executor is still stopping: nothing is accepted yet"
+    );
+    f.finish_accept().await;
     let (state, _, executor) = f.task(1).await;
     assert_eq!((state.as_str(), executor), ("done", Some(f.child)));
     assert_eq!(f.state(2).await, "waiting", "other tasks untouched");
@@ -776,6 +796,7 @@ async fn adopt_moves_open_tasks_and_the_adopter_may_accept_their_executors() {
     f.call_as(fresh, "sessions.accept", json!({"session_id": f.child}))
         .await
         .unwrap();
+    f.finish_accept().await;
     assert_eq!(f.task_of(fresh, 3).await.0, "done");
 }
 
@@ -1167,6 +1188,7 @@ async fn plan_writes_share_the_lock_order_with_accept_projector_and_delete() {
         u.unwrap();
         u2.unwrap();
         d.unwrap();
+        f.finish_accept().await;
         assert_eq!(f.state(1).await, "done", "round {round}");
     }
 }

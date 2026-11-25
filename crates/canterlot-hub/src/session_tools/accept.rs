@@ -301,20 +301,9 @@ pub fn wake(dispatcher: Option<&crate::dispatcher::Dispatcher>, pool: &PgPool, i
 }
 
 /// Общая часть приёма. Повтор безвреден: стоп и задание заводятся один раз.
-/// Задача плана этого исполнителя готова; строки плана берутся последними.
+/// Задача плана этого исполнителя закрывается не здесь, а когда приём состоялся
+/// (`archive_in_tx`): воркер может ответить `dirty` или `failed`, и тогда ничего не убрано.
 pub async fn begin_in_tx(
-    conn: &mut PgConnection,
-    owner_id: Uuid,
-    id: Uuid,
-    force: bool,
-    correlation_id: Uuid,
-) -> Result<AcceptState, sqlx::Error> {
-    let state = begin_steps_in_tx(conn, owner_id, id, force, correlation_id).await?;
-    super::plan::on_accept_in_tx(conn, id, correlation_id).await?;
-    Ok(state)
-}
-
-async fn begin_steps_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     id: Uuid,
@@ -452,7 +441,19 @@ async fn set_worktree_state(
 /// Архив с отменой запланированного и кранча, как при принудительной архивации владельцем.
 /// Занятое задание не мешает: сессия всё равно уходит в архив. Приём отмечает срок хранения
 /// (`accepted_at`) до архивации, чтобы поздняя уборка не потеряла признак принятой сессии.
+///
+/// Здесь приём состоялся: рабочая копия убрана или её не было. Только теперь задача плана
+/// этого исполнителя готова; строки плана берутся последними (docs/design/delivery.md).
 async fn archive_in_tx(
+    conn: &mut PgConnection,
+    child: &Child,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    archive_steps_in_tx(conn, child, correlation_id).await?;
+    super::plan::on_accept_in_tx(conn, child.id, correlation_id).await
+}
+
+async fn archive_steps_in_tx(
     conn: &mut PgConnection,
     child: &Child,
     correlation_id: Uuid,

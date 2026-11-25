@@ -1039,6 +1039,62 @@ async fn dirty_keeps_work_and_tells_parent() {
     assert_eq!(origin["event"]["worktree"], "dirty");
 }
 
+/// Задача плана закрывается, когда приём состоялся, а не когда его попросили: при отказе
+/// воркера (`dirty`) рабочая копия цела, сессия не в архиве, и задача на доске владельца
+/// остаётся открытой.
+#[tokio::test]
+async fn the_plan_task_is_done_only_when_the_accept_completes() {
+    use canterlot_hub::session_tools::plan;
+    let pool = canterlot_hub::testkit::db().await;
+    let fx = Fx::new(pool).await;
+    fx.stopped_child().await;
+    session_tools::call(
+        &fx.context,
+        &fx.parent_caller(),
+        "plan.add",
+        json!({"tasks": [{"title": "Парсер"}]}),
+    )
+    .await
+    .unwrap();
+    let mut tx = fx.pool.begin().await.unwrap();
+    let task = plan::resolve_for_spawn_in_tx(&mut tx, fx.owner, fx.parent, 1)
+        .await
+        .unwrap();
+    plan::link_child_in_tx(&mut tx, fx.parent, fx.child, task, Uuid::now_v7())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let state = || async {
+        sqlx::query_scalar::<_, String>(
+            "select state from plan_tasks where orchestrator_conversation_id=$1 and number=1",
+        )
+        .bind(fx.parent)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap()
+    };
+    let before = state().await;
+    assert_ne!(before, "done");
+
+    fx.accept(false).await;
+    assert_eq!(
+        state().await,
+        before,
+        "asking for the accept closes nothing"
+    );
+    fx.tick().await;
+    let (first, _) = fx.removal_command().await;
+    fx.report(first, "dirty", false, "dirty").await;
+    assert_eq!(state().await, before, "nothing was removed: the task stays");
+
+    fx.accept(true).await;
+    fx.tick().await;
+    let (second, _) = fx.removal_command().await;
+    fx.report(second, "removed", true, "").await;
+    assert!(fx.archived().await);
+    assert_eq!(state().await, "done");
+}
+
 #[tokio::test]
 async fn force_removes_dirty_and_reports_branch() {
     let pool = canterlot_hub::testkit::db().await;
