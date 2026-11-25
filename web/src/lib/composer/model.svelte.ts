@@ -15,6 +15,7 @@ import { UploadLimitError } from "#lib/uploads/uploader.js";
 import { validateScheduleTime } from "#lib/composer/schedule.js";
 import { sendNow } from "#lib/timeline/QueueActions.js";
 import { setGoal } from "#lib/api/client.js";
+import { errorText } from "#lib/api/errors.js";
 import { intents } from "#lib/ops/intent.js";
 
 const MAX_GOAL_OBJECTIVE_BYTES = 2048;
@@ -283,15 +284,24 @@ export class ComposerModel {
     const objective = this.text.trim();
     if (this.sending || !objective || utf8Length(objective) > MAX_GOAL_OBJECTIVE_BYTES) return;
     this.sending = true;
+    this.errorMessage = null;
     try {
       await intents.run(`goal-set:${this.deps.conversationId}`, (key) =>
         setGoal(this.deps.conversationId, { action: "set", objective }, key),
       );
-      this.text = "";
-      void this.deps.drafts.clear(this.deps.conversationId).catch(() => undefined);
+    } catch (err) {
+      // Текст остаётся в поле: цель не поставлена, и владелец видит почему.
+      this.errorMessage = errorText(err, "Не удалось поставить цель");
+      return;
     } finally {
       this.sending = false;
     }
+    this.text = "";
+    void this.deps.drafts.clear(this.deps.conversationId).catch(() => undefined);
+    // Общий черновик хаб чистит только при приёме сообщения, цель его не трогает: без пустой записи
+    // текст цели вернулся бы в поле при следующем открытии чата и на других устройствах.
+    this.typed();
+    await this.flushDraft();
   }
 
   /**

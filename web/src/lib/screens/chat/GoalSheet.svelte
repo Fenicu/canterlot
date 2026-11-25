@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
+  import { errorText } from '#lib/api/errors.js';
   import Sheet from '#lib/ui/Sheet.svelte';
   import { stopGoal, controlBusy } from './controls';
   import { goalState, goalUsage } from './goalView';
@@ -11,13 +12,21 @@
   const usage = $derived(goal ? goalUsage(goal) : '');
   const busy = $derived(controlBusy(`goal-clear:${chat.id}`));
   let armed = $state(false);
+  let error = $state('');
 
   async function stop() {
     if (!armed) {
       armed = true;
       return;
     }
-    await stopGoal(chat.id);
+    error = '';
+    try {
+      await stopGoal(chat.id);
+    } catch (err) {
+      // Лист остаётся открытым: цель не остановлена, и следующее нажатие повторит запрос.
+      error = errorText(err, 'Не удалось остановить цель');
+      return;
+    }
     armed = false;
     onclose();
   }
@@ -36,6 +45,7 @@
       class:off={busy}
       onclick={() => { if (!busy) void stop(); }}
     >{armed ? 'Точно остановить?' : 'Остановить цель'}</button>
+    {#if error}<p class="error" role="alert">{error}</p>{/if}
   {:else}
     <p>Цель не поставлена</p>
   {/if}
@@ -57,6 +67,7 @@
   }
   .stop { margin-top: var(--s4); min-height: var(--target); padding: var(--s2) var(--s3); border-radius: var(--radius-pill); white-space: nowrap; background: var(--raised); color: var(--danger); font-size: var(--fs-body); font-weight: var(--weight-medium); }
   .stop.off { color: var(--muted); }
+  .error { margin: var(--s2) 0 0; color: var(--danger); font-size: var(--fs-sm); }
   .stop:hover,
   .stop:focus-visible {
     background: var(--danger-soft);
