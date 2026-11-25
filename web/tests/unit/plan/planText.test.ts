@@ -80,8 +80,17 @@ describe('plan text', () => {
 
 	it('strip_appears_only_for_review_or_blocked_and_warns_on_blocked', () => {
 		expect(planStrip([task('in_progress'), task('waiting'), task('done')])).toBeNull();
-		expect(planStrip([task('in_review'), task('in_progress')])).toEqual({ text: 'План: 1 на проверке', tone: 'default' });
-		expect(planStrip([task('in_review'), task('blocked'), task('blocked')])).toEqual({ text: 'План: 2 заблокированы · 1 на проверке', tone: 'warning' });
+		expect(planStrip([task('in_review'), task('in_progress')])).toMatchObject({ text: 'План: 1 на проверке', tone: 'default' });
+		expect(planStrip([task('in_review'), task('blocked'), task('blocked')])).toMatchObject({ text: 'План: 2 заблокированы · 1 на проверке', tone: 'warning' });
+	});
+
+	it('strip_counts_done_and_names_the_task_that_needs_a_decision', () => {
+		const review = task('in_review', { number: 4, title: 'Схема плана' });
+		const strip = planStrip([task('done'), task('in_progress'), review, task('waiting'), task('cancelled')]);
+		expect(strip).toMatchObject({ done: 1, total: 4, current: { number: 4, title: 'Схема плана', word: 'на проверке' } });
+		// Заблокированная важнее задачи на проверке, а из двух — та, что с меньшим номером.
+		const blocked = planStrip([review, task('blocked', { number: 9, title: 'Поздняя' }), task('blocked', { number: 2, title: 'Ранняя' })]);
+		expect(blocked).toMatchObject({ tone: 'warning', done: 0, total: 3, current: { number: 2, title: 'Ранняя', word: 'заблокирована' } });
 	});
 
 	it('badge_counts_done_out_of_not_cancelled', () => {
