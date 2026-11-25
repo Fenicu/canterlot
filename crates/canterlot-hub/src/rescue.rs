@@ -955,6 +955,28 @@ pub async fn on_interrupt_status_in_tx(
             .bind(now)
             .execute(&mut *conn)
             .await?;
+            // Толчок «ход был прерван» встал в очередь вместе с прерыванием. Прерывания
+            // не было, значит и толчок неправда: ход кончится сам, и следующим вводом агент
+            // получил бы ложное «тебя прервали». Ввод отзывается, попытка возвращается правилу.
+            if action.as_deref() == Some("nudged")
+                && let Some(turn) = turn
+            {
+                let episode_no: i32 = sqlx::query_scalar(
+                    "select episode_no from hung_rescues where conversation_id=$1",
+                )
+                .bind(conversation_id)
+                .fetch_one(&mut *conn)
+                .await?;
+                nudge::withdraw_rescue_nudge_in_tx(
+                    conn,
+                    conversation_id,
+                    turn,
+                    episode_no,
+                    now,
+                    correlation_id,
+                )
+                .await?;
+            }
             // Эпизод остаётся занятым до нового прогресса: та же тишина не открывает
             // второй эпизод. Владельцу об отказе автоматического действия — один пуш.
             if resolved.is_none()

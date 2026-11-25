@@ -1312,6 +1312,70 @@ pub async fn rescue_nudge_in_tx(
     })
 }
 
+/// Отзыв толчка спасения: воркер отказал в прерывании, ход идёт дальше, и текст «ход был
+/// прерван» стал неправдой. Ещё не выданный ввод отменяется, а попытка возвращается
+/// правилу: толчка не было. Вызывающий держит замок очереди разговора. `false` —
+/// отзывать нечего: ввода нет, он уже выдан или владелец отправил его вливанием.
+pub async fn withdraw_rescue_nudge_in_tx(
+    conn: &mut PgConnection,
+    target: Uuid,
+    turn_id: Uuid,
+    episode_no: i32,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let found: Option<(Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(
+        "select i.id, i.command_id, c.execution_id
+         from inputs i join commands c on c.id=i.command_id
+         where i.conversation_id=$1 and i.idempotency_key=$2 and i.state='queued'
+           and not exists(select 1 from commands s where s.kind='steer_input'
+                          and s.target_command_id=i.command_id
+                          and s.delivery_state<>'completed')",
+    )
+    .bind(target)
+    .bind(format!("rescue-nudge:{target}:{turn_id}:{episode_no}"))
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((input_id, command_id, execution_id)) = found else {
+        return Ok(false);
+    };
+    sqlx::query("update inputs set state='cancelled', cancel_requested=false where id=$1")
+        .bind(input_id)
+        .execute(&mut *conn)
+        .await?;
+    crate::delivery::receipts::complete_held_deliver_in_tx(
+        &mut *conn,
+        command_id,
+        crate::model::InputState::Cancelled,
+    )
+    .await?;
+    events::append(
+        &mut *conn,
+        NewEvent {
+            scope: Scope::Conversation { id: target },
+            kind: "input_state_changed",
+            conversation_id: Some(target),
+            execution_id,
+            payload: json!({"input_id": input_id, "state": "cancelled"}),
+            correlation_id,
+        },
+    )
+    .await?;
+    let rule: Option<RuleRow> = sqlx::query_as(
+        "update nudge_rules set consecutive=greatest(consecutive-1,0),
+             total=greatest(total-1,0),updated_at=$2
+         where conversation_id=$1 returning *",
+    )
+    .bind(target)
+    .bind(now)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(rule) = rule {
+        changed_in_tx(conn, &rule, correlation_id, Some("withdrawn")).await?;
+    }
+    Ok(true)
+}
+
 /// Снять ожидающие задания толчка. `skip locked` не ждёт строку, которую уже
 /// выбрал планировщик: отпечаток всё равно сделает такое задание устаревшим.
 async fn cancel_pending_jobs_in_tx(

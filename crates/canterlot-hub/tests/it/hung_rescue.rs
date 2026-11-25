@@ -1785,3 +1785,70 @@ async fn a_stored_window_is_not_kept_alive_forever_by_ahead_samples() {
         "no new verdict from an ancient window"
     );
 }
+
+/// План «прервать и подтолкнуть» ставит в очередь ввод «ход был прерван». Воркер в
+/// прерывании отказал: ход ожил сам. Толчок обязан уйти из очереди — иначе агент после
+/// хода получит неправду и сделает лишний ход, — а попытка возвращается правилу.
+#[tokio::test]
+async fn a_refused_rescue_interrupt_withdraws_the_queued_nudge() {
+    let pool = canterlot_hub::testkit::db().await;
+    let scene = hung_scene(&pool, "codex", true).await;
+    sqlx::query(
+        "insert into nudge_rules(conversation_id,owner_id,set_by,state,consecutive,total)
+         values($1,$2,'owner','watching',0,0)",
+    )
+    .bind(scene.seed.conversation_id)
+    .bind(scene.seed.owner_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    warm(&pool, &scene).await;
+    tick(&pool, &scene, scene.base).await;
+    let nudges = |pool: PgPool| async move {
+        sqlx::query_as::<_, (Uuid, String)>(
+            "select id, state from inputs
+             where conversation_id=$1 and origin->>'kind'='nudge' order by input_seq",
+        )
+        .bind(scene.seed.conversation_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let counters = |pool: PgPool| async move {
+        sqlx::query_as::<_, (i32, i32)>(
+            "select consecutive,total from nudge_rules where conversation_id=$1",
+        )
+        .bind(scene.seed.conversation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let queued = nudges(pool.clone()).await;
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert_eq!(queued[0].1, "queued");
+    assert_eq!(counters(pool.clone()).await, (1, 1));
+
+    let command = commands_of(&pool, &scene, "interrupt").await[0].0;
+    confirm_interrupt(&pool, command, "turn_mismatch").await;
+
+    assert_eq!(
+        nudges(pool.clone()).await,
+        [(queued[0].0, "cancelled".to_owned())],
+        "the nudge about an interrupt that never happened is withdrawn"
+    );
+    assert_eq!(
+        counters(pool.clone()).await,
+        (0, 0),
+        "a withdrawn nudge is not counted against the rule"
+    );
+    let cancelled: i64 = sqlx::query_scalar(
+        "select count(*) from events where conversation_id=$1 and kind='input_state_changed'
+           and payload->>'input_id'=$2 and payload->>'state'='cancelled'",
+    )
+    .bind(scene.seed.conversation_id)
+    .bind(queued[0].0.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cancelled, 1, "the feed learns that the input is gone");
+}
