@@ -438,17 +438,33 @@ pub fn reservation_for_terms(
     price::reservation_kopecks(hourly_kopecks, minutes)
 }
 
-/// Расход месяца: законченные окна по итоговой цене, живые и поздние сносы по резерву.
-pub async fn spent_in_month(conn: &mut PgConnection, month: &str) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar(
-        "select coalesce(sum(case when state = any($2) then reservation_kopecks
-                                  else coalesce(final_cost_kopecks, 0) end), 0)::bigint
-         from cloud_windows where month = $1",
+/// Расход месяца на момент `now`: законченные окна по итоговой цене, живые и поздние сносы
+/// по большему из резерва и уже набежавшей цены.
+pub async fn spent_in_month(
+    conn: &mut PgConnection,
+    month: &str,
+    now: DateTime<Utc>,
+) -> Result<i64, sqlx::Error> {
+    let ended: i64 = sqlx::query_scalar(
+        "select coalesce(sum(coalesce(final_cost_kopecks, 0)), 0)::bigint
+         from cloud_windows where month = $1 and state <> all($2)",
     )
     .bind(month)
     .bind(billing_states())
-    .fetch_one(conn)
-    .await
+    .fetch_one(&mut *conn)
+    .await?;
+    // Окно, которое ещё платит, держит резерв. Если машина не удаляется или хаб долго лежал,
+    // оно уже стоит дороже резерва: тогда считается набежавшая цена, иначе экран бюджета и
+    // пуши 80 % и 100 % отставали бы до конца окна.
+    let billing: Vec<Window> =
+        sqlx::query_as("select * from cloud_windows where month = $1 and state = any($2)")
+            .bind(month)
+            .bind(billing_states())
+            .fetch_all(&mut *conn)
+            .await?;
+    Ok(billing.iter().fold(ended, |sum, window| {
+        sum.saturating_add(window.reservation_kopecks.max(ledger_cost(window, now)))
+    }))
 }
 
 /// Создание окна одной транзакцией, для любого входа (карточка, кнопка, автоматика):
@@ -543,7 +559,7 @@ pub async fn create_in_tx(
     let max_hourly = top.hourly_kopecks();
     let reservation = reservation_for(config, max_hourly, request.hard_cap_minutes)?;
     let month = month_of(now);
-    let spent = spent_in_month(&mut *conn, &month).await?;
+    let spent = spent_in_month(&mut *conn, &month, now).await?;
     let remaining = budget.saturating_sub(spent);
     let fits = spent
         .checked_add(reservation)

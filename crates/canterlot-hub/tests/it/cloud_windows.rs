@@ -783,7 +783,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations() -> TestResul
     let mut conn = rig.pool.acquire().await?;
     let month = rig.window(first).await.month;
     assert_eq!(
-        windows::spent_in_month(&mut conn, &month).await?,
+        windows::spent_in_month(&mut conn, &month, Utc::now()).await?,
         reservation - 1000
     );
     drop(conn);
@@ -1119,7 +1119,10 @@ async fn a_rejected_create_fails_the_window_and_releases_the_reservation() -> Te
     assert!(window.server_gone_at.is_some() && window.disk_gone_at.is_some());
     assert_eq!((rig.posts(), rig.deletes()), (1, 0));
     let mut conn = rig.pool.acquire().await?;
-    assert_eq!(windows::spent_in_month(&mut conn, &window.month).await?, 0);
+    assert_eq!(
+        windows::spent_in_month(&mut conn, &window.month, Utc::now()).await?,
+        0
+    );
     drop(conn);
     // Окно закрыто: можно создать следующее.
     rig.try_create(60).await.expect("the slot is free again");
@@ -1451,7 +1454,7 @@ async fn when_every_profile_is_refused_the_window_fails_with_the_codes_and_a_zer
     assert_eq!(rig.fake.instance_count(), 0);
     let mut conn = rig.pool.acquire().await?;
     assert_eq!(
-        windows::spent_in_month(&mut conn, &window.month).await?,
+        windows::spent_in_month(&mut conn, &window.month, Utc::now()).await?,
         0,
         "reservation released"
     );
@@ -3721,7 +3724,7 @@ async fn a_late_disk_reopens_its_closed_window_and_is_billed_to_it() -> TestResu
     ));
     let mut conn = rig.pool.acquire().await?;
     assert_eq!(
-        windows::spent_in_month(&mut conn, &window.month).await?,
+        windows::spent_in_month(&mut conn, &window.month, Utc::now()).await?,
         window.reservation_kopecks
     );
     drop(conn);
@@ -3916,7 +3919,7 @@ async fn a_late_cleanup_leaves_the_live_slot_to_the_successor_and_is_billed() ->
     assert_eq!(rig.alert_codes().await, vec!["late_create"]);
     // Поздний снос считается в расходе по резерву рядом с резервом преемника.
     let mut conn = rig.pool.acquire().await?;
-    let spent = windows::spent_in_month(&mut conn, &windows::month_of(now)).await?;
+    let spent = windows::spent_in_month(&mut conn, &windows::month_of(now), now).await?;
     drop(conn);
     assert_eq!(spent, 2 * 3 * HOURLY, "both reservations are spent");
     // Машина пропала из полного списка: окно заканчивается итогом от вызова создания.

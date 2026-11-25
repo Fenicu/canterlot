@@ -2799,7 +2799,8 @@ export interface components {
             revision: number;
             /**
              * Format: int64
-             * @description Законченные окна по итоговой цене плюс живые по резерву.
+             * @description Законченные окна по итоговой цене плюс живые по резерву, а если живое окно уже стоит
+             *     дороже резерва, по набежавшей цене.
              */
             spent_kopecks: number;
         };

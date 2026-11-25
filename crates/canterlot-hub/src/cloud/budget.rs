@@ -53,7 +53,8 @@ pub struct BudgetView {
     /// Месяц, за который посчитан расход (`YYYY-MM`, Европа/Москва).
     pub month: String,
     pub monthly_budget_kopecks: i64,
-    /// Законченные окна по итоговой цене плюс живые по резерву.
+    /// Законченные окна по итоговой цене плюс живые по резерву, а если живое окно уже стоит
+    /// дороже резерва, по набежавшей цене.
     pub spent_kopecks: i64,
     pub remaining_kopecks: i64,
     pub auto_mode: bool,
@@ -128,8 +129,9 @@ pub async fn view(
     )
     .fetch_one(&mut *conn)
     .await?;
-    let month = windows::month_of(Utc::now());
-    let spent = windows::spent_in_month(conn, &month).await?;
+    let now = Utc::now();
+    let month = windows::month_of(now);
+    let spent = windows::spent_in_month(conn, &month, now).await?;
     let profiles = pricing.map_or_else(Vec::new, |pricing| {
         pricing.profiles.iter().map(ProfileView::from).collect()
     });
@@ -171,9 +173,10 @@ pub async fn lock_settings(
 
 /// Остаток бюджета в текущем месяце.
 pub async fn remaining_in_month(conn: &mut PgConnection) -> Result<i64, sqlx::Error> {
-    let month = windows::month_of(Utc::now());
+    let now = Utc::now();
+    let month = windows::month_of(now);
     let (budget, _, _): (i64, bool, Option<String>) = settings(conn).await?;
-    Ok(budget.saturating_sub(windows::spent_in_month(conn, &month).await?))
+    Ok(budget.saturating_sub(windows::spent_in_month(conn, &month, now).await?))
 }
 
 /// Оповещения о 80 % и 100 % бюджета: каждое не чаще одного раза в месяц. Нулевой бюджет
@@ -208,7 +211,7 @@ pub async fn maybe_alert(
                 if current.as_deref() == Some(month.as_str()) {
                     return Ok(false);
                 }
-                let spent = windows::spent_in_month(&mut *conn, &month).await?;
+                let spent = windows::spent_in_month(&mut *conn, &month, now).await?;
                 if spent.saturating_mul(100) < budget.saturating_mul(percent) {
                     return Ok(false);
                 }

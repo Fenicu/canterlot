@@ -425,7 +425,7 @@ pub async fn approve_in_tx(
         return Ok(ApproveOutcome::Expired);
     }
     let month = windows::month_of(db_now);
-    let spent = windows::spent_in_month(conn, &month).await?;
+    let spent = windows::spent_in_month(conn, &month, db_now).await?;
     let remaining = budget_kopecks.saturating_sub(spent);
     let over_budget = reservation > remaining;
     if reservation != card.reservation_kopecks

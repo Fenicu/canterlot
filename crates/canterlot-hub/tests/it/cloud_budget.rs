@@ -1940,6 +1940,37 @@ async fn a_failed_hub_card_leaves_no_request_or_expiry_job() -> TestResult {
     Ok(())
 }
 
+/// Машина не удаляется, и окно тарифицируется дольше, чем покрывает резерв: расход месяца и
+/// пуши о бюджете считают его по набежавшей цене, а не ждут конца окна.
+#[tokio::test]
+async fn a_live_window_over_its_reserve_counts_by_its_cost_so_far() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let rig = Rig::new(pool).await;
+    rig.set_budget(20_000, false).await;
+    let now = now_micros();
+    let month = windows::month_of(now);
+    let stuck = rig.insert_window("deleting", None, 1_000).await;
+    let mut conn = rig.pool.acquire().await?;
+    assert_eq!(
+        windows::spent_in_month(&mut conn, &month, now).await?,
+        1_000,
+        "a fresh window is counted by its reserve"
+    );
+    // Вызов создания был десять часов назад: машина и диск всё ещё в каталоге.
+    sqlx::query("update cloud_windows set create_called_at = $2 where id = $1")
+        .bind(stuck)
+        .bind(now - TimeDelta::hours(10))
+        .execute(&rig.pool)
+        .await?;
+    assert_eq!(
+        windows::spent_in_month(&mut conn, &month, now).await?,
+        10 * HOURLY
+    );
+    assert_eq!(budget::maybe_alert(&rig.pool, now, 20_000).await?, 1);
+    assert_eq!(rig.push_count("budget_80").await, 1);
+    Ok(())
+}
+
 #[tokio::test]
 async fn budget_alerts_fire_once_per_month_and_never_for_zero() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
