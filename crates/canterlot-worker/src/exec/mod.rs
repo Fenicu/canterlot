@@ -344,6 +344,10 @@ pub(crate) struct Shared {
     pub fail_sends: Mutex<usize>,
     #[cfg(feature = "fault-injection")]
     pub strip_caps: Mutex<bool>,
+    /// Сколько раз актор исполнения уже поднимали заново после ошибки.
+    pub actor_restarts: Mutex<HashMap<Uuid, u32>>,
+    #[cfg(feature = "fault-injection")]
+    pub fail_actor: Mutex<usize>,
 }
 
 /// Сроки уборки сборки в рабочих копиях (`[machine].idle_cache_hours`,
@@ -762,6 +766,9 @@ impl ExecutionManager {
                 fail_sends: Mutex::new(0),
                 #[cfg(feature = "fault-injection")]
                 strip_caps: Mutex::new(false),
+                actor_restarts: Mutex::default(),
+                #[cfg(feature = "fault-injection")]
+                fail_actor: Mutex::new(0),
             }),
             shutdown,
         }
@@ -781,6 +788,13 @@ impl ExecutionManager {
     #[cfg(feature = "fault-injection")]
     pub fn fail_next_ipc_send(&self) {
         *self.shared.fail_sends.lock().expect("send fault lock") += 1;
+    }
+
+    /// Следующие `count` команд актор исполнения обрывает ошибкой ввода-вывода: так выглядит
+    /// отказ вне журналов, например каталог вложений, который не создался.
+    #[cfg(feature = "fault-injection")]
+    pub fn fail_actor_commands(&self, count: usize) {
+        *self.shared.fail_actor.lock().expect("actor fault lock") = count;
     }
 
     pub fn configure_adapters(

@@ -51,6 +51,8 @@ use crate::{
 const ORPHANED: &str = "owner_lost";
 const REPORTED: &str = "owner_lost_reported";
 const RECONNECT_EVERY: Duration = Duration::from_millis(200);
+/// Сколько раз актор одного исполнения поднимается заново после ошибки за жизнь воркера.
+const MAX_ACTOR_RESTARTS: u32 = 3;
 
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Msg {
@@ -1129,6 +1131,23 @@ async fn defer_unhanded(shared: &Shared, command: &Command) -> Result<(), ExecEr
 }
 
 /// Исполнения нет, оно закрыто или потеряно: управляющая служба отвечает сама.
+/// Запись принадлежности подтверждена и не потеряна: у исполнения есть живое сопровождение.
+async fn live_owner(shared: &Shared, id: Option<Uuid>) -> Result<bool, ExecError> {
+    let Some(id) = id else {
+        return Ok(false);
+    };
+    Ok(shared
+        .store
+        .call(move |store| {
+            Ok(open(store)?.ownership().get(id).is_some_and(|record| {
+                record.phase == OwnershipPhase::Attached as i32
+                    && !is_reported(record)
+                    && !is_orphaned(record)
+            }))
+        })
+        .await?)
+}
+
 pub(super) async fn answer_without_execution(
     shared: &Shared,
     command: &Command,
@@ -1261,6 +1280,9 @@ pub(super) async fn answer_without_execution(
             }
             shared.cj(vec![], terminal_self(command)).await
         }
+        // Сопровождение живо, а актора нет: остановку ему никто не передал. Погасить её
+        // значило бы потерять: команда остаётся в хранилище и доигрывается новым актором.
+        Some(Kind::StopExecution(_)) if live_owner(shared, id).await? => Ok(()),
         Some(Kind::StopExecution(_)) if known.is_none() => {
             shared
                 .cj(
@@ -1422,6 +1444,15 @@ impl Actor {
             tracing::warn!(execution_id = %self.id, error_kind = ?std::mem::discriminant(error), "execution actor stopped");
         }
         let id = self.id;
+        if result.is_err()
+            && !self.orphaned
+            && !self.released
+            && !*self.shutdown.borrow()
+            && self.restart().await
+        {
+            // Новый актор уже занял место в `actors`.
+            return;
+        }
         // Наблюдатель занимает место актора в `actors` без промежутка: команда, пришедшая
         // между ними, иначе получила бы итог без исполнителя, и решение владельца терялось.
         let mut watched = false;
@@ -1469,6 +1500,66 @@ impl Actor {
                 }
             }
         }
+    }
+
+    /// Актор упал на ошибке, которая не касается сопровождения (отказ ввода-вывода вне
+    /// журналов), а сопровождение и CLI живы. Без актора `SJ` не уходит хабу и команды не
+    /// доходят до сопровождения, поэтому актор поднимается заново на том же сопровождении,
+    /// как при рестарте воркера, и получает непогашенные команды исполнения. Число
+    /// перезапусков ограничено: ошибка, которая повторяется на каждой команде, не должна
+    /// крутить цикл. `false` — перезапуска не было.
+    async fn restart(&mut self) -> bool {
+        let id = self.id;
+        {
+            let mut restarts = self.shared.actor_restarts.lock().expect("restarts lock");
+            let count = restarts.entry(id).or_default();
+            if *count >= MAX_ACTOR_RESTARTS {
+                tracing::error!(execution_id = %id, kind = "actor_restart_limit", "execution actor is not restarted again");
+                return false;
+            }
+            *count += 1;
+        }
+        let record = self
+            .shared
+            .store
+            .call(move |store| Ok(open(store)?.ownership().get(id).cloned()))
+            .await;
+        let Ok(Some(record)) = record else {
+            return false;
+        };
+        let Ok(linked) = verify(&self.shared, &record).await else {
+            return false;
+        };
+        tracing::warn!(execution_id = %id, kind = "actor_restarted", "execution actor is restarted on the same supervisor");
+        spawn_actor(
+            &self.shared,
+            id,
+            Start::Reattach(Box::new((linked, record))),
+        );
+        // Команды читаются после смены актора: всё, что пришло раньше, уже в хранилище, а
+        // повтор той же команды актор и сопровождение различают, как при рестарте воркера.
+        let commands = self
+            .shared
+            .store
+            .call(|store| Ok(open(store)?.stored_commands()?))
+            .await
+            .unwrap_or_default();
+        let sender = self
+            .shared
+            .actors
+            .lock()
+            .expect("actors lock")
+            .get(&id)
+            .cloned();
+        if let Some(sender) = sender {
+            let execution = id.to_string();
+            for command in commands {
+                if command.execution_id == execution {
+                    let _ = sender.send(Msg::Command(command));
+                }
+            }
+        }
+        true
     }
 
     async fn run_inner(&mut self, start: Start) -> Result<(), ExecError> {
@@ -2477,6 +2568,14 @@ impl Actor {
             finished = self.finished,
             "execution actor command"
         );
+        #[cfg(feature = "fault-injection")]
+        {
+            let mut left = self.shared.fail_actor.lock().expect("actor fault lock");
+            if *left > 0 {
+                *left -= 1;
+                return Err(io::Error::other("injected actor failure").into());
+            }
+        }
         if self.link.is_none()
             && !self.finished
             && !matches!(

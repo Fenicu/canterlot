@@ -1347,6 +1347,76 @@ async fn shutdown_after_the_ownership_record_finishes_the_spawn() {
     env.stop().await;
 }
 
+/// Актор исполнения упал на ошибке вне журналов (например, не создался каталог вложений), а
+/// сопровождение и CLI живы. Актор поднимается заново на том же сопровождении, и команда,
+/// на которой он упал, доигрывается.
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn actor_failure_with_a_live_supervisor_restarts_the_actor() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let supervisor = env.ownership(env.execution).await.unwrap().supervisor_pid;
+    env.manager().fail_actor_commands(1);
+    let input = Uuid::now_v7();
+    env.send(deliver_command(
+        input,
+        1,
+        env.execution,
+        1,
+        env.conversation,
+        &script(r#"{"delta":"after the failure"}"#),
+    ))
+    .await;
+    env.wait("the turn of the input that hit the failure", |b| {
+        finished(b, input)
+    })
+    .await;
+    assert!(alive(supervisor));
+    assert_eq!(supervisors_of(env.root.path()), [supervisor]);
+    assert_eq!(owner_lost(&env.cj().await, env.execution), 0);
+    env.stop().await;
+}
+
+/// У живого исполнения нет актора (он упал и больше не поднялся). Остановка такой сессии не
+/// гасится молча: сопровождение её не получило бы никогда. Команда остаётся в хранилище и
+/// исполняется, когда актор появляется снова.
+#[tokio::test]
+async fn stop_of_a_live_execution_without_an_actor_is_not_answered() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let supervisor = env.ownership(env.execution).await.unwrap().supervisor_pid;
+    env.close_manager().await;
+    // Менеджер без стартовой сверки: запись принадлежности жива, актора у исполнения нет.
+    env.reopen();
+    let stop = command(
+        Uuid::now_v7(),
+        1,
+        env.execution,
+        1,
+        Kind::StopExecution(StopExecution { force: true }),
+    );
+    env.send(stop.clone()).await;
+    assert!(
+        !env.terminal(&stop).await,
+        "the stop was answered although the supervisor never got it"
+    );
+    assert!(alive(supervisor));
+    assert_eq!(
+        env.manager().startup_verify().await.unwrap(),
+        [env.execution]
+    );
+    env.hub_session();
+    env.wait("closed", |b| {
+        b.iter().any(|x| matches!(x, Body::JournalClosed(_)))
+    })
+    .await;
+    assert_eq!(owner_lost(&env.cj().await, env.execution), 0);
+}
+
 fn current_boot_id() -> String {
     fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .unwrap()
