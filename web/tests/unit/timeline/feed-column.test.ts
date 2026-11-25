@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import postcss, { type Rule } from 'postcss';
 
 const tokens = readFileSync('src/lib/styles/tokens.css', 'utf8');
-const scaled = tokens.match(/@media \(min-width: 118rem\) and \(min-height: 56rem\) \{\s*:root \{([^{}]*)\}/g)!.at(-1)!;
+const scaled = tokens.match(/@media \(min-width: 118rem\) and \(min-height: 56rem\), \(min-width: 62rem\) and \(min-height: 112rem\) \{\s*:root \{([^{}]*)\}/g)!.at(-1)!;
 
 describe('desktop feed column', () => {
   it('is_wider_than_the_reading_column_and_scales_with_the_ui', () => {

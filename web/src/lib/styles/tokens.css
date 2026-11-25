@@ -1708,17 +1708,20 @@
   --bubble-max: min(86%, var(--prose-max));
 }
 
-/* Масштаб рабочего стола: один множитель на шрифт, геометрию и ширины колонок. Пороги ниже номинальных: окно при системном масштабе бывает на доли пикселя уже. */
+/* Масштаб рабочего стола: один множитель на шрифт, геометрию и ширины колонок. Пороги ниже номинальных: окно при системном масштабе бывает на доли пикселя уже.
+   Шаг выбирают длинная и короткая сторона экрана при любом повороте: экран — это окно и 6rem панели браузера по высоте.
+   Боком это прежние пороги (ширина от 118rem, высота от 56rem), стоя панель браузера съедает длинную сторону,
+   поэтому вторая половина запроса ждёт высоту на 6rem ниже. Та же формула — uiScale в shell/layout.ts. */
 @property --icon-small { syntax: '<length>'; inherits: true; initial-value: 16px; }
 @property --s10 { syntax: '<length>'; inherits: true; initial-value: 24px; }
 :root {
   --ui-scale: 1;
   --sidebar-width: clamp(min(20rem, 50vw), 18vw, 28rem);
 }
-@media (min-width: 118rem) and (min-height: 56rem) { :root { --ui-scale: 1.0667; } }
-@media (min-width: 156rem) and (min-height: 70rem) { :root { --ui-scale: 1.2; } }
-@media (min-width: 230rem) and (min-height: 110rem) { :root { --ui-scale: 1.6; } }
-@media (min-width: 118rem) and (min-height: 56rem) {
+@media (min-width: 118rem) and (min-height: 56rem), (min-width: 62rem) and (min-height: 112rem) { :root { --ui-scale: 1.0667; } }
+@media (min-width: 156rem) and (min-height: 70rem), (min-width: 76rem) and (min-height: 150rem) { :root { --ui-scale: 1.2; } }
+@media (min-width: 230rem) and (min-height: 110rem), (min-width: 116rem) and (min-height: 224rem) { :root { --ui-scale: 1.6; } }
+@media (min-width: 118rem) and (min-height: 56rem), (min-width: 62rem) and (min-height: 112rem) {
   :root {
     --s1: calc(2px * var(--ui-scale)); --s2: calc(4px * var(--ui-scale)); --s3: calc(6px * var(--ui-scale));
     --s4: calc(8px * var(--ui-scale)); --s5: calc(10px * var(--ui-scale)); --s6: calc(12px * var(--ui-scale));
