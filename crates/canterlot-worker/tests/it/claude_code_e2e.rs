@@ -21,6 +21,9 @@ use crate::fake_exec;
 static CLI_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const WAIT: Duration = Duration::from_secs(15);
+/// Срок ответа двойника на управляющий запрос. Боевые 10 с тесты прерывания без ответа
+/// высиживали целиком; запас против нагрузки остаётся, а отношение сроков в тестах то же.
+const CONTROL: Duration = Duration::from_secs(4);
 
 // Local pipes and Unix sockets only. The script never resolves or invokes claude.
 const FAKE: &str = include_str!("support/fake_claude.py");
@@ -91,6 +94,7 @@ impl Fake {
             exec_dir: dir.path().join("exec"),
             claude_code: Some(ClaudeCodeConfig {
                 executable: exe,
+                control_timeout: CONTROL,
                 ..Default::default()
             }),
             codex: None,
@@ -1455,7 +1459,6 @@ async fn request_closed_by_interrupt_is_not_closed_again_on_relay_disconnect() {
 /// обязан получить отказ, иначе живой CLI ждал бы ответа, которого дать некому.
 #[tokio::test]
 async fn undetermined_interrupt_refuses_the_open_request_to_the_cli() {
-    use canterlot_worker::adapter::claude_code::input::CONTROL_TIMEOUT;
     let _sigint =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
     let id = Uuid::now_v7();
@@ -1465,7 +1468,7 @@ async fn undetermined_interrupt_refuses_the_open_request_to_the_cli() {
             json!("@request:0"),
             json!("@wait"),
         ]],
-        CONTROL_TIMEOUT / 2,
+        CONTROL / 2,
         WAIT,
     );
     std::fs::write(
@@ -3049,13 +3052,12 @@ async fn steer_cancelled_by_the_cli_is_reported_as_an_exact_rejection() {
 
 #[tokio::test]
 async fn interrupt_after_a_torn_steer_falls_back_to_sigint() {
-    use canterlot_worker::adapter::claude_code::input::CONTROL_TIMEOUT;
     let _sigint =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
     // Срок передачи служит и окном итога после SIGINT: простоявший двойник под нагрузкой
     // памяти и диска отвечал на сигнал позже секунды. Он остаётся ниже срока квитанции,
     // поэтому запасной SIGINT по-прежнему наступает первым.
-    let (mut f, id) = stalled_turn(CONTROL_TIMEOUT / 2);
+    let (mut f, id) = stalled_turn(CONTROL / 2);
     f.start().await;
     f.send(&tx(id)).await;
     f.wait_point().await;
@@ -3081,12 +3083,11 @@ async fn interrupt_after_a_torn_steer_falls_back_to_sigint() {
 
 #[tokio::test]
 async fn sigint_fallback_fires_with_a_transmit_deadline_below_the_receipt_wait() {
-    use canterlot_worker::adapter::claude_code::input::CONTROL_TIMEOUT;
     let _sigint =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
     // Срок передачи служит и окном итога после SIGINT: простоявший 10 с двойник под нагрузкой
     // памяти и диска отвечал на сигнал позже секунды.
-    let (mut f, id) = stalled_turn(CONTROL_TIMEOUT / 2);
+    let (mut f, id) = stalled_turn(CONTROL / 2);
     f.start().await;
     f.send(&tx(id)).await;
     f.wait_point().await;

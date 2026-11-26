@@ -1650,11 +1650,14 @@ impl Adapter for ClaudeCodeAdapter {
         drop(delegates);
         broker.arm();
         self.broker = Some(broker);
-        self.queue = Some(InputQueue::new(LaunchSettings {
-            model: spec.model.clone(),
-            effort: spec.effort.clone(),
-            permission_mode: spec.permission_mode.clone(),
-        }));
+        self.queue = Some(
+            InputQueue::new(LaunchSettings {
+                model: spec.model.clone(),
+                effort: spec.effort.clone(),
+                permission_mode: spec.permission_mode.clone(),
+            })
+            .with_control_timeout(self.cfg.control_timeout),
+        );
         self.limits.set_model(&spec.model);
         let cli = CliProcess::spawn(&launch, &self.cfg, group)
             .await

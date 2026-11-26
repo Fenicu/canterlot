@@ -721,6 +721,10 @@ pub struct ClaudeCodeConfig {
     /// Учётная запись, которой принадлежат лимиты харнесса.
     #[serde(default = "default_account", skip_serializing_if = "is_owner_account")]
     pub account: String,
+    /// Срок ответа CLI на управляющий запрос (прерывание, смена настроек), после него —
+    /// запасной путь. Не читается из worker.toml и не пишется в спеку: короче задают тесты.
+    #[serde(skip, default = "default_control_timeout")]
+    pub control_timeout: Duration,
 }
 
 impl Default for ClaudeCodeConfig {
@@ -730,8 +734,13 @@ impl Default for ClaudeCodeConfig {
             allow_paid_model_poll: false,
             owner_user_config: None,
             account: default_account(),
+            control_timeout: default_control_timeout(),
         }
     }
+}
+
+fn default_control_timeout() -> Duration {
+    crate::adapter::claude_code::input::CONTROL_TIMEOUT
 }
 
 /// Учётная запись по умолчанию: лимиты единственной подписки владельца.
@@ -947,6 +956,22 @@ mod tests {
                 Duration::from_secs(5),
             ]
         );
+        assert_eq!(
+            ClaudeCodeConfig::default().control_timeout,
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn claude_control_timeout_is_neither_read_nor_written() {
+        let parsed: ClaudeCodeConfig = toml::from_str("executable = \"claude\"").unwrap();
+        assert_eq!(parsed.control_timeout, Duration::from_secs(10));
+        assert!(toml::from_str::<ClaudeCodeConfig>("control_timeout = \"1s\"").is_err());
+        let short = ClaudeCodeConfig {
+            control_timeout: Duration::from_millis(1),
+            ..ClaudeCodeConfig::default()
+        };
+        assert!(!toml::to_string(&short).unwrap().contains("control_timeout"));
     }
 
     #[test]
