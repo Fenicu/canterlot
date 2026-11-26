@@ -12,6 +12,8 @@ use sqlx::PgPool;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn migration_0018_creates_requests_table_with_constraints(
     pool: PgPool,
@@ -303,9 +305,9 @@ async fn sole_winner_commits_first_decision_and_concurrent_callers_receive_confl
     Ok(())
 }
 
-#[tokio::test]
-async fn identical_idempotency_key_replays_committed_decision() -> Result<(), sqlx::Error> {
-    let pool = canterlot_hub::testkit::db().await;
+async fn identical_idempotency_key_replays_committed_decision(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
     let seed = testkit::seed(&pool).await;
     let execution_id = Uuid::now_v7();
     sqlx::query("insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'running')")
@@ -397,9 +399,9 @@ async fn identical_idempotency_key_replays_committed_decision() -> Result<(), sq
     Ok(())
 }
 
-#[tokio::test]
-async fn decision_on_closed_request_returns_already_closed_conflict() -> Result<(), sqlx::Error> {
-    let pool = canterlot_hub::testkit::db().await;
+async fn decision_on_closed_request_returns_already_closed_conflict(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
     let seed = testkit::seed(&pool).await;
     let execution_id = Uuid::now_v7();
     sqlx::query("insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'running')")
@@ -471,9 +473,9 @@ async fn decision_on_closed_request_returns_already_closed_conflict() -> Result<
     Ok(())
 }
 
-#[tokio::test]
-async fn decision_with_stale_generation_returns_stale_generation() -> Result<(), sqlx::Error> {
-    let pool = canterlot_hub::testkit::db().await;
+async fn decision_with_stale_generation_returns_stale_generation(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
     let seed = testkit::seed(&pool).await;
     let execution_id = Uuid::now_v7();
     sqlx::query("insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'running')")
@@ -671,9 +673,7 @@ fn spawn_approval_kind_round_trips() {
     );
 }
 
-#[tokio::test]
-async fn spawn_approval_request_is_stored_and_read_back() -> Result<(), sqlx::Error> {
-    let pool = canterlot_hub::testkit::db().await;
+async fn spawn_approval_request_is_stored_and_read_back(pool: PgPool) -> Result<(), sqlx::Error> {
     let seed = testkit::seed(&pool).await;
     let execution_id = Uuid::now_v7();
     sqlx::query("insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'running')")
@@ -705,4 +705,18 @@ async fn spawn_approval_request_is_stored_and_read_back() -> Result<(), sqlx::Er
     assert_eq!(stored.kind, RequestKind::SpawnApproval);
     assert_eq!(stored.state, RequestState::Open);
     Ok(())
+}
+
+/// Доменный слой запросов: повтор того же ключа, решение по закрытому запросу.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn requests_domain_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        identical_idempotency_key_replays_committed_decision,
+        decision_on_closed_request_returns_already_closed_conflict,
+        decision_with_stale_generation_returns_stale_generation,
+        spawn_approval_request_is_stored_and_read_back,
+    );
 }
