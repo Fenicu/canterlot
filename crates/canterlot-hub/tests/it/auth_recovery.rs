@@ -12,6 +12,8 @@ use sqlx::{ConnectOptions, PgPool};
 
 use crate::support::auth::{AuthHub, PASSWORD, error_code, fake_gotify, session_token};
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 async fn redeem(hub: &AuthHub, ip: &str, token: &str) -> canterlot_hub::testkit::TestResponse {
     hub.anonymous(Some(ip))
         .send(
@@ -23,9 +25,7 @@ async fn redeem(hub: &AuthHub, ip: &str, token: &str) -> canterlot_hub::testkit:
         .await
 }
 
-#[tokio::test]
-async fn auth_recovery_token_is_single_use_expires_and_is_replaced() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_recovery_token_is_single_use_expires_and_is_replaced(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let (other, _) = hub
         .session(canterlot_hub::owner_auth::Method::Password, None)
@@ -73,9 +73,7 @@ async fn auth_recovery_token_is_single_use_expires_and_is_replaced() {
     assert_eq!(redeem(&hub, "203.0.113.101", &token).await.status, 401);
 }
 
-#[tokio::test]
-async fn auth_recovery_guessing_is_limited_per_bucket() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_recovery_guessing_is_limited_per_bucket(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     for n in 0..5 {
         let guess = format!("{:0>43}", n);
@@ -152,9 +150,7 @@ impl Cli {
     }
 }
 
-#[tokio::test]
-async fn auth_recovery_cli_prints_a_working_link_and_manages_sessions() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_recovery_cli_prints_a_working_link_and_manages_sessions(pool: PgPool) {
     let cli = Cli::new(&pool, None).await;
     let (ok, out, err) = cli.run(&["recovery-link", "--minutes", "5"], None);
     assert!(ok, "{err}");
@@ -233,9 +229,7 @@ async fn auth_recovery_cli_prints_a_working_link_and_manages_sessions() {
     assert_eq!(out, "password_set revoked=0\n");
 }
 
-#[tokio::test]
-async fn auth_recovery_cli_push_sends_only_to_gotify() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_recovery_cli_push_sends_only_to_gotify(pool: PgPool) {
     let (seen, url) = fake_gotify().await;
     let cli = Cli::new(&pool, Some(&url)).await;
     let (ok, out, err) = tokio::task::spawn_blocking(move || {
@@ -300,4 +294,19 @@ async fn auth_recovery_token_is_redeemed_with_the_session() {
     let again = redeem(&hub, "203.0.113.74", &token).await;
     assert_eq!(again.status, 401);
     assert_eq!(error_code(&again), "invalid_credentials");
+}
+
+/// Восстановление доступа: одноразовый токен, лимит угадывания, ссылка и сеансы из
+/// CLI, пуш только в Gotify.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn recovery_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        auth_recovery_token_is_single_use_expires_and_is_replaced,
+        auth_recovery_guessing_is_limited_per_bucket,
+        auth_recovery_cli_prints_a_working_link_and_manages_sessions,
+        auth_recovery_cli_push_sends_only_to_gotify,
+    );
 }
