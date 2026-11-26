@@ -9,6 +9,9 @@ use canterlot_hub::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+use sqlx::PgPool;
+
 use crate::support::auth::{AuthHub, PASSWORD, set_cookie};
 
 struct SignedIn {
@@ -53,9 +56,7 @@ fn with_device(client: TestClient, device: &str) -> TestClient {
     client.with_header("Cookie", &format!("{DEVICE_COOKIE}={device}"))
 }
 
-#[tokio::test]
-async fn auth_devices_qr_sign_in_gets_no_device_cookie() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_devices_qr_sign_in_gets_no_device_cookie(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let client = hub.anonymous(Some("203.0.113.80"));
     let started = client
@@ -91,9 +92,7 @@ async fn auth_devices_qr_sign_in_gets_no_device_cookie() {
     assert_eq!(devices(&hub).await, 0);
 }
 
-#[tokio::test]
-async fn auth_devices_follow_the_session_of_their_last_sign_in() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_devices_follow_the_session_of_their_last_sign_in(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let a = sign_in(&hub, &hub.anonymous(Some("203.0.113.81"))).await;
@@ -177,9 +176,7 @@ async fn auth_devices_follow_the_session_of_their_last_sign_in() {
     assert_eq!(devices(&hub).await, 0);
 }
 
-#[tokio::test]
-async fn auth_devices_are_forgotten_by_revoke_all_and_set_password() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_devices_are_forgotten_by_revoke_all_and_set_password(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let a = sign_in(&hub, &hub.anonymous(Some("203.0.113.86"))).await;
@@ -202,9 +199,7 @@ async fn auth_devices_are_forgotten_by_revoke_all_and_set_password() {
 }
 
 #[cfg(feature = "fault-injection")]
-#[tokio::test]
-async fn auth_devices_a_failure_after_the_session_commit_revokes_it() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_devices_a_failure_after_the_session_commit_revokes_it(pool: PgPool) {
     use canterlot_hub::fault_injection::Point;
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
@@ -239,9 +234,7 @@ async fn auth_devices_a_failure_after_the_session_commit_revokes_it() {
 /// не ушёл, сеанс отзывается, а устройство остаётся известным и привязанным к прежнему
 /// сеансу: сбой хаба не отправляет владельца в общую корзину перебора.
 #[cfg(feature = "fault-injection")]
-#[tokio::test]
-async fn auth_devices_a_failed_sign_in_does_not_forget_a_known_device() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_devices_a_failed_sign_in_does_not_forget_a_known_device(pool: PgPool) {
     use canterlot_hub::fault_injection::Point;
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
@@ -339,5 +332,21 @@ async fn auth_devices_undoing_a_failed_sign_in_is_one_transaction() {
         bound,
         Some(orphan),
         "the device move is rolled back together with the failed revoke"
+    );
+}
+
+/// Устройства: вход по QR без cookie устройства, следование сеансу, забывание при
+/// отзыве и смене пароля, сбой после фиксации сеанса.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn device_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        auth_devices_qr_sign_in_gets_no_device_cookie,
+        auth_devices_follow_the_session_of_their_last_sign_in,
+        auth_devices_are_forgotten_by_revoke_all_and_set_password,
+        auth_devices_a_failure_after_the_session_commit_revokes_it,
+        auth_devices_a_failed_sign_in_does_not_forget_a_known_device,
     );
 }
