@@ -837,19 +837,36 @@ fn seed_backlog(store: WorkerStore, path: &Path, count: usize, size: usize) -> W
     use prost::Message;
     drop(store);
     let (mut journal, _) = Journal::open(&path.join("cj"), JournalOptions::default()).unwrap();
-    for _ in 0..count {
-        journal
-            .append(
-                &RecordBody {
-                    body: Some(record_body::Body::CommandRejected(CommandRejected {
-                        command_id: Uuid::now_v7().to_string(),
-                        dispatch_attempt: 1,
-                        reason: "x".repeat(size),
-                    })),
-                }
-                .encode_to_vec(),
-            )
-            .unwrap();
+    // Одна команда на весь хвост: сверка при открытии хранилища дописывает квитанцию
+    // (и fsync) на каждую незнакомую команду, а тестам нужен только объём журнала.
+    let command_id = Uuid::now_v7().to_string();
+    let records: Vec<Vec<u8>> = (0..count)
+        .map(|_| {
+            RecordBody {
+                body: Some(record_body::Body::CommandRejected(CommandRejected {
+                    command_id: command_id.clone(),
+                    dispatch_attempt: 1,
+                    reason: "x".repeat(size),
+                })),
+            }
+            .encode_to_vec()
+        })
+        .collect();
+    // Пачки по 1 МиБ: fsync на пачку, а не на запись (4000 fsync — это секунды под нагрузкой);
+    // сегменты по-прежнему сменяются около своего предела.
+    let mut batch: Vec<&[u8]> = Vec::new();
+    let mut batch_bytes = 0;
+    for record in &records {
+        if !batch.is_empty() && batch_bytes + record.len() > 1 << 20 {
+            journal.append_batch(&batch).unwrap();
+            batch.clear();
+            batch_bytes = 0;
+        }
+        batch_bytes += record.len();
+        batch.push(record);
+    }
+    if !batch.is_empty() {
+        journal.append_batch(&batch).unwrap();
     }
     drop(journal);
     WorkerStore::open(path).unwrap()
