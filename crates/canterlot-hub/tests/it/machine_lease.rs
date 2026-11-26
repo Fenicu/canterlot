@@ -231,7 +231,7 @@ async fn malformed_state_is_ignored_without_touching_the_stored_one() -> TestRes
 }
 
 #[tokio::test]
-async fn machine_snapshot_carries_the_queue_until_the_machine_disappears() -> TestResult {
+async fn machine_snapshot_carries_the_queue() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let snap = snapshot::machines(&pool, s.owner_id).await?;
@@ -247,8 +247,13 @@ async fn machine_snapshot_carries_the_queue_until_the_machine_disappears() -> Te
     let view = serde_json::to_value(&snap.data.items[0])?;
     assert_eq!(view["lease"]["holders"][0]["kind"], "gate");
     assert_eq!(view["lease"]["holders"][0]["holder"], "owner");
+    Ok(())
+}
 
-    // ── Машина пропала: очередь снимается, событие уходит клиентам ──
+#[tokio::test]
+async fn unavailable_machine_drops_the_queue() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let s = testkit::seed(&pool).await;
     available(&pool, s.machine_id).await;
     let now = Utc::now();
     apply(
@@ -258,17 +263,16 @@ async fn machine_snapshot_carries_the_queue_until_the_machine_disappears() -> Te
     )
     .await;
     // Реестр без сеанса машины: проекция видит её пропавшей.
-    let events_before = lease_events(&pool).await.len();
     machine_info::project_availability(&pool, &registry(), Uuid::now_v7()).await?;
     assert_eq!(stored(&pool, s.machine_id).await, None);
     let events = lease_events(&pool).await;
-    assert_eq!(events.len(), events_before + 1);
-    assert!(events.last().unwrap()["lease"].is_null());
+    assert_eq!(events.len(), 2);
+    assert!(events[1]["lease"].is_null());
     let snap = snapshot::machines(&pool, s.owner_id).await?;
     assert!(serde_json::to_value(&snap.data.items[0])?["lease"].is_null());
     // Повторная проекция молчит; полное состояние при переподключении заменяет пустоту.
     machine_info::project_availability(&pool, &registry(), Uuid::now_v7()).await?;
-    assert_eq!(lease_events(&pool).await.len(), events_before + 1);
+    assert_eq!(lease_events(&pool).await.len(), 2);
     apply(
         &pool,
         &s,
