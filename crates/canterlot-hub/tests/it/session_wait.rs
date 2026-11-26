@@ -23,6 +23,8 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 struct Fx {
     pool: PgPool,
     context: ToolContext,
@@ -170,9 +172,7 @@ impl Fx {
     }
 }
 
-#[tokio::test]
-async fn wait_returns_at_once_when_settled() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wait_returns_at_once_when_settled(pool: PgPool) {
     let f = Fx::new(pool).await;
     f.settle_target().await;
     let started = Instant::now();
@@ -189,9 +189,7 @@ async fn wait_returns_at_once_when_settled() {
     assert!(summary.contains("is now idle."), "{summary}");
 }
 
-#[tokio::test]
-async fn wait_times_out_and_keeps_subscription() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wait_times_out_and_keeps_subscription(pool: PgPool) {
     let f = Fx::new(pool).await;
     f.busy_target().await;
     f.subscribe().await;
@@ -213,9 +211,7 @@ async fn wait_times_out_and_keeps_subscription() {
     assert!(subscription["last_fingerprint"].is_null());
 }
 
-#[tokio::test]
-async fn wait_without_subscription_does_not_claim_one() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wait_without_subscription_does_not_claim_one(pool: PgPool) {
     let f = Fx::new(pool).await;
     f.busy_target().await;
     let result = f
@@ -231,9 +227,7 @@ async fn wait_without_subscription_does_not_claim_one() {
     assert_eq!(rows, 0, "wait never subscribes by itself");
 }
 
-#[tokio::test]
-async fn wait_suppresses_event_when_it_wins() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wait_suppresses_event_when_it_wins(pool: PgPool) {
     let f = Fx::new(pool).await;
     f.settle_target().await;
     f.subscribe().await;
@@ -258,9 +252,7 @@ async fn wait_suppresses_event_when_it_wins() {
     );
 }
 
-#[tokio::test]
-async fn wait_on_a_stopped_target_with_a_queued_input_keeps_the_subscription() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wait_on_a_stopped_target_with_a_queued_input_keeps_the_subscription(pool: PgPool) {
     let f = Fx::new(pool).await;
     let execution = executions::start(&f.pool, f.owner, f.target, Uuid::now_v7())
         .await
@@ -294,9 +286,7 @@ async fn wait_on_a_stopped_target_with_a_queued_input_keeps_the_subscription() {
     assert!(f.subscription().await["closed_at"].is_null());
 }
 
-#[tokio::test]
-async fn event_still_arrives_when_evaluator_wins() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn event_still_arrives_when_evaluator_wins(pool: PgPool) {
     let f = Fx::new(pool).await;
     f.settle_target().await;
     f.subscribe().await;
@@ -342,22 +332,19 @@ async fn wait_after_target_domain_change(pool: PgPool, domain: Option<&str>) {
     assert_eq!(error.code, Code::SessionNotFound, "{domain:?}");
 }
 
-#[tokio::test]
-async fn wait_refuses_a_target_that_moved_to_work() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wait_refuses_a_target_that_moved_to_work(pool: PgPool) {
     wait_after_target_domain_change(pool, Some("work")).await;
 }
 
-#[tokio::test]
-async fn wait_refuses_a_target_whose_domain_became_null() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wait_refuses_a_target_whose_domain_became_null(pool: PgPool) {
     wait_after_target_domain_change(pool, None).await;
 }
 
-#[tokio::test]
-async fn wait_picks_up_a_state_reached_while_waiting() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
+async fn wait_picks_up_a_state_reached_while_waiting(pool: PgPool) {
+    let mut f = Fx::new(pool).await;
+    // Окно тишины короче обычного: проверка о состоянии, наступившем во время ожидания,
+    // а не о длине окна.
+    f.context.settle.idle_quiet = Duration::from_secs(1);
     f.busy_target().await;
     f.subscribe().await;
     let pool = f.pool.clone();
@@ -388,9 +375,7 @@ async fn wait_picks_up_a_state_reached_while_waiting() {
     assert_eq!(result["state"], "idle");
 }
 
-#[tokio::test]
-async fn wait_holds_no_database_connection() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wait_holds_no_database_connection(pool: PgPool) {
     let f = Fx::new(pool).await;
     f.busy_target().await;
     let single = PgPoolOptions::new()
@@ -430,9 +415,7 @@ async fn wait_holds_no_database_connection() {
     assert_eq!(result["timed_out"], true);
 }
 
-#[tokio::test]
-async fn wait_stops_on_hub_shutdown() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wait_stops_on_hub_shutdown(pool: PgPool) {
     let f = Fx::new(pool).await;
     f.busy_target().await;
     let shutdown = f.context.shutdown.clone();
@@ -450,9 +433,7 @@ async fn wait_stops_on_hub_shutdown() {
     assert_eq!(error.code, Code::Internal);
 }
 
-#[tokio::test]
-async fn wait_validates_arguments_and_visibility() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wait_validates_arguments_and_visibility(pool: PgPool) {
     let f = Fx::new(pool).await;
     f.settle_target().await;
     for bad in [0, 301, -1] {
@@ -485,9 +466,7 @@ async fn wait_validates_arguments_and_visibility() {
     assert_eq!(error.code, Code::SessionNotFound);
 }
 
-#[tokio::test]
-async fn wait_reports_a_target_deleted_meanwhile() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wait_reports_a_target_deleted_meanwhile(pool: PgPool) {
     let f = Fx::new(pool).await;
     f.busy_target().await;
     let directory = tempfile::tempdir().unwrap();
@@ -516,9 +495,7 @@ async fn wait_reports_a_target_deleted_meanwhile() {
     assert!(!result["summary"].as_str().unwrap().contains("private"));
 }
 
-#[tokio::test]
-async fn event_for_an_open_state_is_not_suppressed_by_a_later_wait() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn event_for_an_open_state_is_not_suppressed_by_a_later_wait(pool: PgPool) {
     let f = Fx::new(pool).await;
     f.busy_target().await;
     sqlx::query("update queue_state set pause_reasons='[{\"reason\":\"user_stop\"}]' where conversation_id=$1")
@@ -548,9 +525,7 @@ async fn event_for_an_open_state_is_not_suppressed_by_a_later_wait() {
 
 /// Исполнение ожидающего умерло, пока вызов ждал: ответ вызова читать некому, поэтому итог
 /// обязан прийти событием подписки.
-#[tokio::test]
-async fn wait_leaves_the_event_when_the_calling_execution_is_gone() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wait_leaves_the_event_when_the_calling_execution_is_gone(pool: PgPool) {
     let f = Fx::new(pool).await;
     f.settle_target().await;
     f.subscribe().await;
@@ -575,9 +550,7 @@ async fn wait_leaves_the_event_when_the_calling_execution_is_gone() {
 
 /// Ход, который позвал `session_wait`, прерван, и слот занят уже другим вводом: событие
 /// остаётся за подпиской.
-#[tokio::test]
-async fn wait_leaves_the_event_when_the_callers_turn_changed() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wait_leaves_the_event_when_the_callers_turn_changed(pool: PgPool) {
     let f = Fx::new(pool).await;
     f.settle_target().await;
     f.subscribe().await;
@@ -612,4 +585,52 @@ async fn wait_leaves_the_event_when_the_callers_turn_changed() {
         .unwrap();
     assert!(claimed);
     assert_eq!(f.subscription().await["closed_reason"], "idle");
+}
+
+/// session_wait: готовое состояние, истечение срока, подписка, победа ожидания или
+/// события, остановленная цель, цель ушла из домена.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn wait_settle_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        wait_returns_at_once_when_settled,
+        wait_times_out_and_keeps_subscription,
+        wait_without_subscription_does_not_claim_one,
+        wait_suppresses_event_when_it_wins,
+        wait_on_a_stopped_target_with_a_queued_input_keeps_the_subscription,
+        event_still_arrives_when_evaluator_wins,
+        wait_refuses_a_target_that_moved_to_work,
+        wait_refuses_a_target_whose_domain_became_null,
+    );
+}
+
+/// Состояние, достигнутое во время ожидания, ожидание без соединения базы и остановка хаба.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn wait_race_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        wait_picks_up_a_state_reached_while_waiting,
+        wait_holds_no_database_connection,
+        wait_stops_on_hub_shutdown,
+    );
+}
+
+/// Проверки аргументов, цель удалена во время ожидания, событие открытого состояния,
+/// вызов без исполнения или со сменившимся ходом.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn wait_edge_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        wait_validates_arguments_and_visibility,
+        wait_reports_a_target_deleted_meanwhile,
+        event_for_an_open_state_is_not_suppressed_by_a_later_wait,
+        wait_leaves_the_event_when_the_calling_execution_is_gone,
+        wait_leaves_the_event_when_the_callers_turn_changed,
+    );
 }
