@@ -180,6 +180,7 @@ pub fn instructions_block(composed: &str) -> String {
 /// Блок инструкций, ждущий следующего `turn/start`. `command_id` — ход, в чей
 /// ввод блок уже попал: только принятие этого хода снимает блок. Текст пресета —
 /// данные сообщения, `Debug` показывает лишь размер.
+#[derive(Clone)]
 pub struct PendingInstructions {
     block: String,
     command_id: Option<Uuid>,

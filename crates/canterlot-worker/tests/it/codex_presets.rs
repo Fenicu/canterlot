@@ -1109,13 +1109,9 @@ async fn rejected_first_turn_resends_the_block_on_retry() {
     let mut h = PresetHarness::new().await;
     std::fs::write(h.dir.path().join("fail-turn-once"), "").unwrap();
     let command = Uuid::now_v7();
+    let spec = preset_spec("CANARY-RETRY");
     let out = h
-        .transmit_with(
-            command,
-            1,
-            "owner-words",
-            Some(change(preset_spec("CANARY-RETRY"))),
-        )
+        .transmit_with(command, 1, "owner-words", Some(change(spec.clone())))
         .await;
     assert!(matches!(&out, TransmitOutcome::Rejected(_)), "{out:?}");
     let texts = h.turn_texts();
@@ -1123,8 +1119,11 @@ async fn rejected_first_turn_resends_the_block_on_retry() {
     assert!(texts[0].starts_with(BLOCK_OPEN), "{}", texts[0]);
     assert!(texts[0].contains("CANARY-RETRY"), "{}", texts[0]);
 
-    // Хаб повторяет тот же ввод без смены: блок обязан уехать снова.
-    let out = h.transmit_with(command, 2, "owner-words", None).await;
+    // Причина отказа не из настроек: хаб держит смену в ожидании и везёт её снова,
+    // адаптер вернулся к прежним инструкциям, поэтому перезапуск и блок повторяются.
+    let out = h
+        .transmit_with(command, 2, "owner-words", Some(change(spec)))
+        .await;
     assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
     h.until_finished().await;
     let texts = h.turn_texts();
@@ -1383,4 +1382,50 @@ async fn side_chat_fork_compares_with_the_parent_record_and_writes_none() {
     };
     let mut h = PresetHarness::start_in(dir, spec, None, "ask", Some(fork)).await;
     assert_eq!(h.one_turn(None, "side-again").await, "side-again");
+}
+
+// --- Отказ хода после удачного перезапуска возвращает прежние инструкции ---
+
+impl PresetHarness {
+    /// Процесс, в чей stdin ушёл ввод с этим текстом.
+    fn pid_with_input(&self, needle: &str) -> u32 {
+        for entry in std::fs::read_dir(self.dir.path()).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            if let Some(pid) = name
+                .strip_prefix("stdin-")
+                .and_then(|rest| rest.strip_suffix(".log"))
+                && std::fs::read_to_string(self.dir.path().join(&name))
+                    .unwrap()
+                    .contains(needle)
+            {
+                return pid.parse().unwrap();
+            }
+        }
+        panic!("no process received {needle}");
+    }
+}
+
+#[tokio::test]
+async fn rejected_turn_after_a_restart_returns_to_the_previous_instructions_and_home() {
+    let mut h = PresetHarness::new().await;
+    std::fs::write(h.dir.path().join("fail-turn-once"), "").unwrap();
+    let out = h
+        .transmit_text(Some(change(preset_spec("CANARY-REVERT"))), "rejected-words")
+        .await;
+    assert!(
+        matches!(&out, TransmitOutcome::Rejected(reason) if reason == "rejected"),
+        "{out:?}"
+    );
+    // Перезапуск под пресетом, затем запасной запуск с прежними инструкциями.
+    assert_eq!(h.spawns().len(), 3, "{:?}", h.spawns());
+
+    let out = h.transmit_text(None, "after-words").await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    assert_eq!(turn_with(&h.turn_texts(), "after-words"), "after-words");
+    assert_eq!(h.spawns().len(), 3, "no further restart");
+    let env = h.env_of(h.pid_with_input("after-words"));
+    assert_eq!(env["CODEX_HOME"], Value::Null, "owner home again: {env}");
+    // Адаптер, запись треда и хаб снова согласны: тред видел только «Как у владельца».
+    assert_record(h.dir.path(), THREAD, &owner_spec());
 }

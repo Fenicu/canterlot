@@ -246,6 +246,16 @@ struct PendingTurn {
     settings: Option<SettingsChange>,
 }
 
+/// Инструкции адаптера до перезапуска со сменой: к ним он возвращается, если ход
+/// после перезапуска отклонён.
+struct InstructionsSnapshot {
+    instructions: InstructionSpec,
+    mode: PermissionMode,
+    effort: Option<String>,
+    model: Option<String>,
+    pending: Option<PendingInstructions>,
+}
+
 /// Параметры перезапуска app-server с возобновлением треда.
 struct ResumeLaunch<'a> {
     mode: PermissionMode,
@@ -1400,6 +1410,42 @@ impl CodexAdapter {
         }
     }
 
+    fn instructions_snapshot(&self) -> InstructionsSnapshot {
+        InstructionsSnapshot {
+            instructions: self.instructions.clone(),
+            mode: self.mode,
+            effort: self.effort.clone(),
+            model: self
+                .effective
+                .as_ref()
+                .map(|effective| effective.model.clone()),
+            pending: self.pending_instructions.clone(),
+        }
+    }
+
+    /// Ход после удачного перезапуска со сменой отклонён, а хаб сменой считает только
+    /// принятый ввод: адаптер возвращается к прежним инструкциям, режиму и дому тем же
+    /// запасным запуском, что и после неудачного перезапуска, и блок новой смены
+    /// снимается. Иначе следующий ввод без смены отвёз бы модели пресет, которого хаб
+    /// не показывает. Отказ входа остаётся прежним; провал запасного запуска
+    /// останавливает исполнение (`ProcessExited`).
+    async fn return_to_instructions(
+        &mut self,
+        before: InstructionsSnapshot,
+        group: &dyn Containment,
+    ) {
+        self.instructions = before.instructions;
+        self.mode = before.mode;
+        self.effort = before.effort;
+        self.pending_instructions = before.pending;
+        if let (Some(effective), Some(model)) = (self.effective.as_mut(), before.model) {
+            effective.model = model;
+        }
+        self.discard_server().await;
+        // Запасной запуск всегда отвечает отказом входа: отказ уже отдан выше.
+        let _ = self.respawn_previous(group).await;
+    }
+
     /// Остановить текущий app-server и забыть состояние его соединения.
     async fn discard_server(&mut self) {
         self.stop_old_server().await;
@@ -2329,7 +2375,20 @@ impl Adapter for CodexAdapter {
         if self.proc.is_none() || self.exited || self.eof {
             return TransmitOutcome::Undetermined;
         }
-        self.transmit_inner(input, group).await
+        let before = input
+            .settings
+            .as_ref()
+            .and_then(|change| change.instructions.as_ref())
+            .filter(|next| !next.same_effect(&self.instructions))
+            .map(|_| self.instructions_snapshot());
+        let outcome = self.transmit_inner(input, group).await;
+        // Перезапуск со сменой удался, а ход отклонён: хаб смену не принял.
+        if let (Some(before), TransmitOutcome::Rejected(_)) = (before, &outcome)
+            && !before.instructions.same_effect(&self.instructions)
+        {
+            self.return_to_instructions(before, group).await;
+        }
+        outcome
     }
 
     async fn deliver_decision(
