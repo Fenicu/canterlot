@@ -183,9 +183,27 @@ impl Snapshot {
 }
 
 /// Шаг `before` таблицы на голом пуле: база возвращается к снимку `Snapshot::take`.
+///
+/// Фоновые службы общего хаба таблицы пишут в те же строки: взаимоблокировка с ними
+/// откатывает весь откат снимка, и он повторяется.
 pub async fn restore(pool: sqlx::PgPool) {
-    sqlx::query("select _snapshot.restore()")
-        .execute(&pool)
-        .await
-        .expect("snapshot restore");
+    let mut attempt = 0;
+    loop {
+        match sqlx::query("select _snapshot.restore()")
+            .execute(&pool)
+            .await
+        {
+            Ok(_) => return,
+            Err(error)
+                if attempt < 10
+                    && error
+                        .as_database_error()
+                        .and_then(|error| error.code())
+                        .is_some_and(|code| code == "40P01" || code == "40001") =>
+            {
+                attempt += 1;
+            }
+            Err(error) => panic!("snapshot restore: {error}"),
+        }
+    }
 }
