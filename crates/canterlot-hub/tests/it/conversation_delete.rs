@@ -357,6 +357,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     .await;
     exec(
         pool,
+        "insert into plan_reminders(orchestrator_conversation_id,last_digest_at)
+         values($1,clock_timestamp())",
+        &[conversation],
+    )
+    .await;
+    exec(
+        pool,
         "insert into session_subscriptions(id,owner_id,subscriber_id,target_id)
          values($1,$2,$3,$4),($5,$2,$4,$3)",
         &[

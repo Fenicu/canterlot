@@ -295,6 +295,9 @@ pub async fn dispatch_next(
                 .await?;
         }
     }
+    // Напоминания складываются заметками прямо перед сборкой приставки и едут с этим вводом;
+    // откат выдачи откатывает и их, и отметку о том, что они сказаны.
+    crate::reminders::prepare_in_tx(&mut *conn, conversation_id, correlation_id).await?;
     let noted = with_service_notes(&mut *conn, conversation_id, input_id).await?;
     if !noted.notes.is_empty() {
         sqlx::query(
