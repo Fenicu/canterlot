@@ -1311,7 +1311,8 @@ fn isolated(replies: Vec<Reply>) -> Bench {
     let mut bench = Bench::new(script);
     bench.spec.isolate_mcp = true;
     bench.adapter.set_ready_wait(Duration::from_millis(300));
-    bench.adapter.set_mcp_wait(Duration::from_millis(300));
+    // Срок лишь доказывает, что список не собрался: доказательство не придёт никогда.
+    bench.adapter.set_mcp_wait(Duration::from_millis(200));
     bench
 }
 
@@ -7016,12 +7017,16 @@ async fn failed_steer_reconciliation_leaves_the_running_turn_alone() {
         "failed POST reconciles later: {outcome:?}"
     );
     // Гоняем события, пока сверка не уляжется: конца чужого хода быть не должно.
-    // Сверка опросами занимает до 3,5 с, дальше тишина означает её конец.
-    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    // Сверка идёт опросами проекций (четыре круга): ждём их конец и тишину после,
+    // а не фиксированный срок.
     let mut stray_finish = false;
-    while std::time::Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        match tokio::time::timeout(remaining, bench.adapter.next_event()).await {
+    let mut quiet_since = None;
+    let cap = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if std::time::Instant::now() >= cap {
+            break;
+        }
+        match tokio::time::timeout(Duration::from_millis(200), bench.adapter.next_event()).await {
             Ok(event) => {
                 if matches!(
                     &event,
@@ -7039,7 +7044,25 @@ async fn failed_steer_reconciliation_leaves_the_running_turn_alone() {
                     break;
                 }
             }
-            Err(_) => break,
+            Err(_) => {}
+        }
+        let reads = bench
+            .fake
+            .requests()
+            .iter()
+            .filter(|request| {
+                request["method"] == "GET"
+                    && (path_of(request).ends_with("/inbox")
+                        || path_of(request).contains("/message/"))
+            })
+            .count();
+        if reads >= 8 {
+            let quiet = *quiet_since.get_or_insert(std::time::Instant::now());
+            if quiet.elapsed() >= Duration::from_secs(1) {
+                break;
+            }
+        } else {
+            quiet_since = None;
         }
     }
     assert!(!stray_finish, "uncertain steer must not finish any turn");
