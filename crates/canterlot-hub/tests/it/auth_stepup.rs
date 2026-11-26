@@ -7,6 +7,9 @@ use canterlot_hub::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+use sqlx::PgPool;
+
 use crate::support::auth::{AuthHub, PASSWORD, error_code, session_token};
 
 /// Все действия управления доступом, которым нужна свежесть.
@@ -49,9 +52,7 @@ async fn guarded(hub: &AuthHub, client: &TestClient) -> Vec<(&'static str, TestR
     ]
 }
 
-#[tokio::test]
-async fn auth_stepup_qr_born_session_is_never_fresh() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_stepup_qr_born_session_is_never_fresh(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let (qr, token) = hub.session(SignInMethod::Qr, Some(TEST_SESSION_ID)).await;
     let client = hub.with_session(&token, None);
@@ -96,9 +97,7 @@ async fn auth_stepup_qr_born_session_is_never_fresh() {
     assert_eq!(logout.status, 200);
 }
 
-#[tokio::test]
-async fn auth_stepup_stale_session_reauths_with_the_password() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_stepup_stale_session_reauths_with_the_password(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let (qr, token) = hub.session(SignInMethod::Qr, Some(TEST_SESSION_ID)).await;
@@ -166,9 +165,7 @@ async fn auth_stepup_stale_session_reauths_with_the_password() {
     assert_eq!(error_code(&reauth(PASSWORD).await), "wrong_password");
 }
 
-#[tokio::test]
-async fn auth_stepup_each_guarded_action_works_when_fresh() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_stepup_each_guarded_action_works_when_fresh(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.make_stale(TEST_SESSION_ID).await;
     for (name, response) in guarded(&hub, &hub.owner()).await {
@@ -199,4 +196,17 @@ async fn auth_stepup_each_guarded_action_works_when_fresh() {
             .await
             .unwrap();
     assert_eq!(live.len(), 1);
+}
+
+/// Повторная проверка: сеанс из QR не свежий, вход паролем, защищённые действия.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn stepup_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        auth_stepup_qr_born_session_is_never_fresh,
+        auth_stepup_stale_session_reauths_with_the_password,
+        auth_stepup_each_guarded_action_works_when_fresh,
+    );
 }
