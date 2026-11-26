@@ -115,6 +115,11 @@ python3 scripts/lockfile-registry-check.py
 python3 scripts/test-lockfile-registry-check.py -q
 stage_done "реестр в лок-файлах"
 
+# Самотест уборки каталогов из /dev/shm работает на своём временном каталоге.
+stage "уборка осиротевших тестовых каталогов"
+bash scripts/test-reap-stray-tests.sh
+stage_done "уборка осиротевших тестовых каталогов"
+
 # Состав гейта сверяется по тексту скриптов за доли секунды, поэтому в каждом режиме.
 stage "состав гейта"
 bash scripts/gate-coverage.sh
