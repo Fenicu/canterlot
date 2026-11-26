@@ -397,8 +397,16 @@ enum TurnEnd {
 }
 
 /// Ходы подряд на одном стенде: ответы и концы идут по порядку вводов.
-/// Записанные id сообщений различаются по номеру клона, иначе таблица подстановок
-/// склеила бы их в один ввод. Ответа нет — обычный приём.
+/// Ответа нет — обычный приём с живым id ввода; заданный ответ уходит как есть,
+/// без подстановки: так проверяются чужие id и отказы.
+/// Обычный приём: двойник отвечает живым id ввода.
+fn live_reply(recorded: &str) -> Reply {
+    Reply {
+        body: Some(json!({"data": {"id": recorded}})),
+        ..Default::default()
+    }
+}
+
 fn turns_script(cases: Vec<(Option<Reply>, TurnEnd)>) -> Script {
     let template = ready();
     let path = template
@@ -417,29 +425,14 @@ fn turns_script(cases: Vec<(Option<Reply>, TurnEnd)>) -> Script {
     let mut script = session_only();
     for (n, (reply, end)) in cases.into_iter().enumerate() {
         let recorded = format!("msg_clone{n:03}");
-        let (reply, bind) = match reply {
-            Some(mut reply) => {
-                let bind = match reply.body.as_mut() {
-                    Some(body) if body.pointer("/data/id").is_some() => {
-                        body["data"]["id"] = recorded.clone().into();
-                        [(recorded.clone(), "/id".to_owned())]
-                            .into_iter()
-                            .collect()
-                    }
-                    _ => Default::default(),
-                };
-                (reply, bind)
-            }
-            // Обычный приём: двойник отвечает живым id ввода.
-            None => (
-                Reply {
-                    body: Some(json!({"data": {"id": recorded}})),
-                    ..Default::default()
-                },
-                [(recorded.clone(), "/id".to_owned())]
-                    .into_iter()
-                    .collect(),
-            ),
+        // Привязка клона к живому id нужна и заданному ответу: конец хода ссылается
+        // на клон, а подстановка берёт живой id из тела запроса.
+        let bind = [(recorded.clone(), "/id".to_owned())]
+            .into_iter()
+            .collect();
+        let reply = match reply {
+            Some(reply) => reply,
+            None => live_reply(&recorded),
         };
         script.steps.push(Step::Expect {
             method: "POST".into(),
@@ -2004,31 +1997,220 @@ async fn first_turn_runs_from_prompt_to_run_finished() {
     bench.fake.wait_gone().await;
 }
 
+
+// Исходы ввода на общем стенде: приёмы, отказы и неопределённые доставки идут
+// подряд, утверждения видят срез журнала своего случая.
 #[tokio::test]
-async fn two_turns_in_one_process_each_get_their_end() {
-    let mut bench = Bench::new(two_turns());
-    bench.start_ok().await;
+async fn prompt_outcomes_on_a_shared_bench() {
+    let refused = |status: u16, tag: &str| {
+        Some(Reply {
+            status,
+            body: Some(json!({"_tag": tag, "message": "текст для модели"})),
+            ..Default::default()
+        })
+    };
+    let foreign = || {
+        Some(Reply {
+            body: Some(json!({"data": {"id": "msg_someone_else"}})),
+            ..Default::default()
+        })
+    };
+    let failed = || {
+        Some(Reply {
+            status: 500,
+            body: Some(json!({"_tag": "UnknownError"})),
+            ..Default::default()
+        })
+    };
+    let mut bench = bench_with_turns(vec![
+        (None, TurnEnd::Succeeded),       // первый ход доходит до конца
+        (None, TurnEnd::Succeeded),       // второй ход доходит до конца
+        (refused(400, "InvalidRequestError"), TurnEnd::Rejected),
+        (None, TurnEnd::Succeeded),       // сессия usable после 400
+        (refused(409, "ConflictError"), TurnEnd::Rejected),
+        (None, TurnEnd::Succeeded),       // сессия usable после 409
+        (refused(404, "SessionNotFoundError"), TurnEnd::Rejected),
+        (None, TurnEnd::Succeeded),       // сессия usable после 404
+        (foreign(), TurnEnd::Rejected),   // чужой id не доказательство
+        (failed(), TurnEnd::Rejected),    // 500 оставляет ввод неподтверждённым
+        (None, TurnEnd::Succeeded),       // повтор без истории уходит один раз
+        (None, TurnEnd::Succeeded),       // вложение путём в тексте
+    ]);
+    let started = bench.start_ok().await;
+
+    // Два хода в одном процессе, у каждого свой конец.
     let first = bench.input("remember");
     bench.accepted(&first).await;
     let events = bench.until_finished(first.command_id).await;
     assert_eq!(
-        events
-            .iter()
-            .filter(|e| matches!(e, AdapterEvent::RunFinished { .. }))
-            .count(),
+        events.iter().filter(|e| matches!(e, AdapterEvent::RunFinished { .. })).count(),
         1
     );
     assert!(matches!(
         bench.event().await,
-        AdapterEvent::Phase {
-            phase: Phase::AwaitingInput,
-            ..
-        }
+        AdapterEvent::Phase { phase: Phase::AwaitingInput, .. }
     ));
     let second = bench.input("what did I say");
     bench.accepted(&second).await;
     bench.until_finished(second.command_id).await;
+
+    // Отказы называют ошибку, сессия принимает следующий ввод.
+    for (status, tag) in [
+        (400, "InvalidRequestError"),
+        (409, "ConflictError"),
+        (404, "SessionNotFoundError"),
+    ] {
+        let _ = status;
+        let input = bench.input("x");
+        match bench.transmit(&input).await {
+            TransmitOutcome::Rejected(reason) => assert_eq!(reason, tag),
+            other => panic!("{other:?}"),
+        }
+        let next = bench.input("y");
+        assert!(!matches!(
+            bench.transmit(&next).await,
+            TransmitOutcome::Rejected(reason) if reason == "turn_active"
+        ));
+        bench.until_finished(next.command_id).await;
+    }
+
+    // Чужой id в ответе не доказательство.
+    let mark = bench.fake.requests().len();
+    let input = bench.input("x");
+    let outcome = bench.transmit(&input).await;
+    assert!(matches!(outcome, TransmitOutcome::Undetermined));
+    // Сверка закрывает неподтверждённый ход: следующий ввод не застаёт его открытым.
+    bench.until_finished(input.command_id).await;
+    assert_eq!(
+        bench.since(mark).iter().filter(|request| path_of(request).ends_with("/prompt")).count(),
+        1
+    );
+
+    // 500 ничего не доказывает, повторной отправки нет: запись не найдена,
+    // исполнение освобождается, ввод остаётся неподтверждённым.
+    let mark = bench.fake.requests().len();
+    let input = bench.input("x");
+    let outcome = bench.transmit(&input).await;
+    assert!(matches!(outcome, TransmitOutcome::Undetermined));
+    let events = bench.until_finished(input.command_id).await;
+    assert!(
+        !events.iter().any(|event| matches!(event, AdapterEvent::InputAccepted { .. }))
+    );
+    let requests = bench.since(mark);
+    assert_eq!(
+        requests.iter().filter(|request| path_of(request).ends_with("/prompt")).count(),
+        1,
+        "no automatic resend"
+    );
+    let session = &started.native_conversation_id;
+    assert!(find(&requests, "GET", &format!("{session}/inbox")).is_some());
+
+    // Повтор без истории уходит один раз.
+    let mark = bench.fake.requests().len();
+    let mut input = bench.input("say hello");
+    input.attempt = 2;
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    assert_eq!(bench.since(mark).iter().filter(|r| path_of(r).ends_with("/prompt")).count(), 1);
+
+    // Вложение идёт путём в тексте, а не файлом.
+    let mark = bench.fake.requests().len();
+    let mut input = bench.input("смотри");
+    input.files = vec![canterlot_worker::adapter::LocalFile {
+        path: "/tmp/отчёт.pdf".into(),
+        name: "отчёт.pdf".into(),
+        mime: "application/pdf".into(),
+        size: 5,
+        image: false,
+    }];
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    let requests = bench.since(mark);
+    let body = &find(&requests, "POST", "/prompt").unwrap()["body"];
+    assert!(body["text"].as_str().unwrap().contains("/tmp/отчёт.pdf"));
+    assert!(body.get("files").is_none());
+
+    // Повтор проверяет историю и не пересылает ввод.
+    let mark = bench.fake.requests().len();
+    let mut input = bench.input("x");
+    input.attempt = 2;
+    let session = &started.native_conversation_id;
+    let id = format!("msg_{}", input.command_id.simple());
+    bench.fake.write_override(
+        "GET",
+        &format!("/api/session/{session}/message/{id}"),
+        &json!({"data": {"id": id, "type": "user"}}),
+    );
+    match bench.transmit(&input).await {
+        TransmitOutcome::Accepted(proof) => assert_eq!(proof.kind, "opencode_history"),
+        other => panic!("{other:?}"),
+    }
+    bench.until_finished(input.command_id).await;
+    assert!(find(&bench.since(mark), "POST", "/prompt").is_none());
     bench.close(CloseMode::Graceful).await;
+}
+
+// Зависший ответ подтверждается поздно: срок стенда короткий, иначе таблица
+// висела бы весь срок передачи на каждом случае.
+#[tokio::test]
+async fn timed_out_prompts_are_proven_late() {
+    let stalled = || {
+        Some(Reply {
+            status: 200,
+            body: Some(json!({"data": {"id": "msg_stalled"}})),
+            stall_ms: 30_000,
+            ..Default::default()
+        })
+    };
+    let mut bench = Bench::with_deadline(
+        turns_script(vec![
+            // Ответ завис, а ход идёт: конец приходит потоком.
+            (stalled(), TurnEnd::Succeeded),
+            // Потока нет, доказательство только в проекции.
+            (stalled(), TurnEnd::Rejected),
+        ]),
+        Duration::from_millis(700),
+        |_| {},
+    );
+    let started = bench.start_ok().await;
+
+    // Доказательство приходит событием потока.
+    let input = bench.input("x");
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Undetermined
+    ));
+    let events = bench.until_finished(input.command_id).await;
+    let accepted = events
+        .iter()
+        .filter(|event| {
+            matches!(event, AdapterEvent::InputAccepted { command_id } if *command_id == input.command_id)
+        })
+        .count();
+    assert_eq!(accepted, 1, "{events:?}");
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::Phase { phase: Phase::AwaitingInput, .. }
+    ));
+
+    // Потока нет, доказательство только в проекции.
+    let input = bench.input("y");
+    let session = &started.native_conversation_id;
+    let id = format!("msg_{}", input.command_id.simple());
+    bench.fake.write_override(
+        "GET",
+        &format!("/api/session/{session}/inbox"),
+        &json!({"data": [{"id": id, "sessionID": session, "type": "user"}]}),
+    );
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Undetermined
+    ));
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::InputAccepted { command_id } if command_id == input.command_id
+    ));
+    bench.close(CloseMode::Force).await;
 }
 
 #[tokio::test]
@@ -2053,162 +2235,13 @@ async fn second_input_during_a_turn_is_rejected_not_steered() {
     bench.close(CloseMode::Graceful).await;
 }
 
-#[tokio::test]
-async fn refused_prompt_names_the_error_and_leaves_the_session_usable() {
-    for (status, tag) in [
-        (400, "InvalidRequestError"),
-        (409, "ConflictError"),
-        (404, "SessionNotFoundError"),
-    ] {
-        let mut script = ready();
-        set_prompt_reply(&mut script, |reply| {
-            *reply = Reply {
-                status,
-                body: Some(json!({"_tag": tag, "message": "текст для модели"})),
-                ..Default::default()
-            };
-        });
-        let position = script
-            .steps
-            .iter()
-            .position(|step| {
-                step.expected_path()
-                    .is_some_and(|path| path.ends_with("/prompt"))
-            })
-            .unwrap();
-        script.steps.truncate(position + 1);
-        let mut bench = Bench::new(script);
-        bench.start_ok().await;
-        let input = bench.input("x");
-        match bench.transmit(&input).await {
-            TransmitOutcome::Rejected(reason) => assert_eq!(reason, tag),
-            other => panic!("{other:?}"),
-        }
-        let next = bench.input("y");
-        assert!(!matches!(
-            bench.transmit(&next).await,
-            TransmitOutcome::Rejected(reason) if reason == "turn_active"
-        ));
-        bench.close(CloseMode::Graceful).await;
-    }
-}
 
-#[tokio::test]
-async fn foreign_id_in_the_reply_is_not_a_proof() {
-    let mut script = ready();
-    set_prompt_reply(&mut script, |reply| {
-        reply.body = Some(json!({"data": {"id": "msg_someone_else"}}));
-    });
-    let mut bench = Bench::new(script);
-    bench.start_ok().await;
-    let input = bench.input("x");
-    assert!(matches!(
-        bench.transmit(&input).await,
-        TransmitOutcome::Undetermined
-    ));
-    bench.close(CloseMode::Force).await;
-}
 
 // 500 ничего не доказывает, а автоматического повтора нет (D-6): запись не найдена,
 // исполнение освобождается, ввод остаётся неподтверждённым.
-#[tokio::test]
-async fn server_error_on_prompt_stays_unconfirmed_and_frees_the_execution() {
-    let mut script = ready();
-    set_prompt_reply(&mut script, |reply| {
-        *reply = Reply {
-            status: 500,
-            body: Some(json!({"_tag": "UnknownError"})),
-            ..Default::default()
-        };
-    });
-    let position = script
-        .steps
-        .iter()
-        .position(|step| {
-            step.expected_path()
-                .is_some_and(|path| path.ends_with("/prompt"))
-        })
-        .unwrap();
-    script.steps.truncate(position + 1);
-    let mut bench = Bench::new(script);
-    let started = bench.start_ok().await;
-    let id = started.native_conversation_id;
-    let input = bench.input("x");
-    assert!(matches!(
-        bench.transmit(&input).await,
-        TransmitOutcome::Undetermined
-    ));
-    let events = bench.until_finished(input.command_id).await;
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, AdapterEvent::InputAccepted { .. }))
-    );
-    let requests = bench.fake.requests();
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|request| path_of(request).ends_with("/prompt"))
-            .count(),
-        1,
-        "no automatic resend"
-    );
-    assert!(find(&requests, "GET", &format!("{id}/inbox")).is_some());
-    bench.close(CloseMode::Graceful).await;
-}
 
-#[tokio::test]
-async fn timed_out_prompt_is_proven_late_by_the_event_stream() {
-    let mut script = ready();
-    set_prompt_reply(&mut script, |reply| reply.stall_ms = 30_000);
-    // Ответ завис: короткий срок детерминированно даёт `Undetermined`, а не висит весь срок.
-    let mut bench = Bench::with_deadline(script, Duration::from_millis(700), |_| {});
-    bench.start_ok().await;
-    let input = bench.input("x");
-    assert!(matches!(
-        bench.transmit(&input).await,
-        TransmitOutcome::Undetermined
-    ));
-    let events = bench.until_finished(input.command_id).await;
-    let accepted = events
-        .iter()
-        .filter(|event| {
-            matches!(event, AdapterEvent::InputAccepted { command_id } if *command_id == input.command_id)
-        })
-        .count();
-    assert_eq!(accepted, 1, "{events:?}");
-    bench.close(CloseMode::Force).await;
-}
 
 // Потока нет, доказательство только в проекции.
-#[tokio::test]
-async fn timed_out_prompt_is_proven_late_by_the_inbox_projection() {
-    let mut script = ready();
-    set_prompt_reply(&mut script, |reply| reply.stall_ms = 30_000);
-    let position = script
-        .steps
-        .iter()
-        .position(|step| {
-            step.expected_path()
-                .is_some_and(|path| path.ends_with("/prompt"))
-        })
-        .unwrap();
-    script.steps.truncate(position + 1);
-    // Ответ завис: короткий срок детерминированно даёт `Undetermined`, а не висит весь срок.
-    let mut bench = Bench::with_deadline(script, Duration::from_millis(700), |_| {});
-    let started = bench.start_ok().await;
-    let input = bench.input("x");
-    bench_route_inbox(&bench, &started.native_conversation_id, &input);
-    assert!(matches!(
-        bench.transmit(&input).await,
-        TransmitOutcome::Undetermined
-    ));
-    assert!(matches!(
-        bench.event().await,
-        AdapterEvent::InputAccepted { command_id } if command_id == input.command_id
-    ));
-    bench.close(CloseMode::Force).await;
-}
 
 fn bench_route_inbox(bench: &Bench, session: &str, input: &Transmission) {
     // Маршрут пишется в журнал двойника файлом: сценарий уже загружен.
@@ -2219,49 +2252,7 @@ fn bench_route_inbox(bench: &Bench, session: &str, input: &Transmission) {
         .write_override("GET", &format!("/api/session/{session}/inbox"), &body);
 }
 
-#[tokio::test]
-async fn repeated_attempt_checks_history_and_never_resends() {
-    let mut script = ready();
-    let position = script
-        .steps
-        .iter()
-        .position(|step| {
-            step.expected_path()
-                .is_some_and(|path| path.ends_with("/prompt"))
-        })
-        .unwrap();
-    script.steps.truncate(position);
-    let mut bench = Bench::new(script);
-    let started = bench.start_ok().await;
-    let mut input = bench.input("x");
-    input.attempt = 2;
-    let session = &started.native_conversation_id;
-    let id = format!("msg_{}", input.command_id.simple());
-    bench.fake.write_override(
-        "GET",
-        &format!("/api/session/{session}/message/{id}"),
-        &json!({"data": {"id": id, "type": "user"}}),
-    );
-    match bench.transmit(&input).await {
-        TransmitOutcome::Accepted(proof) => assert_eq!(proof.kind, "opencode_history"),
-        other => panic!("{other:?}"),
-    }
-    bench.until_finished(input.command_id).await;
-    let requests = bench.fake.requests();
-    assert!(find(&requests, "POST", "/prompt").is_none());
-    bench.close(CloseMode::Graceful).await;
-}
 
-#[tokio::test]
-async fn repeated_attempt_without_history_is_sent_once() {
-    let mut bench = Bench::new(ready());
-    bench.start_ok().await;
-    let mut input = bench.input("say hello");
-    input.attempt = 2;
-    bench.accepted(&input).await;
-    bench.until_finished(input.command_id).await;
-    bench.close(CloseMode::Graceful).await;
-}
 
 #[tokio::test]
 async fn cyrillic_text_survives_the_stream_and_the_input() {
@@ -2297,26 +2288,6 @@ async fn cyrillic_text_survives_the_stream_and_the_input() {
     bench.close(CloseMode::Graceful).await;
 }
 
-#[tokio::test]
-async fn attachments_go_as_paths_in_the_text_until_their_slice() {
-    let mut bench = Bench::new(ready());
-    bench.start_ok().await;
-    let mut input = bench.input("смотри");
-    input.files = vec![canterlot_worker::adapter::LocalFile {
-        path: "/tmp/отчёт.pdf".into(),
-        name: "отчёт.pdf".into(),
-        mime: "application/pdf".into(),
-        size: 5,
-        image: false,
-    }];
-    bench.accepted(&input).await;
-    bench.until_finished(input.command_id).await;
-    let requests = bench.fake.requests();
-    let body = &find(&requests, "POST", "/prompt").unwrap()["body"];
-    assert!(body["text"].as_str().unwrap().contains("/tmp/отчёт.pdf"));
-    assert!(body.get("files").is_none());
-    bench.close(CloseMode::Graceful).await;
-}
 
 fn with_model_route(mut script: Script, replies: Vec<Reply>) -> Script {
     let session = session_of(&script);
