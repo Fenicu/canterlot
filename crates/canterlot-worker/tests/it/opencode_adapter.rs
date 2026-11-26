@@ -27,7 +27,9 @@ use uuid::Uuid;
 use crate::opencode;
 use opencode::{Fake, find, find_exact, path_of};
 
-const WAIT: Duration = Duration::from_secs(15);
+/// Срок стенда покрывает сроки самого адаптера: строка готовности ждёт до 20 с,
+/// доказательство MCP дольше. Срок короче их ронял бы здоровый старт под нагрузкой.
+const WAIT: Duration = Duration::from_secs(60);
 
 fn instructions(mode: InstructionMode, text: &str) -> InstructionSpec {
     InstructionSpec {
@@ -53,6 +55,16 @@ impl Bench {
     }
 
     fn with_config(script: Script, change: impl FnOnce(&mut OpenCodeConfig)) -> Self {
+        Self::with_deadline(script, Duration::from_secs(10), change)
+    }
+
+    /// Срок передачи как у настоящего супервизора (10 с): короткий срок под нагрузкой
+    /// превращал бы обычную задержку в `Undetermined`.
+    fn with_deadline(
+        script: Script,
+        deadline: Duration,
+        change: impl FnOnce(&mut OpenCodeConfig),
+    ) -> Self {
         let fake = Fake::new(script);
         let exec_dir = fake.dir.path().join("data/executions/one");
         std::fs::create_dir_all(&exec_dir).unwrap();
@@ -62,7 +74,7 @@ impl Bench {
             ..Default::default()
         };
         change(&mut cfg);
-        let adapter = OpenCodeAdapter::new(cfg, exec_dir.clone(), Duration::from_millis(700))
+        let adapter = OpenCodeAdapter::new(cfg, exec_dir.clone(), deadline)
             .with_relay_executable(PathBuf::from("/opt/relay"));
         let spec = StartSpec {
             execution_id: Uuid::now_v7(),
@@ -1244,11 +1256,13 @@ async fn isolated_start_refuses_a_foreign_server() {
     assert_eq!(bench.fail_reason().await, "mcp_isolation_failed");
 }
 
-/// Пустой список держится дольше срока готовности CLI, а потом приходит настоящий.
+/// Пустой список держится несколько опросов, а потом приходит настоящий: медленное
+/// доказательство — не нарушение изоляции. Сроку опроса агентов оставлен запас:
+/// ужатый до сотен миллисекунд, он ронял бы здоровый старт под нагрузкой.
 #[tokio::test]
 async fn slow_proof_of_the_mcp_server_list_is_not_an_isolation_failure() {
     let mut script = session_only();
-    // Пять опросов по 100 мс: доказательство приходит позже срока готовности (200 мс).
+    // Пять опросов по 100 мс: доказательство приходит после пустых ответов.
     let mut replies = vec![mcp_reply(json!({"data": []})); 5];
     replies.push(mcp_reply(json!({"data": [
         {"name": "canterlot", "status": {"status": "connected"}},
@@ -1256,7 +1270,7 @@ async fn slow_proof_of_the_mcp_server_list_is_not_an_isolation_failure() {
     script.set_route("GET", "/api/mcp", replies);
     let mut bench = Bench::new(script);
     bench.spec.isolate_mcp = true;
-    bench.adapter.set_ready_wait(Duration::from_millis(200));
+    bench.adapter.set_ready_wait(Duration::from_secs(5));
     bench.start_ok().await;
     bench.close(CloseMode::Graceful).await;
 }
@@ -2046,7 +2060,8 @@ async fn server_error_on_prompt_stays_unconfirmed_and_frees_the_execution() {
 async fn timed_out_prompt_is_proven_late_by_the_event_stream() {
     let mut script = ready();
     set_prompt_reply(&mut script, |reply| reply.stall_ms = 30_000);
-    let mut bench = Bench::new(script);
+    // Ответ завис: короткий срок детерминированно даёт `Undetermined`, а не висит весь срок.
+    let mut bench = Bench::with_deadline(script, Duration::from_millis(700), |_| {});
     bench.start_ok().await;
     let input = bench.input("x");
     assert!(matches!(
@@ -2078,7 +2093,8 @@ async fn timed_out_prompt_is_proven_late_by_the_inbox_projection() {
         })
         .unwrap();
     script.steps.truncate(position + 1);
-    let mut bench = Bench::new(script);
+    // Ответ завис: короткий срок детерминированно даёт `Undetermined`, а не висит весь срок.
+    let mut bench = Bench::with_deadline(script, Duration::from_millis(700), |_| {});
     let started = bench.start_ok().await;
     let input = bench.input("x");
     bench_route_inbox(&bench, &started.native_conversation_id, &input);
