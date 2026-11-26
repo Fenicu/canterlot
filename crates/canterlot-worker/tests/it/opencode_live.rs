@@ -2065,7 +2065,7 @@ async fn real_quota_refusal_is_a_reached_limit_with_the_wait() {
     session.close().await;
 }
 
-// Повтор запроса к модели на настоящем сервере: фаза есть, вторая запись ввода не нужна.
+// Повтор запроса к модели на настоящем сервере: событие повтора есть, вторая запись ввода не нужна.
 #[tokio::test]
 #[ignore = "L2: настоящий opencode, см. заголовок файла"]
 async fn real_retry_of_a_rate_limit_finishes_the_same_turn() {
@@ -2081,7 +2081,7 @@ async fn real_retry_of_a_rate_limit_finishes_the_same_turn() {
     let events = session.turn(&input("x")).await;
     assert!(events.iter().any(|event| matches!(
         event,
-        AdapterEvent::Phase { summary: Some(summary), .. } if summary == "retry 2"
+        AdapterEvent::Retry { info } if info.attempt == 2
     )));
     assert_eq!(finals(&events), ["после повтора"]);
     assert_eq!(
