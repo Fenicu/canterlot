@@ -74,13 +74,12 @@ pub fn stress_rounds(full: u32, gate: u32) -> u32 {
 
 /// Состояние базы после подготовки таблицы: перед случаем `restore` возвращает базу к
 /// нему, как будто случай получил свой клон. Дешевле клона: удаление и вставка идут
-/// одной пачкой команд, а роутер и зависимости приложения остаются.
+/// одной функцией `_snapshot.restore()` в базе, а роутер и зависимости приложения
+/// остаются.
 ///
 /// Память процесса (реестр машин, кэши приложения) остаётся от прошлого случая: её
 /// таблица возвращает сама.
-pub struct Snapshot {
-    restore: String,
-}
+pub struct Snapshot;
 
 impl Snapshot {
     pub async fn take(pool: &sqlx::PgPool) -> Self {
@@ -166,14 +165,26 @@ impl Snapshot {
                  select {columns} from _snapshot.\"{table}\";\n"
             ));
         }
-        Self { restore }
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "create function _snapshot.restore() returns void language plpgsql as $snapshot$\n\
+             begin\n{restore}end\n$snapshot$"
+        )))
+        .execute(pool)
+        .await
+        .expect("snapshot function");
+        Self
     }
 
-    /// Возвращает базу к снимку одной неявной транзакцией.
+    /// Возвращает базу к снимку одной транзакцией.
     pub async fn restore(&self, pool: &sqlx::PgPool) {
-        sqlx::raw_sql(sqlx::AssertSqlSafe(self.restore.clone()))
-            .execute(pool)
-            .await
-            .expect("snapshot restore");
+        restore(pool.clone()).await;
     }
+}
+
+/// Шаг `before` таблицы на голом пуле: база возвращается к снимку `Snapshot::take`.
+pub async fn restore(pool: sqlx::PgPool) {
+    sqlx::query("select _snapshot.restore()")
+        .execute(&pool)
+        .await
+        .expect("snapshot restore");
 }
