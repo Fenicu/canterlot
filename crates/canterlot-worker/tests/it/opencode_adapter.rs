@@ -380,6 +380,107 @@ fn replace_events_after_prompt(script: &mut Script, events: Vec<Step>) {
     script.steps.extend(events);
 }
 
+/// Конец хода из записи: успех или отказ с телом ошибки.
+fn end_of_turn(session: &str, error: Option<Value>) -> Value {
+    match error {
+        Some(error) => json!({"type": "session.execution.failed",
+            "data": {"sessionID": session, "error": error}}),
+        None => finish(session),
+    }
+}
+
+enum TurnEnd {
+    /// Ход не принят: конца нет.
+    Rejected,
+    Succeeded,
+    Failed(Value),
+}
+
+/// Ходы подряд на одном стенде: ответы и концы идут по порядку вводов.
+/// Записанные id сообщений различаются по номеру клона, иначе таблица подстановок
+/// склеила бы их в один ввод. Ответа нет — обычный приём.
+fn turns_script(cases: Vec<(Option<Reply>, TurnEnd)>) -> Script {
+    let template = ready();
+    let path = template
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            Step::Expect { method, path, .. }
+                if method == "POST" && path.ends_with("/prompt") =>
+            {
+                Some(path.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let session = session_of(&template);
+    let mut script = session_only();
+    for (n, (reply, end)) in cases.into_iter().enumerate() {
+        let recorded = format!("msg_clone{n:03}");
+        let (reply, bind) = match reply {
+            Some(mut reply) => {
+                let bind = match reply.body.as_mut() {
+                    Some(body) if body.pointer("/data/id").is_some() => {
+                        body["data"]["id"] = recorded.clone().into();
+                        [(recorded.clone(), "/id".to_owned())]
+                            .into_iter()
+                            .collect()
+                    }
+                    _ => Default::default(),
+                };
+                (reply, bind)
+            }
+            // Обычный приём: двойник отвечает живым id ввода.
+            None => (
+                Reply {
+                    body: Some(json!({"data": {"id": recorded}})),
+                    ..Default::default()
+                },
+                [(recorded.clone(), "/id".to_owned())]
+                    .into_iter()
+                    .collect(),
+            ),
+        };
+        script.steps.push(Step::Expect {
+            method: "POST".into(),
+            path: path.clone(),
+            reply,
+            bind,
+        });
+        let end = match end {
+            TurnEnd::Rejected => None,
+            TurnEnd::Succeeded => Some(finish(&session)),
+            TurnEnd::Failed(error) => Some(end_of_turn(&session, Some(error))),
+        };
+        if let Some(end) = end {
+            script.steps.push(Step::Emit {
+                events: vec![
+                    json!({"type": "session.inbox.enqueued",
+                        "data": {"inboxID": recorded, "sessionID": session}}),
+                    json!({"type": "session.inbox.delivered",
+                        "data": {"inboxID": recorded, "sessionID": session}}),
+                    json!({"type": "session.execution.started",
+                        "data": {"sessionID": session}}),
+                    end,
+                ],
+            });
+        }
+    }
+    script
+}
+
+/// Стенд с ходами подряд: один запуск сервера на все случаи таблицы.
+fn bench_with_turns(cases: Vec<(Option<Reply>, TurnEnd)>) -> Bench {
+    Bench::new(turns_script(cases))
+}
+
+impl Bench {
+    /// Запросы двойника после отметки: утверждения случая видят только свой срез журнала.
+    fn since(&self, mark: usize) -> Vec<Value> {
+        self.fake.requests().into_iter().skip(mark).collect()
+    }
+}
+
 fn finish(session: &str) -> Value {
     json!({"type": "session.execution.succeeded", "data": {"sessionID": session}})
 }
@@ -2232,10 +2333,76 @@ fn model_change(model: Option<&str>, effort: Option<&str>) -> SettingsChange {
 }
 
 // Сервер принимает неизвестный вариант с 204 и падает только на ходе: проверка раньше него.
+
+// Смены настроек на ходу: запросы модели и правил идут раньше ввода, лишнего нет.
+// Один стенд на всю таблицу: ходы идут подряд, утверждения видят срез журнала.
 #[tokio::test]
-async fn unknown_model_and_variant_are_refused_before_the_server() {
-    let mut bench = Bench::new(ready());
+async fn settings_changes_go_before_the_input() {
+    let refused_prompt = || {
+        Some(Reply {
+            status: 400,
+            body: Some(json!({"_tag": "InvalidRequestError"})),
+            ..Default::default()
+        })
+    };
+    let failed = |status: u16| {
+        Reply {
+            status,
+            body: Some(json!({"_tag": "InternalError"})),
+            ..Default::default()
+        }
+    };
+    let script = turns_script(vec![
+        (None, TurnEnd::Succeeded),                    // смена модели и усилия
+        (None, TurnEnd::Succeeded),                    // только усилие
+        (None, TurnEnd::Succeeded),                    // модель без вариантов
+        (None, TurnEnd::Succeeded),                    // та же модель
+        (None, TurnEnd::Succeeded),                    // следующий после отказа модели
+        (None, TurnEnd::Succeeded),                    // следующий после отказа правил
+        (None, TurnEnd::Succeeded),                    // та же мода
+        (None, TurnEnd::Succeeded),                    // смена моды
+        (None, TurnEnd::Succeeded),                    // первая смена в read_only
+        (None, TurnEnd::Succeeded),                    // вторая без смены
+        (None, TurnEnd::Succeeded),                    // смена на владельца
+        (None, TurnEnd::Succeeded),                    // возврат в bypass
+        (None, TurnEnd::Succeeded),                    // следующий после отказа моды
+        (refused_prompt(), TurnEnd::Rejected),         // отказ хаба в приёме
+        (None, TurnEnd::Succeeded),                    // следующий после отказа хаба
+        (refused_prompt(), TurnEnd::Rejected),         // отказ смены на владельца
+    ]);
+    let script = with_model_route(
+        script,
+        vec![
+            reply_204(),
+            reply_204(),
+            reply_204(),
+            failed(500),
+            reply_204(),
+            reply_204(),
+            reply_204(),
+        ],
+    );
+    let script = with_rules_route(
+        script,
+        vec![
+            failed(500),
+            reply_204(),
+            reply_204(),
+            reply_204(),
+            reply_204(),
+            reply_204(),
+            failed(500),
+            reply_204(),
+            reply_204(),
+            reply_204(),
+            reply_204(),
+            reply_204(),
+        ],
+    );
+    let mut bench = Bench::new(script);
     bench.start_ok().await;
+
+    // Неизвестные модель и мода отбиваются проверкой, до сервера не доходит.
     for (model, effort) in [
         (Some("fake/other"), None),
         (None, Some("ultra")),
@@ -2249,99 +2416,61 @@ async fn unknown_model_and_variant_are_refused_before_the_server() {
             "{model:?} {effort:?}"
         );
     }
-    let mut same = bench.input("x");
-    same.settings = Some(SettingsChange {
-        model: Some("fake/fake-1".into()),
-        effort: Some("high".into()),
-        permission_mode: Some("bypass".into()),
-        instructions: None,
-    });
-    assert_eq!(bench.adapter.validate_transmission(&same), Ok(()));
-    let mut known = bench.input("x");
-    known.settings = Some(model_change(Some("opencode/flint-40b-free"), Some("max")));
-    assert_eq!(bench.adapter.validate_transmission(&known), Ok(()));
-    let mut plain = bench.input("x");
-    plain.settings = Some(model_change(Some("opencode/big-pickle"), Some("default")));
-    assert_eq!(bench.adapter.validate_transmission(&plain), Ok(()));
-    bench.close(CloseMode::Graceful).await;
-}
+    let mut unknown = bench.input("x");
+    unknown.settings = Some(mode_change("yolo"));
+    assert_eq!(
+        bench.adapter.validate_transmission(&unknown),
+        Err("settings_unavailable")
+    );
 
-// Смена модели и усилия: запрос раньше ввода, вариант вместе с моделью.
-#[tokio::test]
-async fn model_change_goes_before_the_input() {
-    let mut bench = Bench::new(with_model_route(ready(), vec![reply_204()]));
-    bench.start_ok().await;
+    // Смена модели и усилия: запрос раньше ввода, вариант вместе с моделью.
+    let mark = bench.fake.requests().len();
     let mut input = bench.input("x");
     input.settings = Some(model_change(Some("opencode/flint-40b-free"), Some("max")));
     bench.accepted(&input).await;
-    let requests = bench.fake.requests();
+    bench.until_finished(input.command_id).await;
+    let requests = bench.since(mark);
     let model = position(&requests, "POST", "/model");
     assert!(model < position(&requests, "POST", "/prompt"));
     assert_eq!(
         requests[model]["body"],
         json!({"model": {"id": "flint-40b-free", "providerID": "opencode", "variant": "max"}})
     );
-    bench.close(CloseMode::Graceful).await;
-}
 
-// Только усилие: модель остаётся текущей.
-#[tokio::test]
-async fn effort_change_keeps_the_model() {
-    let mut bench = Bench::new(with_model_route(ready(), vec![reply_204()]));
-    bench.start_ok().await;
+    // Только усилие: модель остаётся текущей.
+    let mark = bench.fake.requests().len();
     let mut input = bench.input("x");
     input.settings = Some(model_change(None, Some("low")));
     bench.accepted(&input).await;
-    let requests = bench.fake.requests();
-    let model = position(&requests, "POST", "/model");
+    bench.until_finished(input.command_id).await;
+    let requests = bench.since(mark);
     assert_eq!(
-        requests[model]["body"],
-        json!({"model": {"id": "fake-1", "providerID": "fake", "variant": "low"}})
+        requests[position(&requests, "POST", "/model")]["body"],
+        json!({"model": {"id": "flint-40b-free", "providerID": "opencode", "variant": "low"}})
     );
-    bench.close(CloseMode::Graceful).await;
-}
 
-// У модели без вариантов усилие каталога условное, серверу оно не передаётся.
-#[tokio::test]
-async fn model_without_variants_goes_without_one() {
-    let mut bench = Bench::new(with_model_route(ready(), vec![reply_204()]));
-    bench.start_ok().await;
+    // У модели без вариантов усилие каталога условное, серверу оно не передаётся.
+    let mark = bench.fake.requests().len();
     let mut input = bench.input("x");
     input.settings = Some(model_change(Some("opencode/big-pickle"), Some("default")));
     bench.accepted(&input).await;
-    let requests = bench.fake.requests();
+    bench.until_finished(input.command_id).await;
+    let requests = bench.since(mark);
     assert_eq!(
         requests[position(&requests, "POST", "/model")]["body"],
         json!({"model": {"id": "big-pickle", "providerID": "opencode"}})
     );
-    bench.close(CloseMode::Graceful).await;
-}
 
-#[tokio::test]
-async fn same_model_sends_no_change() {
-    let mut bench = Bench::new(ready());
-    bench.start_ok().await;
+    // Та же модель: запросов нет.
+    let mark = bench.fake.requests().len();
     let mut input = bench.input("x");
-    input.settings = Some(model_change(Some("fake/fake-1"), Some("high")));
+    input.settings = Some(model_change(Some("opencode/big-pickle"), Some("default")));
     bench.accepted(&input).await;
-    assert!(find(&bench.fake.requests(), "POST", "/model").is_none());
-    bench.close(CloseMode::Graceful).await;
-}
+    bench.until_finished(input.command_id).await;
+    assert!(bench.since(mark).iter().all(|request| !path_of(request).ends_with("/model")));
 
-// Отказ в смене: ввод не уходит, следующий ввод возвращает то, что считает текущим хаб.
-#[tokio::test]
-async fn failed_model_change_stops_the_input_and_returns_the_settings() {
-    let failed = Reply {
-        status: 500,
-        body: Some(json!({"_tag": "InternalError"})),
-        ..Default::default()
-    };
-    let script = with_model_route(
-        with_rules_route(ready(), vec![reply_204()]),
-        vec![failed, reply_204()],
-    );
-    let mut bench = Bench::new(script);
-    bench.start_ok().await;
+    // Отказ в смене модели: ввод не уходит, следующий возвращает то, что считает хаб.
+    let mark = bench.fake.requests().len();
     let mut refused = bench.input("x");
     refused.settings = Some(SettingsChange {
         permission_mode: Some("ask".into()),
@@ -2353,31 +2482,19 @@ async fn failed_model_change_stops_the_input_and_returns_the_settings() {
     ));
     let next = bench.input("y");
     bench.accepted(&next).await;
-    let requests = bench.fake.requests();
+    bench.until_finished(next.command_id).await;
+    let requests = bench.since(mark);
     let models: Vec<_> = requests
         .iter()
         .filter(|request| request["method"] == "POST" && path_of(request).ends_with("/model"))
         .map(|request| request["body"]["model"]["id"].clone())
         .collect();
-    assert_eq!(models, [json!("flint-40b-free"), json!("fake-1")]);
-    // Модель идёт первой: при её отказе режим не менялся, открывать его нечему.
+    // Отказ не сменил модель: следующий ввод возвращает ту, что была до отказа.
+    assert_eq!(models, [json!("flint-40b-free"), json!("big-pickle")]);
     assert!(requests.iter().all(|request| request["method"] != "PATCH"));
-    bench.close(CloseMode::Graceful).await;
-}
 
-#[tokio::test]
-async fn failed_rules_return_the_changed_model() {
-    let failed = Reply {
-        status: 500,
-        body: Some(json!({"_tag": "InternalError"})),
-        ..Default::default()
-    };
-    let script = with_model_route(
-        with_rules_route(ready(), vec![failed, reply_204()]),
-        vec![reply_204()],
-    );
-    let mut bench = Bench::new(script);
-    bench.start_ok().await;
+    // Отказ в правилах: модель уже сменена, следующий ввод чинит обе настройки.
+    let mark = bench.fake.requests().len();
     let mut refused = bench.input("x");
     refused.settings = Some(SettingsChange {
         permission_mode: Some("ask".into()),
@@ -2389,21 +2506,146 @@ async fn failed_rules_return_the_changed_model() {
     ));
     let next = bench.input("y");
     bench.accepted(&next).await;
-    let requests = bench.fake.requests();
+    bench.until_finished(next.command_id).await;
+    let requests = bench.since(mark);
     let models: Vec<_> = requests
         .iter()
         .filter(|request| request["method"] == "POST" && path_of(request).ends_with("/model"))
         .map(|request| request["body"]["model"]["id"].clone())
         .collect();
-    assert_eq!(models, [json!("flint-40b-free"), json!("fake-1")]);
+    // Отказ в правилах не откатил модель: следующий ввод возвращает её назад.
+    assert_eq!(models, [json!("flint-40b-free"), json!("big-pickle")]);
     let effects: Vec<_> = requests
         .iter()
         .filter(|request| request["method"] == "PATCH")
         .map(|request| request["body"]["permissions"][0]["effect"].clone())
         .collect();
     assert_eq!(effects, [json!("ask"), json!("allow")]);
+
+    // Та же мода: правил нет.
+    let mark = bench.fake.requests().len();
+    let mut input = bench.input("x");
+    input.settings = Some(mode_change("bypass"));
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    assert!(bench.since(mark).iter().all(|request| request["method"] != "PATCH"));
+
+    // Смена моды: новые правила раньше ввода.
+    let mark = bench.fake.requests().len();
+    let mut input = bench.input("два");
+    input.settings = Some(mode_change("ask"));
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    let requests = bench.since(mark);
+    let patches: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "PATCH")
+        .collect();
+    assert_eq!(patches.len(), 1, "{requests:?}");
+    assert_eq!(patches[0]["body"]["permissions"][0]["effect"], "ask");
+    assert!(position(&requests, "PATCH", "") < position(&requests, "POST", "/prompt"));
+
+    // Смена в read_only и обратно: напоминание не добавляется, ввод идёт как набран.
+    let mark = bench.fake.requests().len();
+    let mut first = bench.input("раз");
+    first.settings = Some(mode_change("read_only"));
+    bench.accepted(&first).await;
+    bench.until_finished(first.command_id).await;
+    let second = bench.input("два");
+    bench.accepted(&second).await;
+    bench.until_finished(second.command_id).await;
+    let requests = bench.since(mark);
+    assert_eq!(prompt_texts(&requests), ["раз", "два"]);
+    assert_eq!(
+        requests[position(&requests, "PATCH", "")]["body"]["permissions"][0]["effect"],
+        json!("deny")
+    );
+
+    // Смена на владельца снимает правила пустым списком.
+    let mark = bench.fake.requests().len();
+    let mut input = bench.input("x");
+    input.settings = Some(mode_change("owner"));
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    let requests = bench.since(mark);
+    assert_eq!(
+        requests[position(&requests, "PATCH", "")]["body"],
+        json!({"permissions": []})
+    );
+
+    // Возврат в bypass для следующих случаев.
+    let mut input = bench.input("reset");
+    input.settings = Some(mode_change("bypass"));
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+
+    // Правила не применились: ввод не уходит, следующий применяет их снова.
+    let mark = bench.fake.requests().len();
+    let mut refused = bench.input("x");
+    refused.settings = Some(mode_change("ask"));
+    assert!(matches!(
+        bench.transmit(&refused).await,
+        TransmitOutcome::Rejected(reason) if reason == "settings_unavailable"
+    ));
+    let next = bench.input("y");
+    bench.accepted(&next).await;
+    bench.until_finished(next.command_id).await;
+    let requests = bench.since(mark);
+    let patches: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "PATCH")
+        .collect();
+    assert_eq!(patches.len(), 2, "{requests:?}");
+    assert!(position(&requests, "PATCH", "") < position(&requests, "POST", "/prompt"));
+
+    // Отказ хаба в приёме оставляет прежнюю моду: следующий ввод не ждёт сервер.
+    let mark = bench.fake.requests().len();
+    let mut input = bench.input("x");
+    input.settings = Some(mode_change("ask"));
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Rejected(reason) if reason == "InvalidRequestError"
+    ));
+    let next = bench.input("y");
+    let _ = bench.transmit(&next).await;
+    bench.until_finished(next.command_id).await;
+    let effects: Vec<_> = bench
+        .since(mark)
+        .iter()
+        .filter(|request| request["method"] == "PATCH")
+        .map(|request| request["body"]["permissions"][0]["effect"].clone())
+        .collect();
+    assert_eq!(effects, [json!("ask"), json!("allow")]);
+
+    // Отказ смены на владельца тоже возвращается сразу, без ожидания сервера.
+    let mark = bench.fake.requests().len();
+    let mut input = bench.input("x");
+    input.settings = Some(mode_change("owner"));
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Rejected(reason) if reason == "InvalidRequestError"
+    ));
+    let bodies: Vec<_> = bench
+        .since(mark)
+        .iter()
+        .filter(|request| request["method"] == "PATCH")
+        .map(|request| request["body"]["permissions"].clone())
+        .collect();
+    assert_eq!(bodies.len(), 2, "{bodies:?}");
+    assert_eq!(bodies[0], json!([]), "правила владельца снимаются пустым списком");
+    assert_eq!(bodies[1][0]["effect"], json!("allow"), "отказ вернул моду bypass");
     bench.close(CloseMode::Graceful).await;
 }
+
+// Смена модели и усилия: запрос раньше ввода, вариант вместе с моделью.
+
+// Только усилие: модель остаётся текущей.
+
+// У модели без вариантов усилие каталога условное, серверу оно не передаётся.
+
+
+// Отказ в смене: ввод не уходит, следующий ввод возвращает то, что считает текущим хаб.
+
 
 fn catalog_reply(models: Value) -> Reply {
     Reply {
@@ -2759,65 +3001,9 @@ fn position(requests: &[Value], method: &str, tail: &str) -> usize {
 }
 
 // Смена режима на ходу: новые правила раньше ввода, режим отметок меняется вместе с ними.
-#[tokio::test]
-async fn mode_change_goes_before_the_input() {
-    let mut bench = Bench::new(with_rules_route(two_turns(), vec![reply_204()]));
-    bench.start_ok().await;
-    let first = bench.input("раз");
-    bench.accepted(&first).await;
-    bench.until_finished(first.command_id).await;
-    let mut second = bench.input("два");
-    second.settings = Some(mode_change("read_only"));
-    assert_eq!(bench.adapter.validate_transmission(&second), Ok(()));
-    bench.accepted(&second).await;
-    let requests = bench.fake.requests();
-    let patches: Vec<_> = requests
-        .iter()
-        .filter(|request| request["method"] == "PATCH")
-        .collect();
-    assert_eq!(patches.len(), 1, "{requests:?}");
-    assert_eq!(patches[0]["body"]["permissions"][0]["effect"], "deny");
-    let prompts: Vec<usize> = requests
-        .iter()
-        .enumerate()
-        .filter(|(_, request)| path_of(request).ends_with("/prompt"))
-        .map(|(index, _)| index)
-        .collect();
-    assert!(position(&requests, "PATCH", "") < prompts[1]);
-    assert!(prompts[0] < position(&requests, "PATCH", ""));
-    bench.close(CloseMode::Graceful).await;
-}
 
 // `null` сервер игнорирует: снять правила можно только пустым списком.
-#[tokio::test]
-async fn switching_to_owner_clears_the_session_rules() {
-    let mut bench = Bench::new(with_rules_route(ready(), vec![reply_204()]));
-    bench.start_ok().await;
-    let mut input = bench.input("x");
-    input.settings = Some(mode_change("owner"));
-    bench.accepted(&input).await;
-    let requests = bench.fake.requests();
-    let patch = &requests[position(&requests, "PATCH", "")];
-    assert_eq!(patch["body"], json!({"permissions": []}));
-    bench.close(CloseMode::Graceful).await;
-}
 
-#[tokio::test]
-async fn same_mode_sends_no_rules() {
-    let mut bench = Bench::new(ready());
-    bench.start_ok().await;
-    let mut input = bench.input("x");
-    input.settings = Some(mode_change("bypass"));
-    bench.accepted(&input).await;
-    assert!(
-        bench
-            .fake
-            .requests()
-            .iter()
-            .all(|request| request["method"] != "PATCH")
-    );
-    bench.close(CloseMode::Graceful).await;
-}
 
 fn prompt_texts(requests: &[Value]) -> Vec<String> {
     requests
@@ -2848,22 +3034,6 @@ async fn leaving_read_only_adds_a_note_to_the_first_input_only() {
     bench.close(CloseMode::Graceful).await;
 }
 
-#[tokio::test]
-async fn other_mode_changes_leave_the_input_as_typed() {
-    let mut bench = Bench::new(with_rules_route(
-        two_turns(),
-        vec![reply_204(), reply_204()],
-    ));
-    bench.start_ok().await;
-    let mut first = bench.input("раз");
-    first.settings = Some(mode_change("read_only"));
-    bench.accepted(&first).await;
-    bench.until_finished(first.command_id).await;
-    let second = bench.input("два");
-    bench.accepted(&second).await;
-    assert_eq!(prompt_texts(&bench.fake.requests()), ["раз", "два"]);
-    bench.close(CloseMode::Graceful).await;
-}
 
 // Хаб нового режима не принял: выход из `read_only` не состоялся, напоминание ждёт повтора.
 #[tokio::test]
@@ -2937,109 +3107,12 @@ async fn mode_change_reaches_the_live_children() {
 }
 
 // Правила не применились: ввод не уходит, а следующий ввод применяет их снова.
-#[tokio::test]
-async fn failed_mode_change_stops_the_input_and_is_applied_again() {
-    let failed = Reply {
-        status: 500,
-        body: Some(json!({"_tag": "InternalError"})),
-        ..Default::default()
-    };
-    let mut bench = Bench::new(with_rules_route(ready(), vec![failed, reply_204()]));
-    bench.start_ok().await;
-    let mut refused = bench.input("x");
-    refused.settings = Some(mode_change("ask"));
-    assert!(matches!(
-        bench.transmit(&refused).await,
-        TransmitOutcome::Rejected(reason) if reason == "settings_unavailable"
-    ));
-    assert!(find(&bench.fake.requests(), "POST", "/prompt").is_none());
-    let next = bench.input("y");
-    bench.accepted(&next).await;
-    let requests = bench.fake.requests();
-    let patches: Vec<_> = requests
-        .iter()
-        .filter(|request| request["method"] == "PATCH")
-        .collect();
-    assert_eq!(patches.len(), 2, "{requests:?}");
-    // Режим остался прежним: на сервере могли остаться новые правила, их надо вернуть.
-    assert_eq!(patches[1]["body"]["permissions"][0]["effect"], "allow");
-    assert!(position(&requests, "PATCH", "") < position(&requests, "POST", "/prompt"));
-    bench.close(CloseMode::Graceful).await;
-}
 
-#[tokio::test]
-async fn unknown_mode_in_a_settings_change_is_refused() {
-    let mut bench = Bench::new(ready());
-    bench.start_ok().await;
-    let mut input = bench.input("x");
-    input.settings = Some(mode_change("yolo"));
-    assert_eq!(
-        bench.adapter.validate_transmission(&input),
-        Err("settings_unavailable")
-    );
-    bench.close(CloseMode::Graceful).await;
-}
 
 // Отказ в приёме ввода оставляет прежний режим: хаб нового не применил.
-#[tokio::test]
-async fn refused_input_returns_the_previous_mode() {
-    let mut script = with_rules_route(ready(), vec![reply_204()]);
-    set_prompt_reply(&mut script, |reply| {
-        *reply = Reply {
-            status: 400,
-            body: Some(json!({"_tag": "InvalidRequestError"})),
-            ..Default::default()
-        };
-    });
-    let mut bench = Bench::new(script);
-    bench.start_ok().await;
-    let mut input = bench.input("x");
-    input.settings = Some(mode_change("ask"));
-    assert!(matches!(
-        bench.transmit(&input).await,
-        TransmitOutcome::Rejected(reason) if reason == "InvalidRequestError"
-    ));
-    let next = bench.input("y");
-    let _ = bench.transmit(&next).await;
-    let requests = bench.fake.requests();
-    let effects: Vec<_> = requests
-        .iter()
-        .filter(|request| request["method"] == "PATCH")
-        .map(|request| request["body"]["permissions"][0]["effect"].clone())
-        .collect();
-    assert_eq!(effects, [json!("ask"), json!("allow")]);
-    bench.close(CloseMode::Graceful).await;
-}
 
 // Период без ввода может начаться раньше следующего ввода: `bypass`, который хаб не принял,
 // не должен дождаться его на сервере.
-#[tokio::test]
-async fn refused_input_returns_the_previous_mode_at_once() {
-    let mut script = with_rules_route(ready(), vec![reply_204()]);
-    set_prompt_reply(&mut script, |reply| {
-        *reply = Reply {
-            status: 400,
-            body: Some(json!({"_tag": "InvalidRequestError"})),
-            ..Default::default()
-        };
-    });
-    let mut bench = Bench::new(script);
-    bench.start_ok().await;
-    let mut input = bench.input("x");
-    input.settings = Some(mode_change("read_only"));
-    assert!(matches!(
-        bench.transmit(&input).await,
-        TransmitOutcome::Rejected(reason) if reason == "InvalidRequestError"
-    ));
-    let requests = bench.fake.requests();
-    let effects: Vec<_> = requests
-        .iter()
-        .filter(|request| request["method"] == "PATCH")
-        .map(|request| request["body"]["permissions"][0]["effect"].clone())
-        .collect();
-    assert_eq!(effects, [json!("deny"), json!("allow")]);
-    bench.close(CloseMode::Graceful).await;
-}
 
 #[tokio::test]
 async fn a_locked_turn_resumes_and_finishes_without_an_error_block() {
