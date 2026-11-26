@@ -61,6 +61,15 @@ fn hub_timers() -> HubTimers {
     }
 }
 
+/// Подтверждения SJ теряются нарочно: воркер повторяет диапазон по `range_ack`, и с
+/// боевыми 3 с тест высиживал по 6 с на каждом шаге потока.
+fn lost_ack_timers() -> WorkerTimers {
+    WorkerTimers {
+        range_ack: Duration::from_millis(500),
+        ..worker_timers()
+    }
+}
+
 fn worker_timers() -> WorkerTimers {
     WorkerTimers {
         handshake: Duration::from_secs(5),
@@ -99,6 +108,28 @@ fn answer(count: usize, delay_ms: u64) -> (String, String) {
         }
     }
     (json!({"synthetic":steps}).to_string(), expected)
+}
+
+/// Ответ с затворами: после `gates[i].0` дельт CLI ждёт файл `gates[i].1`. Тест открывает
+/// затвор прямо перед сбоем, так что поток идёт во время сбоя, но не обгоняет тест,
+/// как обгонял ответ на сроках под нагрузкой (и не тянется секунды без нагрузки).
+fn gated_answer(count: usize, gates: &[(usize, &Path)]) -> (String, String) {
+    let mut steps = Vec::new();
+    let mut expected = String::new();
+    for index in 0..count {
+        let delta = format!("{index:04}λ|");
+        expected.push_str(&delta);
+        steps.push(json!({"delta":delta}));
+        steps.push(json!({"delay_ms":10}));
+        if let Some((_, gate)) = gates.iter().find(|(after, _)| *after == index + 1) {
+            steps.push(json!({"wait_file":gate}));
+        }
+    }
+    (json!({"synthetic":steps}).to_string(), expected)
+}
+
+fn open_gate(gate: &Path) {
+    fs::write(gate, []).unwrap();
 }
 
 fn process_role_at(proc: &Path, expected_ticks: u64) -> Option<bool> {
@@ -972,19 +1003,25 @@ async fn stream_break_mid_answer_yields_exact_block_text() {
     let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
-    let (script, expected) = answer(50, 100);
+    let gates: Vec<_> = (0..3)
+        .map(|n| fixture.root.path().join(format!("gate-{n}")))
+        .collect();
+    let (script, expected) = gated_answer(50, &[(3, &gates[0]), (8, &gates[1]), (15, &gates[2])]);
     let input = fixture.submit(script).await;
     fixture.wait_deltas(3).await;
     fixture.faults().drop_next_sj_acks(6);
+    open_gate(&gates[0]);
     fixture.faults().fail_data(Code::Cancelled);
     fixture.wait_deltas(8).await;
     let hellos = fixture.faults().hellos().len();
+    open_gate(&gates[1]);
     fixture.faults().fail_control(Code::Unavailable);
     until("control reconnected", async || {
         fixture.faults().hellos().len() > hellos
     })
     .await;
     fixture.wait_deltas(15).await;
+    open_gate(&gates[2]);
     fixture.restart_hub().await;
     fixture.assert_answer(&input, &expected, 50).await;
     assert!(fixture.faults().acks().iter().any(|ack| ack.dropped));
@@ -998,12 +1035,25 @@ async fn control_service_restart_keeps_execution_and_answer() {
     let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
-    let (script, expected) = answer(50, 80);
+    let gate = fixture.root.path().join("gate");
+    let (script, expected) = gated_answer(50, &[(4, &gate)]);
     let input = fixture.submit(script).await;
     fixture.wait_deltas(4).await;
     fixture.stop_worker().await;
     assert!(same_process(identities.0) && same_process(identities.1));
-    sleep(Duration::from_millis(250)).await;
+    // Остаток ответа пишется, пока управляющей службы нет.
+    open_gate(&gate);
+    until(
+        "answer written while the control service is down",
+        async || {
+            fixture
+                .sj()
+                .2
+                .iter()
+                .any(|b| matches!(b, Body::BlockFinal(_)))
+        },
+    )
+    .await;
     fixture.start_worker().await;
     fixture.assert_answer(&input, &expected, 50).await;
     fixture.assert_same_processes(identities);
@@ -1349,7 +1399,16 @@ async fn large_answer_backlog_does_not_starve_control_session() {
 #[tokio::test]
 async fn lost_sj_acks_do_not_duplicate_blocks() {
     let pool = canterlot_hub::testkit::db().await;
-    let fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let fixture = Fixture::new_full_with_timers(
+        &pool,
+        "synthetic",
+        &[],
+        false,
+        true,
+        None,
+        lost_ack_timers(),
+    )
+    .await;
     let identities = fixture.identities();
     let ack_start = fixture.faults().acks().len();
     fixture.faults().drop_next_sj_acks(usize::MAX);
@@ -1445,7 +1504,19 @@ async fn transport_errors_never_stop_an_execution() {
     let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
-    let (script, expected) = answer(80, 80);
+    let gates: Vec<_> = (0..5)
+        .map(|n| fixture.root.path().join(format!("gate-{n}")))
+        .collect();
+    let (script, expected) = gated_answer(
+        80,
+        &[
+            (3, &gates[0]),
+            (10, &gates[1]),
+            (20, &gates[2]),
+            (30, &gates[3]),
+            (40, &gates[4]),
+        ],
+    );
     let input = fixture.submit(script).await;
     fixture.wait_deltas(3).await;
     for (index, code) in [Code::Cancelled, Code::DeadlineExceeded, Code::Unavailable]
@@ -1453,6 +1524,7 @@ async fn transport_errors_never_stop_an_execution() {
         .enumerate()
     {
         let hellos = fixture.faults().hellos().len();
+        open_gate(&gates[index]);
         fixture.faults().fail_control(code);
         until("control reconnected after transport error", async || {
             fixture.faults().hellos().len() > hellos
@@ -1463,6 +1535,7 @@ async fn transport_errors_never_stop_an_execution() {
         fixture.assert_same_processes(identities);
     }
     let hellos = fixture.faults().hellos().len();
+    open_gate(&gates[3]);
     fixture.faults().goaway();
     until("GOAWAY issued", async || {
         fixture.faults().goaway_count() == 1
@@ -1472,6 +1545,7 @@ async fn transport_errors_never_stop_an_execution() {
     assert_eq!(fixture.faults().hellos().len(), hellos);
     fixture.assert_never_left_running().await;
     fixture.assert_same_processes(identities);
+    open_gate(&gates[4]);
     fixture.restart_hub().await;
     fixture.assert_answer(&input, &expected, 80).await;
     fixture.assert_never_left_running().await;
@@ -1667,7 +1741,16 @@ async fn orphan_process_waits_for_the_owner_and_stop_leads_to_the_resolve() {
 #[tokio::test]
 async fn exit_of_a_lost_session_survives_an_ack_the_supervisor_never_saved() {
     let pool = canterlot_hub::testkit::db().await;
-    let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let mut fixture = Fixture::new_full_with_timers(
+        &pool,
+        "synthetic",
+        &[],
+        false,
+        true,
+        None,
+        lost_ack_timers(),
+    )
+    .await;
     let identities = fixture.identities();
     fixture.faults().drop_next_sj_acks(usize::MAX);
     fixture
