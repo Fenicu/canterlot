@@ -7,6 +7,8 @@ use canterlot_hub::{
 use sqlx::{ConnectOptions, PgPool};
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 fn write_manifest(path: &Path, installation_id: Uuid, generation: Uuid, restoring: bool) {
@@ -19,7 +21,6 @@ fn write_manifest(path: &Path, installation_id: Uuid, generation: Uuid, restorin
     .unwrap();
 }
 
-#[sqlx::test(migrations = "./migrations")]
 async fn init_creates_manifest_and_row(pool: PgPool) -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("installation.toml");
@@ -64,7 +65,6 @@ async fn init_creates_manifest_and_row(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
 async fn init_twice_is_refused(pool: PgPool) -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("installation.toml");
@@ -90,7 +90,6 @@ async fn init_twice_is_refused(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
 async fn init_refuses_existing_manifest_without_database_row(pool: PgPool) -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("installation.toml");
@@ -112,7 +111,6 @@ async fn init_refuses_existing_manifest_without_database_row(pool: PgPool) -> Te
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
 async fn check_detects_missing_and_mismatched_manifest(pool: PgPool) -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("installation.toml");
@@ -151,7 +149,6 @@ async fn check_detects_missing_and_mismatched_manifest(pool: PgPool) -> TestResu
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
 async fn check_refuses_uninitialized_and_malformed_manifest(pool: PgPool) -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("installation.toml");
@@ -179,7 +176,6 @@ async fn check_refuses_uninitialized_and_malformed_manifest(pool: PgPool) -> Tes
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
 async fn init_rolls_back_when_manifest_cannot_be_written(pool: PgPool) -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("absent/installation.toml");
@@ -203,7 +199,6 @@ async fn init_rolls_back_when_manifest_cannot_be_written(pool: PgPool) -> TestRe
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
 async fn concurrent_initializations_create_one_owner(pool: PgPool) -> TestResult {
     let dir = tempfile::tempdir()?;
     let first = dir.path().join("first.toml");
@@ -305,7 +300,6 @@ fn config_refuses_inline_secrets_and_invalid_values() -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
 async fn cli_serve_refuses_without_manifest(pool: PgPool) -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("hub.toml");
@@ -422,4 +416,23 @@ fn cli_errors_do_not_disclose_config_or_database_file_contents() -> TestResult {
     assert!(output.stdout.is_empty());
     assert!(output.stderr == b"database_url_file_error\n");
     Ok(())
+}
+
+/// Установка: init и check, повторный init, манифест без строки, расхождения и битый
+/// манифест, откат при сбое записи, одновременный init, serve без манифеста.
+/// Случаи идут на клоне шаблона, перед каждым база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn installation_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        init_creates_manifest_and_row,
+        init_twice_is_refused,
+        init_refuses_existing_manifest_without_database_row,
+        check_detects_missing_and_mismatched_manifest,
+        check_refuses_uninitialized_and_malformed_manifest,
+        init_rolls_back_when_manifest_cannot_be_written,
+        concurrent_initializations_create_one_owner,
+        cli_serve_refuses_without_manifest,
+    );
 }
