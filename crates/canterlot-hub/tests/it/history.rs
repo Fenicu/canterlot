@@ -6,6 +6,8 @@ use sqlx::PgPool;
 use support::*;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 async fn timeline(f: &Fixture) -> Vec<i64> {
     let e = f.execution().await;
     let mut wanted = Vec::new();
@@ -23,9 +25,7 @@ async fn timeline(f: &Fixture) -> Vec<i64> {
     }
     wanted
 }
-#[tokio::test]
-async fn history_pages_by_seq_without_gaps_or_duplicates() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn history_pages_by_seq_without_gaps_or_duplicates(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let wanted = timeline(&f).await;
     let mut before = None;
@@ -59,9 +59,7 @@ async fn history_pages_by_seq_without_gaps_or_duplicates() {
             .is_client_error()
     );
 }
-#[tokio::test]
-async fn history_after_pages_forward_without_gaps() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn history_after_pages_forward_without_gaps(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let wanted = timeline(&f).await;
     let mut after = "0".to_owned();
@@ -78,9 +76,7 @@ async fn history_after_pages_forward_without_gaps() {
     }
     assert_eq!(got, wanted);
 }
-#[tokio::test]
-async fn input_queued_during_a_turn_appears_after_that_turn_in_history() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn input_queued_during_a_turn_appears_after_that_turn_in_history(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     let m1 = f.input("m1").await;
@@ -173,9 +169,7 @@ async fn first_history_page_reads_via_indexes_only() {
         100
     );
 }
-#[tokio::test]
-async fn long_tool_output_is_truncated_in_history_and_paged_by_the_block_endpoint() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn long_tool_output_is_truncated_in_history_and_paged_by_the_block_endpoint(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     let text = "line\n".repeat(70000);
@@ -227,9 +221,7 @@ async fn long_tool_output_is_truncated_in_history_and_paged_by_the_block_endpoin
         "firstsecond"
     );
 }
-#[tokio::test]
-async fn block_offsets_are_utf8_bytes_on_char_boundaries() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn block_offsets_are_utf8_bytes_on_char_boundaries(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     let text = "Я😀中文я";
@@ -267,9 +259,7 @@ async fn block_offsets_are_utf8_bytes_on_char_boundaries() {
         assert_eq!(got, text);
     }
 }
-#[tokio::test]
-async fn timeline_items_carry_created_at_and_tool_blocks_started_and_finished_at() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn timeline_items_carry_created_at_and_tool_blocks_started_and_finished_at(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     let i = f.input("time").await;
@@ -296,9 +286,7 @@ async fn timeline_items_carry_created_at_and_tool_blocks_started_and_finished_at
     assert_eq!(b["revision_gap"], true);
     assert_eq!(b["incomplete_reason"], "revision_gap");
 }
-#[tokio::test]
-async fn foreign_conversation_reads_are_not_found() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn foreign_conversation_reads_are_not_found(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let other = testkit::seed(&f.pool).await;
     for id in [other.conversation_id, Uuid::now_v7()] {
@@ -352,9 +340,7 @@ async fn run(f: &Fixture) -> (Uuid, Uuid, Uuid) {
         .unwrap();
     (i.command_id, i.input_id, b)
 }
-#[tokio::test]
-async fn run_id_equals_input_command_id() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn run_id_equals_input_command_id(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let (cmd, i, b) = run(&f).await;
     let r = f.get(&f.path(&format!("/runs/{cmd}"))).await;
@@ -374,9 +360,7 @@ async fn run_id_equals_input_command_id() {
         404
     );
 }
-#[tokio::test]
-async fn run_info_lists_usage_parts_and_overlap_note() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn run_info_lists_usage_parts_and_overlap_note(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let (cmd, _, _) = run(&f).await;
     let p = f.path(&format!("/runs/{cmd}"));
@@ -403,9 +387,7 @@ async fn run_info_lists_usage_parts_and_overlap_note() {
         assert_eq!(f.get(&p).await["limit"]["exact"], false);
     }
 }
-#[tokio::test]
-async fn delegation_tree_lists_subagent_calls_with_state_name_model_and_task() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn delegation_tree_lists_subagent_calls_with_state_name_model_and_task(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     let parent = f.block(e, 1, "tool_call", "args").await;
@@ -446,9 +428,7 @@ async fn delegation_tree_lists_subagent_calls_with_state_name_model_and_task() {
 }
 /// Фоновый агент: первым ребёнком вызова идёт результат запуска основного агента,
 /// настоящее имя и модель субагента приходят с его собственными блоками позже.
-#[tokio::test]
-async fn delegation_names_the_subagent_not_the_launch_result() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn delegation_names_the_subagent_not_the_launch_result(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     let call = f.block(e, 1, "tool_call", "args").await;
@@ -498,9 +478,7 @@ async fn adopt(f: &Fixture, parent: Uuid, children: &[Uuid]) {
         .await
         .unwrap();
 }
-#[tokio::test]
-async fn lane_pages_the_whole_subtree_newest_first_without_gaps() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn lane_pages_the_whole_subtree_newest_first_without_gaps(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     let call = f.block(e, 1, "tool_call", "agent").await;
@@ -561,9 +539,7 @@ async fn lane_pages_the_whole_subtree_newest_first_without_gaps() {
     assert!(tail["next_before"].is_null());
     assert_eq!(tail["items"][15]["id"], deep.to_string());
 }
-#[tokio::test]
-async fn lane_of_a_leaf_is_just_the_root_and_bad_requests_are_rejected() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn lane_of_a_leaf_is_just_the_root_and_bad_requests_are_rejected(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     let leaf = f.block(e, 1, "tool_call", "leaf").await;
@@ -600,9 +576,7 @@ async fn lane_of_a_leaf_is_just_the_root_and_bad_requests_are_rejected() {
         .await;
     assert_eq!(r.status.as_u16(), 404);
 }
-#[tokio::test]
-async fn input_items_expose_the_idempotency_key_to_the_owner_only() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn input_items_expose_the_idempotency_key_to_the_owner_only(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let i = f.input("owner-key").await;
     sqlx::query("update inputs set feed_seq=1 where id=$1")
@@ -706,9 +680,7 @@ impl tracing::Subscriber for QueryCounter {
 
 // Страница истории читает элементы пачками по виду, а у вывода инструмента берёт только
 // показываемые 4 КБ: число запросов не зависит от числа блоков.
-#[tokio::test]
-async fn history_page_reads_items_in_batches() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn history_page_reads_items_in_batches(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     let big = "строка вывода\n".repeat(20000);
@@ -800,9 +772,7 @@ async fn timed_block(
         .bind(id).bind(execution).bind(f.seed.conversation_id).bind(kind).bind(seq).bind(run).bind(parent).bind(start_ms as f64).bind(end_ms as f64).execute(&f.pool).await.unwrap();
     id
 }
-#[tokio::test]
-async fn run_speed_excludes_tool_time_in_the_middle_of_the_turn() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn run_speed_excludes_tool_time_in_the_middle_of_the_turn(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     let i = f.input("speed").await;
@@ -832,4 +802,42 @@ async fn run_speed_excludes_tool_time_in_the_middle_of_the_turn() {
         .await
         .unwrap();
     assert_eq!(f.get(&p).await["speed"], json!([]));
+}
+
+/// Страницы истории без дыр и дублей, ввод посреди хода, длинный вывод инструмента,
+/// смещения UTF-8, время элементов, чужой разговор, идентификатор хода.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn timeline_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        history_pages_by_seq_without_gaps_or_duplicates,
+        history_after_pages_forward_without_gaps,
+        input_queued_during_a_turn_appears_after_that_turn_in_history,
+        long_tool_output_is_truncated_in_history_and_paged_by_the_block_endpoint,
+        block_offsets_are_utf8_bytes_on_char_boundaries,
+        timeline_items_carry_created_at_and_tool_blocks_started_and_finished_at,
+        foreign_conversation_reads_are_not_found,
+        run_id_equals_input_command_id,
+    );
+}
+
+/// Сведения о ходе, дерево делегирования и полоса поддерева, ключ ввода только
+/// владельцу, чтение пачками, скорость без времени инструментов.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn run_and_delegation_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        run_info_lists_usage_parts_and_overlap_note,
+        delegation_tree_lists_subagent_calls_with_state_name_model_and_task,
+        delegation_names_the_subagent_not_the_launch_result,
+        lane_pages_the_whole_subtree_newest_first_without_gaps,
+        lane_of_a_leaf_is_just_the_root_and_bad_requests_are_rejected,
+        input_items_expose_the_idempotency_key_to_the_owner_only,
+        history_page_reads_items_in_batches,
+        run_speed_excludes_tool_time_in_the_middle_of_the_turn,
+    );
 }
