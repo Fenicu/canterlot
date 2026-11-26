@@ -1901,7 +1901,7 @@ async fn cancelled_start_leaves_no_server_behind() {
     );
     let mut bench = Bench::new(script);
     let cut = tokio::time::timeout(
-        Duration::from_millis(500),
+        Duration::from_millis(300),
         bench.adapter.start(&bench.spec, &bench.group),
     )
     .await;
@@ -2182,7 +2182,8 @@ async fn timed_out_prompts_are_proven_late() {
             // Потока нет, доказательство только в проекции.
             (stalled(), TurnEnd::Rejected),
         ]),
-        Duration::from_millis(700),
+        // Ответ завис на 30 с: короткий срок детерминированно даёт Undetermined.
+        Duration::from_millis(200),
         |_| {},
     );
     let started = bench.start_ok().await;
@@ -6972,7 +6973,7 @@ async fn failed_steer_reconciliation_leaves_the_running_turn_alone() {
             .count();
         if reads >= 8 {
             let quiet = *quiet_since.get_or_insert(std::time::Instant::now());
-            if quiet.elapsed() >= Duration::from_secs(1) {
+            if quiet.elapsed() >= Duration::from_millis(500) {
                 break;
             }
         } else {
