@@ -1759,6 +1759,7 @@ impl Worker {
         let mut commands = VecDeque::new();
         let mut store_ack: Option<u64> = None;
         let mut dirty = true;
+        let cj_grown = self.store.cj_grown();
         let mut ready_batch: Option<(ControlUp, u64)> = None;
         let mut heartbeat_outbound = None;
         let mut range_outbound = None;
@@ -2136,6 +2137,9 @@ impl Worker {
                 || range_outbound.is_some()
                 || (ready_batch.is_some() && pending_batches.len() < 8);
             tokio::select! {
+                () = cj_grown.notified() => {
+                    dirty = true;
+                }
                 changed = catalog_updates.changed(), if pilot && machine_outbound.is_none() => {
                     changed.map_err(|_| WorkerError::Transport)?;
                     let report = catalog_updates.borrow_and_update().clone();

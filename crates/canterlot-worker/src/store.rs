@@ -870,6 +870,11 @@ impl WorkerStore {
             .is_some_and(requires_pilot))
     }
 
+    /// Последний номер журнала управления, без проверки открытости: только для сравнения.
+    pub fn cj_last_seq(&self) -> u64 {
+        self.cj.last_seq()
+    }
+
     pub fn cj_cursor(&self) -> Result<JournalCursor, StoreError> {
         self.ensure_open()?;
         Ok(JournalCursor {

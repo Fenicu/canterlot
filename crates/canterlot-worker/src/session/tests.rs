@@ -797,6 +797,42 @@ fn carrier_facts_stay_in_the_journal_until_runners_are_negotiated() {
     assert_eq!(seqs(true), [before, staged, staged + 1, staged + 2]);
 }
 
+// Факты задач на месте и несущей пишутся в журнал управления мимо цикла сеанса. Они уходят
+// хабу сразу, а не со следующим heartbeat: иначе `job run --wait` ждал бы лишний период.
+#[tokio::test]
+async fn a_cj_fact_appended_outside_the_session_loop_ships_without_waiting_for_a_heartbeat() {
+    let (mut hub, store) = support::ProtocolHub::start(support::Behavior::default()).await;
+    hub.config.timers.heartbeat = Duration::from_secs(3600);
+    let worker = Worker::new(hub.config.clone(), store);
+    let client = worker.store.client();
+    let mut state = worker.state();
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown));
+    wait_live(&mut state).await;
+    let seq = client
+        .call(|slot| {
+            Ok(store_mut(slot)?
+                .append_cj_fact(record_body::Body::CommandStored(CommandStored::default()))?)
+        })
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if let support::Observed::Control(message) = hub.event().await
+                && let Some(control_up::Msg::CjRecords(batch)) = message.msg
+                && batch.records.iter().any(|record| record.seq == seq)
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the fact reaches the hub before the next heartbeat");
+    drop(client);
+    stop.send_replace(true);
+    join.await.unwrap().unwrap();
+}
+
 // Подтверждение за пределами отправленного — ошибка протокола хаба,
 // а не повод отравить журнал и уйти в ожидание диска.
 #[tokio::test]

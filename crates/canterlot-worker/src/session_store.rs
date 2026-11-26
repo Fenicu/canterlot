@@ -7,7 +7,7 @@ use std::{
     thread,
 };
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::{
     session::WorkerError,
@@ -20,6 +20,7 @@ pub struct StoreThread {
     sender: mpsc::Sender<Job>,
     thread: thread::JoinHandle<()>,
     failed: Arc<AtomicBool>,
+    cj_grown: Arc<Notify>,
 }
 
 #[derive(Clone)]
@@ -60,10 +61,18 @@ impl StoreThread {
         let (sender, mut receiver) = mpsc::channel::<Job>(8);
         let failed = Arc::new(AtomicBool::new(false));
         let thread_failed = failed.clone();
+        let cj_grown = Arc::new(Notify::new());
+        let thread_grown = cj_grown.clone();
         let thread = thread::spawn(move || {
             let mut store = Some(store);
             while let Some(job) = receiver.blocking_recv() {
+                let before = store.as_ref().map(WorkerStore::cj_last_seq);
                 job(&mut store);
+                // Факты пишут и задачи вне цикла сеанса: без сигнала они ждали бы его
+                // следующего повода, в худшем случае heartbeat.
+                if store.as_ref().map(WorkerStore::cj_last_seq) > before {
+                    thread_grown.notify_one();
+                }
                 if store
                     .as_ref()
                     .is_some_and(|s| matches!(s.cj_cursor(), Err(StoreError::NeedsReopen)))
@@ -77,7 +86,13 @@ impl StoreThread {
             sender,
             thread,
             failed,
+            cj_grown,
         }
+    }
+
+    /// Журнал управления вырос: сеансу пора собрать следующий пакет.
+    pub(crate) fn cj_grown(&self) -> Arc<Notify> {
+        self.cj_grown.clone()
     }
 
     pub(crate) fn take_failed(&self) -> bool {
