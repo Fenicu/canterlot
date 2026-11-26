@@ -1764,8 +1764,9 @@ async fn unverifiable_ownership_is_reported_owner_lost_never_restarted() {
         .await;
         executions.push(env.execution);
     }
+    // Посторонний процесс живёт дольше теста и убивается в конце: ждать его выхода незачем.
     let mut unrelated = std::process::Command::new("sleep")
-        .arg("10")
+        .arg("120")
         .spawn()
         .unwrap();
     let sleeper = unrelated.id();
@@ -1831,6 +1832,7 @@ async fn unverifiable_ownership_is_reported_owner_lost_never_restarted() {
             "ownership is kept"
         );
     }
+    unrelated.kill().unwrap();
     unrelated.wait().unwrap();
 }
 
@@ -1988,6 +1990,10 @@ impl Env {
 #[tokio::test]
 async fn cli_carries_the_group_marker_and_the_supervisor_records_the_members() {
     let mut env = Env::new().await;
+    // Боевой снимок группы раз в 5 с; тесту хватает короткого периода.
+    env.close_manager().await;
+    env.config.supervisor.periods.group_record = Duration::from_millis(100);
+    env.reopen();
     env.hub_session();
     env.start(1).await;
     env.wait_running().await;
@@ -2846,7 +2852,9 @@ async fn wave2_n1_closed_replies_are_durable_cj_receipts() {
     env.wait_running().await;
     env.auto_ack = false;
     env.stop().await;
-    for _ in 0..50 {
+    // Десять кругов: каждый ответ закрытого исполнения проверяется своим фактом CJ,
+    // а пятьдесят кругов тратили 10 с на то же самое.
+    for _ in 0..10 {
         for cancel in [true, false] {
             let target = Uuid::now_v7();
             let delivery = deliver_command(target, 1, env.execution, 1, env.conversation, "late");
