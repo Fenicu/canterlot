@@ -3382,6 +3382,23 @@ async fn live_smoke() {
         other => panic!("live decision: {other:?}"),
     }
     eprintln!("SMOKE: question answered (structured questions OPEN closed)");
+
+    // 0.172.0 держит ход после ответа на вопрос: следующий ввод до конца хода
+    // отклоняется `turn_active`, в проде он встал бы в очередь. Ждём RunFinished.
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(240), adapter.next_event())
+            .await
+            .expect("question turn must finish");
+        let done = matches!(
+            &event,
+            AdapterEvent::RunFinished { input_command_id, .. }
+                if *input_command_id == qid
+        );
+        if done {
+            break;
+        }
+    }
+    eprintln!("SMOKE: question turn finished");
     // Разрешение: перевод в read_only, команда создаёт файл, разрешаем.
     let mut approval =
         text("Create the file probe-smoke.txt with the single word SMOKE using a shell command.");
@@ -3414,6 +3431,22 @@ async fn live_smoke() {
         other => panic!("live decision: {other:?}"),
     }
     eprintln!("SMOKE: command approval allowed (approvals OPEN closed)");
+
+    // Разрешённая команда дописывает ход: следующий ввод до конца хода отклоняется.
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(240), adapter.next_event())
+            .await
+            .expect("approval turn must finish");
+        let done = matches!(
+            &event,
+            AdapterEvent::RunFinished { input_command_id, .. }
+                if *input_command_id == aid
+        );
+        if done {
+            break;
+        }
+    }
+    eprintln!("SMOKE: approval turn finished");
     // Картинка-вложение.
     let png = workdir.join("red.png");
     std::fs::write(&png, PIXEL_PNG).unwrap();
