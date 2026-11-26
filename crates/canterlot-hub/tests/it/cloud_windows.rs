@@ -476,6 +476,42 @@ impl Rig {
             .await
             .unwrap();
     }
+
+    /// Чистое состояние между случаями табличного теста: ни окон, ни их следов в задачах,
+    /// командах и пушах, пустой каталог провайдера и несущая на месте.
+    async fn clean(&self) {
+        for sql in [
+            "delete from cloud_windows",
+            "delete from jobs",
+            "delete from commands",
+            "delete from journal_cursors",
+            "delete from machine_workdirs",
+            "delete from conversation_tombstones",
+            "delete from journal_stops",
+            "delete from secret_requests",
+            "delete from owner_pushes",
+            "update cloud_budget set monthly_budget_kopecks = 0, cloud_machine_id = null,
+                    provider_block_code = null, provider_block_at = null",
+        ] {
+            sqlx::query(sql).execute(&self.pool).await.unwrap();
+        }
+        // Учётные данные несущей остаются: без них она «отозвана» и раннеров не заводит.
+        sqlx::query("delete from machine_credentials where machine_id <> $1")
+            .bind(self.carrier)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        sqlx::query("delete from machines where id <> $1")
+            .bind(self.carrier)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        machines::set_carrier(&self.pool, self.carrier, true)
+            .await
+            .unwrap();
+        self.service.reset_runtime().await;
+        self.fake.control().reset();
+    }
 }
 
 async fn enable_pushes(pool: &PgPool) {
@@ -653,9 +689,10 @@ fn the_month_is_counted_in_moscow_time() {
 }
 
 #[tokio::test]
-async fn the_reservation_follows_config_and_the_price_module() -> TestResult {
+async fn the_reservation_the_budget_and_the_consent_follow_the_price_rules() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     // Две ставки часа берутся из каталога SKU провайдера.
     let pricing = rig.service.pricing().await?;
     assert!(
@@ -718,13 +755,10 @@ async fn the_reservation_follows_config_and_the_price_module() -> TestResult {
         (6107, DISK)
     );
     assert_eq!(window.reservation_kopecks, 3 * (6107 + DISK));
-    Ok(())
-}
-
-#[tokio::test]
-async fn with_a_zero_budget_only_the_exact_consent_passes() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Нулевой бюджет: проходит только точное согласие ──
+    rig.clean().await;
+    {
     let reservation = rig.reservation(60);
     let attempt = |consent: Option<i64>| {
         let service = rig.service.clone();
@@ -764,13 +798,11 @@ async fn with_a_zero_budget_only_the_exact_consent_passes() -> TestResult {
         ("card", "create_intent")
     );
     assert!(window.proposal_id.is_some());
-    Ok(())
-}
 
-#[tokio::test]
-async fn the_budget_counts_ended_final_cost_and_live_reservations() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Бюджет месяца: итоговая цена законченных и резерв живых ──
+    rig.clean().await;
+    {
     let reservation = rig.reservation(60);
     sqlx::query("update cloud_budget set monthly_budget_kopecks = $1")
         .bind(2 * reservation)
@@ -852,12 +884,14 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations() -> TestResul
         })
         .await?;
     Ok(())
+    }
 }
 
 #[tokio::test]
-async fn only_one_window_is_live_at_a_time() -> TestResult {
+async fn only_one_window_is_live_even_under_concurrent_creates() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     let first = rig.create(60).await;
     for state in [
         "create_intent",
@@ -914,13 +948,11 @@ async fn only_one_window_is_live_at_a_time() -> TestResult {
         .execute(&rig.pool)
         .await;
     assert!(second.is_err(), "the unique index allows one live row");
-    Ok(())
-}
 
-#[tokio::test]
-async fn concurrent_creates_make_exactly_one_window() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Четыре одновременных создания дают ровно одно окно ──
+    rig.clean().await;
+    {
     sqlx::query("update cloud_budget set monthly_budget_kopecks = 10000000")
         .execute(&rig.pool)
         .await?;
@@ -950,21 +982,7 @@ async fn concurrent_creates_make_exactly_one_window() -> TestResult {
         .await?;
     assert_eq!(rows, 1);
     Ok(())
-}
-
-#[tokio::test]
-async fn the_private_host_key_is_never_stored() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
-    let id = rig.create(60).await;
-    let window = rig.window(id).await;
-    assert!(window.host_key_public.starts_with("ssh-ed25519 "));
-    assert!(!window.host_key_public.contains("PRIVATE"));
-    let dump: String = sqlx::query_scalar("select cloud_windows::text from cloud_windows")
-        .fetch_one(&rig.pool)
-        .await?;
-    assert!(!dump.contains("PRIVATE KEY") && !dump.contains("BEGIN OPENSSH"));
-    Ok(())
+    }
 }
 
 // ───────── Полный цикл ─────────
@@ -979,6 +997,10 @@ async fn the_full_cycle_create_ready_idle_delete_ended_with_the_final_cost() -> 
     assert_eq!(rig.state(id).await, "create_intent");
     assert!(windows::has_pending_key(id));
     assert_eq!(rig.reservation(120), 4 * HOURLY);
+    // Только открытая половина ключа лежит в строке.
+    let window = rig.window(id).await;
+    assert!(window.host_key_public.starts_with("ssh-ed25519 "));
+    assert!(!window.host_key_public.contains("PRIVATE"));
 
     // Первый проход: сверка (пустой каталог), затем вызов создания.
     rig.tick(t0).await;
@@ -1029,7 +1051,10 @@ async fn the_full_cycle_create_ready_idle_delete_ended_with_the_final_cost() -> 
     let dump: String = sqlx::query_scalar("select cloud_windows::text from cloud_windows")
         .fetch_one(&rig.pool)
         .await?;
-    assert!(!dump.contains("PRIVATE KEY"));
+    assert!(
+        !dump.contains("PRIVATE KEY") && !dump.contains("BEGIN OPENSSH"),
+        "the private half never reaches the row"
+    );
     assert!(
         !windows::has_pending_key(id),
         "the private half left memory"
@@ -1105,9 +1130,10 @@ async fn the_full_cycle_create_ready_idle_delete_ended_with_the_final_cost() -> 
 }
 
 #[tokio::test]
-async fn a_rejected_create_fails_the_window_and_releases_the_reservation() -> TestResult {
+async fn a_rejected_create_closes_the_window_and_releases_the_reservation() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     rig.fake.control().create = CreateMode::Error {
         http: 400,
         code: 3,
@@ -1140,13 +1166,11 @@ async fn a_rejected_create_fails_the_window_and_releases_the_reservation() -> Te
     drop(conn);
     // Окно закрыто: можно создать следующее.
     rig.try_create(60).await.expect("the slot is free again");
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_rejected_create_stays_open_until_both_listings_are_complete() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Пока списки не прочитаны, окно остаётся открытым ──
+    rig.clean().await;
+    {
     rig.fake.control().create = CreateMode::Error {
         http: 403,
         code: 7,
@@ -1177,6 +1201,7 @@ async fn a_rejected_create_stays_open_until_both_listings_are_complete() -> Test
         ("failed", Some(0))
     );
     Ok(())
+    }
 }
 
 // ───────── Список профилей ─────────
@@ -1286,13 +1311,10 @@ async fn the_reservation_and_the_budget_use_the_most_expensive_profile_of_the_li
         .map(|profile| profile.hourly_kopecks())
         .collect();
     assert_eq!(stored, hourly, "the snapshot keeps every price in order");
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_price_that_cannot_be_read_refuses_the_window() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    // ── Цены нет: окно не создаётся, строки нет ──
+    rig.clean().await;
+    {
     // В каталоге нет SKU диска: цена не угадывается, окно не создаётся.
     rig.fake
         .control()
@@ -1318,11 +1340,11 @@ async fn a_price_that_cannot_be_read_refuses_the_window() -> TestResult {
         .await?;
     assert_eq!(rows, 0, "no window without a price");
     Ok(())
+    }
 }
 
 #[tokio::test]
-async fn a_definite_refusal_moves_to_the_next_profile_in_the_same_window_and_the_ledger_uses_the_real_price()
--> TestResult {
+async fn a_definite_refusal_falls_back_and_the_ledger_uses_the_real_price() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig_with(pool, profiles(&[DEAR, MID, CHEAP])).await;
     let _carrier = rig.carrier_session();
@@ -1389,14 +1411,12 @@ async fn a_definite_refusal_moves_to_the_next_profile_in_the_same_window_and_the
     assert_eq!(window.state, "ended");
     assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
     assert!(window.final_cost_kopecks.unwrap() < reserved);
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_quota_or_capacity_refusal_falls_back_and_any_other_one_closes_the_window() -> TestResult
-{
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig_with(pool, profiles(&[DEAR, CHEAP])).await;
+    // ── Квота или место: следующий профиль; прочий отказ закрывает окно ──
+    rig.clean().await;
+    {
+    let rig = rig_with(rig.pool.clone(), profiles(&[DEAR, CHEAP])).await;
+    let _carrier = rig.carrier_session();
     let mut t = now_micros();
     for mode in [CreateMode::quota(), CreateMode::not_enough_resources()] {
         rig.fake
@@ -1434,6 +1454,7 @@ async fn a_quota_or_capacity_refusal_falls_back_and_any_other_one_closes_the_win
     assert_eq!(window.last_error.as_deref(), Some("48x96:403/7"));
     assert_eq!(rig.posts(), before + 1, "the cheap profile was not tried");
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -1541,9 +1562,10 @@ async fn an_ambiguous_outcome_stops_the_fallback_and_the_attempted_profile_is_bi
 // ───────── Операция создания и подключение ─────────
 
 #[tokio::test]
-async fn attach_goes_to_the_public_address_of_the_instance_on_port_22() -> TestResult {
+async fn attach_goes_to_the_public_address_with_the_prepare_and_only_when_ready() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let id = rig.create(120).await;
@@ -1586,13 +1608,11 @@ async fn attach_goes_to_the_public_address_of_the_instance_on_port_22() -> TestR
             .fetch_one(&rig.pool)
             .await?;
     assert_eq!(sent, 1);
-    Ok(())
-}
 
-#[tokio::test]
-async fn attach_carries_the_prepare_script() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Подготовка едет в команде подключения ──
+    rig.clean().await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let script = "apt-get install -y jq\njq --version\n";
@@ -1611,15 +1631,12 @@ async fn attach_carries_the_prepare_script() -> TestResult {
     assert_eq!(rig.state(id).await, "identified");
     let attach = rig.attach_command().await;
     assert_eq!(attach["prepare_script"], script);
-    Ok(())
-}
 
-#[tokio::test]
-async fn attach_waits_for_the_create_operation_and_a_running_instance() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Подключение ждёт и операцию создания, и работающую машину ──
+    rig.clean().await;
+    {
     let _carrier = rig.carrier_session();
-    // Машина ещё грузится: и операция создания, и сама машина отвечают «не готово».
     rig.fake.control().boot_polls = 3;
     let t0 = now_micros();
     let id = rig.create(120).await;
@@ -1636,6 +1653,7 @@ async fn attach_waits_for_the_create_operation_and_a_running_instance() -> TestR
     assert!(window.attach_sent_at.is_some());
     assert!(window.public_ip.is_some());
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -1679,9 +1697,10 @@ async fn an_instance_found_by_name_is_checked_directly_without_an_operation() ->
 }
 
 #[tokio::test]
-async fn a_failed_create_operation_cleans_up_the_instance_and_the_disk() -> TestResult {
+async fn a_failed_create_operation_cleans_up_or_confirms_the_rollback() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
     {
@@ -1731,13 +1750,11 @@ async fn a_failed_create_operation_cleans_up_the_instance_and_the_disk() -> Test
     assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
     assert_eq!(window.last_error.as_deref(), Some("create_failed:8"));
     rig.try_create(60).await.expect("the slot is free again");
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_failed_create_operation_that_rolled_back_still_confirms_both_absences() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Откат провайдера: подтверждаются обе пустоты, без DELETE ──
+    rig.clean().await;
+    {
     let _carrier = rig.carrier_session();
     // Яндекс откатил создание сам: ни машины, ни диска.
     rig.fake.control().fail_next_create_operation = Some((9, "Not enough resources".to_owned()));
@@ -1765,14 +1782,16 @@ async fn a_failed_create_operation_that_rolled_back_still_confirms_both_absences
     assert!(window.server_gone_at.is_some() && window.disk_gone_at.is_some());
     assert_eq!(window.last_error.as_deref(), Some("create_failed:9"));
     Ok(())
+    }
 }
 
 // ───────── Прерывание и поломка машины ─────────
 
 #[tokio::test]
-async fn a_stopped_preemptible_instance_is_cleaned_up_as_preempted() -> TestResult {
+async fn a_stopped_or_crashed_instance_is_classified_and_cleaned_up() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -1833,14 +1852,12 @@ async fn a_stopped_preemptible_instance_is_cleaned_up_as_preempted() -> TestResu
         vec!["preempted", "replacement_skipped"]
     );
     assert_eq!(rig.last_skip_reason().await, "no_waiting_job");
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_stopped_regular_instance_is_cleaned_up_as_vm_broken() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig_with(pool, |config| config.preemptible = false).await;
-    enable_pushes(&rig.pool).await;
+    }
+    // ── Остановка обычной машины: это поломка, а не прерывание ──
+    rig.clean().await;
+    {
+    let rig = rig_with(rig.pool.clone(), |config| config.preemptible = false).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let (id, _session, at) = rig.drive_to_ready(120, t0).await;
@@ -1848,8 +1865,6 @@ async fn a_stopped_regular_instance_is_cleaned_up_as_vm_broken() -> TestResult {
     assert!(!window.preemptible);
     let instance_id = window.instance_id.clone().unwrap();
     assert!(!rig.fake.control().instances[&instance_id].preemptible);
-
-    // Обычная машина сама не останавливается: это поломка, а не прерывание.
     rig.fake
         .control()
         .instances
@@ -1863,14 +1878,13 @@ async fn a_stopped_regular_instance_is_cleaned_up_as_vm_broken() -> TestResult {
     assert_eq!(window.delete_reason.as_deref(), Some("vm_broken"));
     assert_eq!(window.stopped_at, Some(seen));
     assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_crashed_instance_is_vm_broken_even_when_preemptible() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
-    enable_pushes(&rig.pool).await;
+    }
+    // ── Падение машины — поломка даже у прерываемой, и стоп не ставится ──
+    {
+    let pool = rig.pool.clone();
+    rig.clean().await;
+    let rig = rig_with(pool, |_| {}).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let (id, _session, at) = rig.drive_to_ready(60, t0).await;
@@ -1881,7 +1895,6 @@ async fn a_crashed_instance_is_vm_broken_even_when_preemptible() -> TestResult {
     rig.tick(t0 + TimeDelta::minutes(60)).await;
     assert_eq!(rig.state(id).await, "draining");
     assert!(at < t0 + TimeDelta::minutes(60));
-
     rig.fake
         .control()
         .instances
@@ -1895,12 +1908,14 @@ async fn a_crashed_instance_is_vm_broken_even_when_preemptible() -> TestResult {
     assert_eq!(window.stopped_at, None, "a crash is not a stop");
     assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
     Ok(())
+    }
 }
 
 #[tokio::test]
-async fn a_preempted_window_retries_its_sourced_job_and_gets_a_replacement() -> TestResult {
+async fn a_preempted_window_retries_its_job_and_gets_a_replacement() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     enable_pushes(&rig.pool).await;
     rig.set_budget(10_000_000).await;
     let _carrier = rig.carrier_session();
@@ -1952,16 +1967,13 @@ async fn a_preempted_window_retries_its_sourced_job_and_gets_a_replacement() -> 
         rig.alert_codes().await,
         vec!["preempted", "replacement_started"]
     );
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_replacement_inherits_the_prepare_of_its_parent() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
-    enable_pushes(&rig.pool).await;
-    rig.set_budget(10_000_000).await;
+    }
+    // ── Замена наследует подготовку родителя ──
+    rig.clean().await;
+    {
     let _carrier = rig.carrier_session();
+    rig.set_budget(10_000_000).await;
     let prepare = Prepare {
         packages: vec!["jq".to_owned()],
         script: Some("echo prepared\n".to_owned()),
@@ -1993,7 +2005,47 @@ async fn a_replacement_inherits_the_prepare_of_its_parent() -> TestResult {
         Some(prepare),
         "the replacement takes the parent's approved preparation as is"
     );
+
+    }
+    // ── Перезапуск между отзывом и отсутствием выпускает задачу один раз ──
+    rig.clean().await;
+    {
+    let _carrier = rig.carrier_session();
+    rig.set_budget(10_000_000).await;
+    let t0 = now_micros();
+    let (id, session, at) = rig.drive_to_ready(120, t0).await;
+    let machine = rig.cloud_machine().await;
+    let job = rig.seed_running_sourced(machine, 0).await;
+    let stopped = rig.window(id).await.instance_id.unwrap();
+    rig.fake.control().preempt(&stopped);
+    let seen = at + TimeDelta::seconds(30);
+    rig.tick(seen).await;
+    drop(session);
+    assert_eq!(rig.job_triple(job).await.0, "retry_pending");
+    // Хаб перезапустился между отзывом и подтверждённым отсутствием: память пуста, база та же.
+    let restarted = rig.restarted();
+    let end = seen + TimeDelta::seconds(10);
+    restarted.tick(end).await;
+    assert_eq!(rig.window(id).await.state, "ended");
+    assert_eq!(
+        rig.job_triple(job).await,
+        ("waiting_runner".to_owned(), 2, 1)
+    );
+    let replacements = rig.replacements_of(id).await;
+    assert_eq!(replacements.len(), 1);
+    assert_eq!(
+        replacements[0].hard_cap_at,
+        rig.window(id).await.hard_cap_at
+    );
+    // Повторный проход ничего не выпускает второй раз.
+    restarted.tick(end + TimeDelta::seconds(10)).await;
+    assert_eq!(
+        rig.job_triple(job).await,
+        ("waiting_runner".to_owned(), 2, 1)
+    );
+    assert_eq!(rig.replacements_of(id).await.len(), 1);
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -2056,9 +2108,10 @@ async fn a_replacement_is_never_replaced_and_its_retried_job_is_lost() -> TestRe
 }
 
 #[tokio::test]
-async fn a_canceled_job_is_not_retried_after_preemption() -> TestResult {
+async fn a_replacement_is_skipped_for_no_job_map_or_time_reasons() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     enable_pushes(&rig.pool).await;
     rig.set_budget(10_000_000).await;
     let _carrier = rig.carrier_session();
@@ -2087,14 +2140,12 @@ async fn a_canceled_job_is_not_retried_after_preemption() -> TestResult {
         vec!["preempted", "replacement_skipped"]
     );
     assert_eq!(rig.last_skip_reason().await, "no_waiting_job");
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_broken_vm_gets_no_retry_and_no_replacement() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig_with(pool, |config| config.preemptible = false).await;
-    enable_pushes(&rig.pool).await;
+    }
+    // ── Поломка: ни повтора, ни замены ──
+    rig.clean().await;
+    {
+    let rig = rig_with(rig.pool.clone(), |config| config.preemptible = false).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let (id, session, at) = rig.drive_to_ready(120, t0).await;
@@ -2119,14 +2170,12 @@ async fn a_broken_vm_gets_no_retry_and_no_replacement() -> TestResult {
     assert_eq!(rig.window(id).await.state, "ended");
     assert!(rig.replacements_of(id).await.is_empty());
     assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
-    Ok(())
-}
 
-#[tokio::test]
-async fn the_budget_refuses_the_replacement_without_over_budget_consent() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
-    enable_pushes(&rig.pool).await;
+    }
+    // ── Бюджет: замены без согласия на перерасход нет ──
+    let pool = rig.pool.clone();
+    rig.clean().await;
+    let rig = rig_with(pool.clone(), |_| {}).await;
     let _carrier = rig.carrier_session();
     // Бюджета хватает ровно на резерв родителя: после его конца на замену уже нет.
     let reservation = rig.reservation(120);
@@ -2157,16 +2206,13 @@ async fn the_budget_refuses_the_replacement_without_over_budget_consent() -> Tes
         "{codes:?}"
     );
     assert_eq!(rig.last_skip_reason().await, "budget");
-    Ok(())
-}
 
-#[tokio::test]
-async fn too_little_time_to_the_parent_deadline_skips_the_replacement() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
-    enable_pushes(&rig.pool).await;
-    rig.set_budget(10_000_000).await;
+    // ── До предела родителя мало времени: замену не поднимаем ──
+    rig.clean().await;
+    {
+    let rig = rig_with(pool.clone(), |_| {}).await;
     let _carrier = rig.carrier_session();
+    rig.set_budget(10_000_000).await;
     let t0 = now_micros();
     let (id, session, _at) = rig.drive_to_ready(60, t0).await;
     let machine = rig.cloud_machine().await;
@@ -2192,6 +2238,7 @@ async fn too_little_time_to_the_parent_deadline_skips_the_replacement() -> TestR
     );
     assert_eq!(rig.last_skip_reason().await, "no_time");
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -2327,50 +2374,6 @@ async fn a_retry_pending_job_without_a_preempted_window_is_lost_on_reconcile() -
 }
 
 #[tokio::test]
-async fn a_restart_between_revocation_and_absence_releases_the_job_once() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
-    enable_pushes(&rig.pool).await;
-    rig.set_budget(10_000_000).await;
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, session, at) = rig.drive_to_ready(120, t0).await;
-    let machine = rig.cloud_machine().await;
-    let job = rig.seed_running_sourced(machine, 0).await;
-    let stopped = rig.window(id).await.instance_id.unwrap();
-    rig.fake.control().preempt(&stopped);
-    let seen = at + TimeDelta::seconds(30);
-    rig.tick(seen).await;
-    drop(session);
-    assert_eq!(rig.job_triple(job).await.0, "retry_pending");
-
-    // Хаб перезапустился между отзывом и подтверждённым отсутствием: память пуста, база та же.
-    let restarted = rig.restarted();
-    let end = seen + TimeDelta::seconds(10);
-    restarted.tick(end).await;
-    assert_eq!(rig.window(id).await.state, "ended");
-    assert_eq!(
-        rig.job_triple(job).await,
-        ("waiting_runner".to_owned(), 2, 1)
-    );
-    let replacements = rig.replacements_of(id).await;
-    assert_eq!(replacements.len(), 1);
-    assert_eq!(
-        replacements[0].hard_cap_at,
-        rig.window(id).await.hard_cap_at
-    );
-
-    // Повторный проход ничего не выпускает второй раз.
-    restarted.tick(end + TimeDelta::seconds(10)).await;
-    assert_eq!(
-        rig.job_triple(job).await,
-        ("waiting_runner".to_owned(), 2, 1)
-    );
-    assert_eq!(rig.replacements_of(id).await.len(), 1);
-    Ok(())
-}
-
-#[tokio::test]
 async fn a_stop_after_an_owner_delete_never_rewrites_the_reason() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
@@ -2454,9 +2457,10 @@ async fn an_instance_that_vanished_goes_through_cleanup_and_ends_gone() -> TestR
 // ───────── Неопределённое создание и списки ─────────
 
 #[tokio::test]
-async fn an_ambiguous_create_is_found_by_name_and_is_never_posted_twice() -> TestResult {
+async fn an_ambiguous_create_is_found_by_name_or_fails_after_the_window() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     rig.fake.control().create = CreateMode::AcceptThenDrop;
     let t0 = now_micros();
     let id = rig.create(60).await;
@@ -2482,13 +2486,11 @@ async fn an_ambiguous_create_is_found_by_name_and_is_never_posted_twice() -> Tes
     assert!(window.instance_id.is_some());
     assert_eq!(rig.posts(), 1, "there is never a second POST");
     assert_eq!(rig.fake.instance_count(), 1);
-    Ok(())
-}
 
-#[tokio::test]
-async fn an_ambiguous_create_absent_from_full_listings_fails_after_the_window() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Машины нет ни в одном полном списке: окно закрывается нулём ──
+    rig.clean().await;
+    {
     rig.fake.control().create = CreateMode::unavailable();
     let t0 = now_micros();
     let id = rig.create(60).await;
@@ -2515,12 +2517,14 @@ async fn an_ambiguous_create_absent_from_full_listings_fails_after_the_window() 
     // После закрытия можно создать новое окно.
     rig.try_create(60).await.expect("the slot is free");
     Ok(())
+    }
 }
 
 #[tokio::test]
-async fn an_absence_timestamp_is_taken_after_the_listing_not_at_the_tick_start() -> TestResult {
+async fn an_absence_timestamp_is_taken_after_the_listing_that_confirmed_it() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     // Провайдер отвечает только после того, как тест отпустит запрос: проход уже давно начался.
     let t0 = now_micros();
     let id = raw_window(
@@ -2553,13 +2557,11 @@ async fn an_absence_timestamp_is_taken_after_the_listing_not_at_the_tick_start()
         "the disk end is not backdated to the tick start: {:?}",
         window.disk_gone_at
     );
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_vanished_instance_is_marked_gone_after_the_listing_that_confirmed_it() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Пропажа машины подтверждается списком, и метка не откатывается к началу прохода ──
+    rig.clean().await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let instance = rig.add_instance("placeholder");
@@ -2596,6 +2598,7 @@ async fn a_vanished_instance_is_marked_gone_after_the_listing_that_confirmed_it(
         window.server_gone_at
     );
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -2753,9 +2756,10 @@ async fn a_listing_gap_does_not_close_an_instance_that_still_answers() -> TestRe
 }
 
 #[tokio::test]
-async fn the_hard_cap_drains_cancels_then_bounds_teardown_and_deletes() -> TestResult {
+async fn the_hard_cap_drains_cancels_bounds_teardown_and_deletes() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let (id, _session, at) = rig.drive_to_ready(60, t0).await;
@@ -2827,13 +2831,11 @@ async fn the_hard_cap_drains_cancels_then_bounds_teardown_and_deletes() -> TestR
     assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
     assert!(window.final_cost_kopecks.unwrap() > 2 * HOURLY);
     assert!(window.final_cost_kopecks.unwrap() <= window.reservation_kopecks);
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_draining_window_with_no_work_left_is_deleted_at_once() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── К концу доработки работы не осталось: окно уходит на снос сразу ──
+    rig.clean().await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let (id, _session, _) = rig.drive_to_ready(60, t0).await;
@@ -2847,6 +2849,7 @@ async fn a_draining_window_with_no_work_left_is_deleted_at_once() -> TestResult 
         Some("drained")
     );
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -2888,7 +2891,7 @@ async fn a_delete_requires_the_expected_name_and_the_folder_of_the_window() -> T
     let pool = canterlot_hub::testkit::db().await;
     // Прямой ответ отдаёт не то имя, что у окна: DELETE нет, окно живо, пуш владельцу.
     {
-        let rig = rig(pool.clone()).await;
+        let rig = rig_with(pool.clone(), |_| {}).await;
         enable_pushes(&rig.pool).await;
         let now = now_micros();
         let instance = rig.add_instance("someone-else");
@@ -2923,7 +2926,7 @@ async fn a_delete_requires_the_expected_name_and_the_folder_of_the_window() -> T
     // Имя верное, но машина в другом каталоге: её нет в полном списке каталога окна, а
     // прямой ответ называет чужой каталог.
     {
-        let rig = rig(pool.clone()).await;
+        let rig = rig_with(pool.clone(), |_| {}).await;
         enable_pushes(&rig.pool).await;
         let now = now_micros();
         let instance = rig.add_instance("placeholder");
@@ -2955,7 +2958,7 @@ async fn a_delete_requires_the_expected_name_and_the_folder_of_the_window() -> T
 
     // Имя верное и машина в своём каталоге: обычное удаление.
     {
-        let rig = rig(pool.clone()).await;
+        let rig = rig_with(pool.clone(), |_| {}).await;
         let now = now_micros();
         let instance = rig.add_instance("placeholder");
         let id = raw_window(
@@ -2984,9 +2987,10 @@ async fn a_delete_requires_the_expected_name_and_the_folder_of_the_window() -> T
 }
 
 #[tokio::test]
-async fn a_direct_404_alone_never_confirms_absence() -> TestResult {
+async fn a_delete_is_confirmed_only_by_a_full_listing_and_retries_failures() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     let now = now_micros();
     let instance = rig.add_instance("placeholder");
     let id = raw_window(
@@ -3021,14 +3025,11 @@ async fn a_direct_404_alone_never_confirms_absence() -> TestResult {
     assert!(window.server_gone_at.is_none());
     assert_eq!(rig.fake.instance_count(), 1);
     assert_eq!(rig.deletes(), 0);
-    Ok(())
-}
 
-#[tokio::test]
-async fn repeated_lookup_failures_count_as_delete_failures_and_alert() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
-    enable_pushes(&rig.pool).await;
+    }
+    // ── Три неудачи точечного ответа: откат и пуш ──
+    rig.clean().await;
+    {
     let now = now_micros();
     let instance = rig.add_instance("placeholder");
     let id = raw_window(
@@ -3085,13 +3086,11 @@ async fn repeated_lookup_failures_count_as_delete_failures_and_alert() -> TestRe
     // Провайдер отвечает: обычное удаление и конец окна.
     rig.tick(now + TimeDelta::minutes(10)).await;
     assert_eq!(rig.state(id).await, "ended");
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_confirmed_absence_skips_the_delete_call() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Подтверждённое отсутствие: DELETE не нужен вовсе ──
+    rig.clean().await;
+    {
     let now = now_micros();
     let id = raw_window(
         &rig.pool,
@@ -3120,12 +3119,14 @@ async fn a_confirmed_absence_skips_the_delete_call() -> TestResult {
         "the instance is not even looked up"
     );
     Ok(())
+    }
 }
 
 #[tokio::test]
-async fn an_instance_deleted_by_hand_while_the_delete_is_failing_ends_the_window() -> TestResult {
+async fn a_failing_delete_retries_and_a_hand_deleted_instance_ends_the_window() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let (id, when) = drive_to_deleting(&rig, t0).await;
@@ -3141,19 +3142,15 @@ async fn an_instance_deleted_by_hand_while_the_delete_is_failing_ends_the_window
     rig.tick(when + TimeDelta::minutes(6)).await;
     assert_eq!(rig.state(id).await, "ended");
     assert_eq!(rig.deletes(), 1, "no second DELETE for an absent instance");
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_failing_delete_retries_with_backoff_and_alerts_after_three_failures() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
-    enable_pushes(&rig.pool).await;
+    }
+    // ── Повторы с откатом и пуш после третьей неудачи ──
+    rig.clean().await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let (id, when) = drive_to_deleting(&rig, t0).await;
     rig.fake.control().delete_status = Some(500);
-
     rig.tick(when + TimeDelta::seconds(1)).await;
     assert_eq!(rig.deletes(), 1);
     // Повтор не раньше паузы.
@@ -3170,25 +3167,25 @@ async fn a_failing_delete_retries_with_backoff_and_alerts_after_three_failures()
     assert_eq!(rig.window(id).await.delete_attempts, 3);
     assert_eq!(rig.alert_codes().await, vec!["delete_failing"]);
     assert_eq!(rig.state(id).await, "deleting");
-
     // Дальше ретраи идут, а пуш раз в 30 минут.
     rig.tick(when + TimeDelta::minutes(12)).await;
     assert!(rig.deletes() >= 4);
     assert_eq!(rig.alerts().await.len(), 1, "same half hour, same alert");
     rig.tick(when + TimeDelta::minutes(35)).await;
     assert_eq!(rig.alerts().await.len(), 2);
-
     // Провайдер ожил: удаление проходит.
     rig.fake.control().delete_status = None;
     rig.tick(when + TimeDelta::minutes(50)).await;
     assert_eq!(rig.state(id).await, "ended");
     Ok(())
+    }
 }
 
 #[tokio::test]
-async fn an_accepted_delete_is_confirmed_only_by_absence_from_a_full_listing() -> TestResult {
+async fn an_accepted_delete_is_confirmed_only_by_absence_and_retried() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -3234,13 +3231,11 @@ async fn an_accepted_delete_is_confirmed_only_by_absence_from_a_full_listing() -
     assert_eq!(window.state, "ended");
     // Оплата идёт до подтверждённого исчезновения, а не до принятого удаления.
     assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_failed_delete_operation_is_retried_after_a_fresh_ownership_check() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Неудачная операция удаления: откат и новая проверка принадлежности ──
+    rig.clean().await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let (id, when) = drive_to_deleting(&rig, t0).await;
@@ -3267,6 +3262,7 @@ async fn a_failed_delete_operation_is_retried_after_a_fresh_ownership_check() ->
     assert!(rig.fake.control().count("GET", "/compute/v1/instances/") > lookups);
     assert_eq!(rig.state(id).await, "ended");
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -3330,9 +3326,10 @@ async fn a_boot_disk_that_outlives_the_instance_is_deleted_before_the_window_end
 }
 
 #[tokio::test]
-async fn a_disk_is_deleted_only_under_the_window_name_and_only_when_detached() -> TestResult {
+async fn a_disk_is_deleted_only_under_the_window_name_when_detached_and_unique() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     enable_pushes(&rig.pool).await;
     let now = now_micros();
     // Машины окна уже нет, а диск с номером из строки окна носит чужое имя.
@@ -3384,16 +3381,16 @@ async fn a_disk_is_deleted_only_under_the_window_name_and_only_when_detached() -
     rig.tick(now + TimeDelta::minutes(32)).await;
     assert_eq!(rig.disk_deletes(), 1);
     assert_eq!(rig.state(id).await, "ended");
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_disk_is_adopted_by_its_name_only_when_exactly_one_matches() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+    }
+    // ── Диск без номера ищется по имени и только при единственном совпадении ──
+    rig.clean().await;
+    {
+    let pool = rig.pool.clone();
     // Без сохранённого номера диск ищется по имени, а имя не доказывает принадлежность: два
     // диска с именем окна — неоднозначность, и удалять первый из них нельзя.
     {
-        let rig = rig(pool.clone()).await;
+        let rig = rig_with(pool.clone(), |_| {}).await;
         let now = now_micros();
         let id = raw_window(
             &rig.pool,
@@ -3427,7 +3424,7 @@ async fn a_disk_is_adopted_by_its_name_only_when_exactly_one_matches() -> TestRe
 
     // Сохранённый номер главнее имени: диск с другим номером под тем же именем не наш.
     {
-        let rig = rig(pool.clone()).await;
+        let rig = rig_with(pool.clone(), |_| {}).await;
         let now = now_micros();
         let other = rig.fake.control().add_stray_disk("placeholder");
         let id = raw_window(
@@ -3458,6 +3455,7 @@ async fn a_disk_is_adopted_by_its_name_only_when_exactly_one_matches() -> TestRe
         assert_eq!(window.boot_disk_id.as_deref(), Some("fhmfakedisknotours"));
     }
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -3465,7 +3463,7 @@ async fn a_name_only_instance_recovery_requires_exactly_one_match() -> TestResul
     let pool = canterlot_hub::testkit::db().await;
     // Номера машины нет: снос ищет её по имени. Две машины с именем окна — неоднозначность.
     {
-        let rig = rig(pool.clone()).await;
+        let rig = rig_with(pool.clone(), |_| {}).await;
         let now = now_micros();
         let id = raw_window(
             &rig.pool,
@@ -3500,7 +3498,7 @@ async fn a_name_only_instance_recovery_requires_exactly_one_match() -> TestResul
     // Диск подключён, а машина окна ищется по имени: две машины с этим именем — не повод
     // вернуть снос к любой из них.
     {
-        let rig = rig(pool.clone()).await;
+        let rig = rig_with(pool.clone(), |_| {}).await;
         let now = now_micros();
         let id = raw_window(
             &rig.pool,
@@ -3549,10 +3547,11 @@ fn stray_name() -> String {
 }
 
 #[tokio::test]
-async fn reconcile_deletes_a_stray_instance_and_a_stray_disk_and_touches_nothing_else() -> TestResult
+async fn reconcile_deletes_only_its_strays_and_reports_stuck_disks() -> TestResult
 {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     enable_pushes(&rig.pool).await;
     let stray = stray_name();
     let stray_disk_name = stray_name();
@@ -3610,14 +3609,11 @@ async fn reconcile_deletes_a_stray_instance_and_a_stray_disk_and_touches_nothing
         .unwrap();
     assert_eq!(disk_alert["name"], stray_disk_name);
     assert_eq!(disk_alert["disk_id"], lone_disk);
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_stray_disk_that_cannot_be_deleted_alerts_and_an_attached_one_waits() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
-    enable_pushes(&rig.pool).await;
+    }
+    // ── Брошенный диск: неудача — пуш, подключённый ждёт ──
+    rig.clean().await;
+    {
     let lone = rig.fake.control().add_stray_disk(&stray_name());
     // Диск с именем окна, которого нет, но подключённый к чужой машине: неоднозначно.
     let attached = rig.fake.control().add_stray_disk(&stray_name());
@@ -3643,6 +3639,7 @@ async fn a_stray_disk_that_cannot_be_deleted_alerts_and_an_attached_one_waits() 
         vec!["stray_disk_stuck", "stray_disk_deleted"]
     );
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -3693,9 +3690,10 @@ async fn a_late_instance_of_a_failed_window_reopens_it_as_late_cleanup() -> Test
 }
 
 #[tokio::test]
-async fn a_late_disk_reopens_its_closed_window_and_is_billed_to_it() -> TestResult {
+async fn a_late_disk_reopens_its_window_and_is_billed_to_it() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -3766,13 +3764,11 @@ async fn a_late_disk_reopens_its_closed_window_and_is_billed_to_it() -> TestResu
         rig.alert_codes().await
     );
     rig.try_create(60).await.expect("the slot is free again");
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_late_disk_of_a_failed_window_is_cleaned_and_makes_it_cost() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Поздний диск неудавшегося окна убирается и делает окно платным ──
+    rig.clean().await;
+    {
     let t0 = now_micros();
     rig.fake.control().create = CreateMode::unavailable();
     let id = rig.create(60).await;
@@ -3797,12 +3793,14 @@ async fn a_late_disk_of_a_failed_window_is_cleaned_and_makes_it_cost() -> TestRe
         Some(price::ledger_kopecks(COMPUTE, DISK, t0, failed_at, end)?)
     );
     Ok(())
+    }
 }
 
 #[tokio::test]
-async fn a_folder_change_keeps_cleaning_the_old_folder() -> TestResult {
+async fn a_folder_change_keeps_cleaning_the_old_folder_and_finds_its_late_disks() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -3867,14 +3865,11 @@ async fn a_folder_change_keeps_cleaning_the_old_folder() -> TestResult {
     let window = rig.window(orphan).await;
     assert_eq!(window.state, "identified");
     assert_eq!(window.instance_id.as_deref(), Some(late.as_str()));
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_late_disk_in_a_historical_folder_is_found_after_a_folder_change() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
-    enable_pushes(&rig.pool).await;
+    }
+    // ── Поздний диск прежнего каталога находится после смены конфигурации ──
+    rig.clean().await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     // Обычное окно прежнего каталога, законченное до смены конфигурации.
@@ -3884,7 +3879,6 @@ async fn a_late_disk_in_a_historical_folder_is_found_after_a_folder_change() -> 
     let ended = at + TimeDelta::seconds(1);
     rig.tick(ended).await;
     assert_eq!(rig.state(id).await, "ended");
-
     // Каталог в конфигурации сменился, хаб перезапущен, а в прежнем каталоге появился диск
     // с именем законченного окна. Его окно уже `ended`, но вызов создания был.
     let mut changed = rig.config.clone();
@@ -3902,6 +3896,7 @@ async fn a_late_disk_in_a_historical_folder_is_found_after_a_folder_change() -> 
     assert!(!rig.fake.control().disks.contains_key(&disk));
     assert_eq!(rig.alert_codes().await, vec!["late_disk"]);
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -3977,9 +3972,10 @@ async fn an_open_late_cleanup_blocks_new_creates() -> TestResult {
 }
 
 #[tokio::test]
-async fn a_stray_that_cannot_be_deleted_alerts_every_half_hour() -> TestResult {
+async fn a_stuck_stray_alerts_every_half_hour_and_only_a_matching_name_is_deleted() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     enable_pushes(&rig.pool).await;
     rig.add_instance(&stray_name());
     rig.fake.control().delete_status = Some(500);
@@ -3994,14 +3990,11 @@ async fn a_stray_that_cannot_be_deleted_alerts_every_half_hour() -> TestResult {
     // Через 40 минут слот другой: пуш повторяется.
     again.tick(t0 + TimeDelta::minutes(40)).await;
     assert_eq!(rig.alerts().await.len(), 2);
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_stray_is_deleted_only_when_the_direct_get_shows_its_own_name() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
-    enable_pushes(&rig.pool).await;
+    }
+    // ── Прямой ответ называет чужое имя: не удаляем ──
+    rig.clean().await;
+    {
     rig.add_instance(&stray_name());
     // Номер в списке, но прямой ответ называет другую машину: номер мог достаться чужой.
     rig.fake.control().get_name_override = Some("someone-else".to_owned());
@@ -4022,6 +4015,7 @@ async fn a_stray_is_deleted_only_when_the_direct_get_shows_its_own_name() -> Tes
     assert_eq!(rig.fake.instance_count(), 0);
     assert_eq!(rig.deletes(), 1);
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -4070,9 +4064,10 @@ async fn a_folder_listing_failure_does_not_stop_another_folder() -> TestResult {
 }
 
 #[tokio::test]
-async fn reconcile_runs_at_start_before_any_create() -> TestResult {
+async fn reconcile_runs_before_any_create_and_gates_the_create() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     rig.add_instance(&stray_name());
     let id = rig.create(60).await;
     rig.tick(now_micros()).await;
@@ -4098,13 +4093,11 @@ async fn reconcile_runs_at_start_before_any_create() -> TestResult {
         first_delete < first_post,
         "the stray goes before any create"
     );
-    Ok(())
-}
 
-#[tokio::test]
-async fn without_a_successful_reconcile_nothing_is_created() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Без удачной сверки создание не начинается ──
+    rig.clean().await;
+    {
     rig.fake.control().list_fail_page = Some(FailPage {
         list: "disks",
         page: 0,
@@ -4123,6 +4116,7 @@ async fn without_a_successful_reconcile_nothing_is_created() -> TestResult {
     assert_eq!(rig.state(id).await, "identified");
     assert_eq!(rig.posts(), 1);
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -4437,6 +4431,7 @@ async fn a_hub_restart_resumes_windows_in_every_state() -> TestResult {
 async fn the_cloud_row_is_reused_reactivated_on_attach_and_revoked_at_the_end() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let id = rig.create(120).await;
@@ -4541,13 +4536,11 @@ async fn the_cloud_row_is_reused_reactivated_on_attach_and_revoked_at_the_end() 
         .fetch_one(&rig.pool)
         .await?;
     assert_eq!(rows, 1);
-    Ok(())
-}
 
-#[tokio::test]
-async fn static_runners_keep_their_token_flags() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Отозванный статический раннер не оживает запросом токена ──
+    rig.clean().await;
+    {
     let spec = machines::RunnerSpec {
         parent: rig.carrier,
         root_dir: "/srv/runner".into(),
@@ -4563,6 +4556,7 @@ async fn static_runners_keep_their_token_flags() -> TestResult {
         Err(RunnerRefusal::Revoked)
     );
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -4623,9 +4617,10 @@ async fn attach_runner_is_a_machine_level_command_only_with_runners_v1() {
 // ───────── Простой и отключение ─────────
 
 #[tokio::test]
-async fn idle_counts_running_queued_and_takeable_waiting_jobs() -> TestResult {
+async fn idle_counts_only_takeable_work_and_the_cloud_row_is_a_cloud_placement() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let (id, _session, at) = rig.drive_to_ready(240, t0).await;
@@ -4664,20 +4659,17 @@ async fn idle_counts_running_queued_and_takeable_waiting_jobs() -> TestResult {
     assert_eq!(rig.state(id).await, "ready");
     rig.tick(at + TimeDelta::minutes(75)).await;
     assert_eq!(rig.state(id).await, "deleting");
-    Ok(())
-}
 
-#[tokio::test]
-async fn idle_ignores_work_the_cloud_runner_cannot_take() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Работа, которую облако не возьмёт, простоем не считается ──
+    rig.clean().await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let (id, _session, at) = rig.drive_to_ready(240, t0).await;
     let waiting = rig
         .seed_waiting_job(&["cloud", "kernel-6.12"], &["runner"], None)
         .await;
-
     // Только `runner`: облачный раннер такой заказ не возьмёт, это простой.
     rig.tick(at + TimeDelta::minutes(1)).await;
     assert!(
@@ -4702,13 +4694,11 @@ async fn idle_ignores_work_the_cloud_runner_cannot_take() -> TestResult {
         .await?;
     rig.tick(at + TimeDelta::minutes(4)).await;
     assert!(rig.window(id).await.idle_since.is_none());
-    Ok(())
-}
 
-#[tokio::test]
-async fn the_cloud_row_is_placement_kind_cloud() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Облачная машина — вид места `cloud`, а не `runner` ──
+    rig.clean().await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let (_id, _session, _at) = rig.drive_to_ready(240, t0).await;
@@ -4720,7 +4710,6 @@ async fn the_cloud_row_is_placement_kind_cloud() -> TestResult {
     .bind(machine)
     .execute(&rig.pool)
     .await?;
-
     let cloud_job = rig.seed_sourced_waiting(&["cloud"], &["cloud"]).await;
     let runner_job = rig.seed_sourced_waiting(&["cloud"], &["runner"]).await;
     let placed = place::place_carrier(&rig.pool, &rig.registry, rig.carrier).await?;
@@ -4737,6 +4726,7 @@ async fn the_cloud_row_is_placement_kind_cloud() -> TestResult {
         .await?;
     assert_eq!(bound, Some(machine));
     Ok(())
+    }
 }
 
 #[tokio::test]
@@ -4744,6 +4734,7 @@ async fn a_disconnected_runner_is_deleted_after_ten_minutes_only_while_the_carri
 -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     let carrier = rig.carrier_session();
     let t0 = now_micros();
     let (id, session, at) = rig.drive_to_ready(240, t0).await;
@@ -4769,13 +4760,11 @@ async fn a_disconnected_runner_is_deleted_after_ten_minutes_only_while_the_carri
     rig.tick(at + TimeDelta::minutes(12)).await;
     let second = rig.create(240).await;
     assert_eq!(rig.state(second).await, "create_intent");
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_disconnected_runner_with_a_disconnected_carrier_is_not_deleted() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Несущая без связи: отключённость раннера ничего не доказывает ──
+    rig.clean().await;
+    {
     let carrier = rig.carrier_session();
     let t0 = now_micros();
     let (id, session, at) = rig.drive_to_ready(240, t0).await;
@@ -4795,12 +4784,14 @@ async fn a_disconnected_runner_with_a_disconnected_carrier_is_not_deleted() -> T
     rig.tick(at + TimeDelta::minutes(52)).await;
     assert_eq!(rig.state(id).await, "deleting");
     Ok(())
+    }
 }
 
 #[tokio::test]
-async fn the_runner_that_never_connects_is_deleted_after_the_ready_timeout() -> TestResult {
+async fn a_runner_that_never_connects_or_loses_its_carrier_gets_no_attach() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let id = rig.create(120).await;
@@ -4819,13 +4810,11 @@ async fn the_runner_that_never_connects_is_deleted_after_the_ready_timeout() -> 
     .fetch_one(&rig.pool)
     .await?;
     assert_eq!(pending, 0);
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_machine_that_is_not_a_carrier_gets_no_attach_command() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Машина потеряла роль несущей до подключения: команды нет ──
+    rig.clean().await;
+    {
     let t0 = now_micros();
     // Окно создаётся при живой несущей, а теряет её до подключения.
     let id = rig.create(120).await;
@@ -4842,6 +4831,7 @@ async fn a_machine_that_is_not_a_carrier_gets_no_attach_command() -> TestResult 
             .await?;
     assert_eq!(sent, 0);
     Ok(())
+    }
 }
 
 // ───────── Удалить сейчас ─────────
@@ -5062,9 +5052,10 @@ fn set_vcpu_price(rig: &Rig, price: &str) {
 }
 
 #[tokio::test]
-async fn a_stale_quote_that_would_grow_the_reservation_cancels_the_create() -> TestResult {
+async fn a_stale_quote_is_rechecked_and_repriced_before_the_create() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
+    {
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -5086,13 +5077,11 @@ async fn a_stale_quote_that_would_grow_the_reservation_cancels_the_create() -> T
         "{:?}",
         rig.alert_codes().await
     );
-    Ok(())
-}
 
-#[tokio::test]
-async fn a_stale_quote_is_replaced_by_the_new_lower_price() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let rig = rig(pool).await;
+    }
+    // ── Цена упала: одобренный потолок снижается, вызов идёт по новой цене ──
+    rig.clean().await;
+    {
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let id = rig.create(60).await;
@@ -5118,6 +5107,7 @@ async fn a_stale_quote_is_replaced_by_the_new_lower_price() -> TestResult {
     );
     assert_eq!(window.reservation_kopecks, 3 * (878 + DISK));
     Ok(())
+    }
 }
 
 #[derive(Clone, Default)]

@@ -383,6 +383,11 @@ pub struct FakeState {
 }
 
 impl FakeState {
+    /// Пустой каталог и ручки по умолчанию: чистое облако между случаями табличного теста.
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
     fn new() -> Self {
         Self {
             folder_id: FOLDER.to_owned(),
