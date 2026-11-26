@@ -12,21 +12,40 @@ pub struct ProcessGuard {
     executable: PathBuf,
 }
 
+/// Бинарник воркера для двойника CLI. Порядок: явная подмена
+/// `CANTERLOT_E2E_SUPERVISOR_BIN`, путь от cargo этому тестовому бинарнику
+/// (`CARGO_BIN_EXE_canterlot-worker` в окружении или на этапе компиляции), затем
+/// `CARGO_TARGET_DIR` и `<repo>/target`. Внешний каталог сборки — обычный случай
+/// сессий canterlot, и символическая ссылка `target` им больше не нужна.
+fn supervisor_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("CANTERLOT_E2E_SUPERVISOR_BIN") {
+        return fs::canonicalize(path).expect("CANTERLOT_E2E_SUPERVISOR_BIN points to no binary");
+    }
+    let from_cargo = std::env::var_os("CARGO_BIN_EXE_canterlot-worker")
+        .map(PathBuf::from)
+        .or_else(|| option_env!("CARGO_BIN_EXE_canterlot-worker").map(PathBuf::from));
+    let from_target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(|dir| PathBuf::from(dir).join("debug").join("canterlot-worker"));
+    let repo_target =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/canterlot-worker");
+    for candidate in from_cargo
+        .into_iter()
+        .chain(from_target_dir)
+        .chain([repo_target])
+    {
+        if let Ok(path) = fs::canonicalize(candidate) {
+            return path;
+        }
+    }
+    panic!("worker binary not found: set CARGO_TARGET_DIR or CANTERLOT_E2E_SUPERVISOR_BIN");
+}
+
 impl ProcessGuard {
     #[allow(dead_code)] // Не каждый модуль, включивший помощник, сам запускает CLI.
     pub fn new(root: &Path) -> Self {
-        let executable = match std::env::var_os("CANTERLOT_E2E_SUPERVISOR_BIN") {
-            Some(path) => fs::canonicalize(path).unwrap(),
-            None => {
-                let own = fs::canonicalize(env!("CARGO_BIN_EXE_canterlot-worker")).unwrap();
-                let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
-                assert!(own.starts_with(fs::canonicalize(target).unwrap()));
-                own
-            }
-        };
         Self {
             root: root.to_path_buf(),
-            executable,
+            executable: supervisor_binary(),
         }
     }
 
