@@ -35,6 +35,8 @@ use tonic::{
 };
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 const WAIT: Duration = Duration::from_secs(10);
 const DAY: Duration = Duration::from_secs(86400);
 
@@ -352,9 +354,7 @@ fn set_mtime(path: &std::path::Path, hours_ago: u64) {
         .unwrap();
 }
 
-#[tokio::test]
-async fn shared_file_becomes_an_attachment_and_a_block_file() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn shared_file_becomes_an_attachment_and_a_block_file(pool: PgPool) {
     let mut f = Media::new(pool).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -435,9 +435,7 @@ async fn shared_file_becomes_an_attachment_and_a_block_file() {
     task.await.unwrap();
 }
 
-#[tokio::test]
-async fn media_retry_same_checksum_is_idempotent_and_other_checksum_conflicts() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn media_retry_same_checksum_is_idempotent_and_other_checksum_conflicts(pool: PgPool) {
     let mut f = Media::new(pool).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -512,9 +510,9 @@ async fn media_retry_same_checksum_is_idempotent_and_other_checksum_conflicts() 
     timeout(WAIT, task).await.unwrap().unwrap();
 }
 
-#[tokio::test]
-async fn crash_after_media_publish_before_commit_leaves_no_reference_and_retry_completes() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn crash_after_media_publish_before_commit_leaves_no_reference_and_retry_completes(
+    pool: PgPool,
+) {
     let mut f = Media::new(pool).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -564,9 +562,7 @@ async fn crash_after_media_publish_before_commit_leaves_no_reference_and_retry_c
     timeout(WAIT, task).await.unwrap().unwrap();
 }
 
-#[tokio::test]
-async fn put_media_validates_header_execution_and_content() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn put_media_validates_header_execution_and_content(pool: PgPool) {
     let mut f = Media::new(pool.clone()).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -680,9 +676,7 @@ async fn put_media_validates_header_execution_and_content() {
     timeout(WAIT, task).await.unwrap().unwrap();
 }
 
-#[tokio::test]
-async fn block_media_record_attaches_only_published_media_and_reaches_read_models() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn block_media_record_attaches_only_published_media_and_reaches_read_models(pool: PgPool) {
     let mut f = Media::new(pool.clone()).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -799,9 +793,7 @@ async fn block_media_record_attaches_only_published_media_and_reaches_read_model
     timeout(WAIT, task).await.unwrap().unwrap();
 }
 
-#[tokio::test]
-async fn media_download_has_safe_headers_and_owner_check() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn media_download_has_safe_headers_and_owner_check(pool: PgPool) {
     let mut f = Media::new(pool.clone()).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -885,9 +877,7 @@ async fn media_download_has_safe_headers_and_owner_check() {
     timeout(WAIT, task).await.unwrap().unwrap();
 }
 
-#[tokio::test]
-async fn media_download_is_immutable_and_supports_if_none_match() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn media_download_is_immutable_and_supports_if_none_match(pool: PgPool) {
     let mut f = Media::new(pool.clone()).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -933,9 +923,7 @@ async fn media_download_is_immutable_and_supports_if_none_match() {
     timeout(WAIT, task).await.unwrap().unwrap();
 }
 
-#[tokio::test]
-async fn media_download_answers_byte_ranges() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn media_download_answers_byte_ranges(pool: PgPool) {
     let mut f = Media::new(pool.clone()).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -1040,9 +1028,7 @@ fn real_png(width: u32, height: u32) -> Vec<u8> {
     bytes
 }
 
-#[tokio::test]
-async fn media_preview_serves_downscaled_jpeg_with_cache_headers() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn media_preview_serves_downscaled_jpeg_with_cache_headers(pool: PgPool) {
     let mut f = Media::new(pool.clone()).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -1098,9 +1084,7 @@ async fn media_preview_serves_downscaled_jpeg_with_cache_headers() {
     timeout(WAIT, task).await.unwrap().unwrap();
 }
 
-#[tokio::test]
-async fn media_preview_passes_animation_through_and_rejects_unknown() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn media_preview_passes_animation_through_and_rejects_unknown(pool: PgPool) {
     let mut f = Media::new(pool.clone()).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -1156,9 +1140,7 @@ async fn media_preview_passes_animation_through_and_rejects_unknown() {
     timeout(WAIT, task).await.unwrap().unwrap();
 }
 
-#[tokio::test]
-async fn gc_keeps_referenced_media_and_removes_unreferenced_after_grace() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn gc_keeps_referenced_media_and_removes_unreferenced_after_grace(pool: PgPool) {
     let mut f = Media::new(pool.clone()).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -1211,9 +1193,7 @@ async fn gc_keeps_referenced_media_and_removes_unreferenced_after_grace() {
 }
 
 #[cfg(feature = "fault-injection")]
-#[tokio::test]
-async fn media_uploads_are_limited_per_machine_and_one_body_per_id() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn media_uploads_are_limited_per_machine_and_one_body_per_id(pool: PgPool) {
     use canterlot_hub::fault_injection::{Faults, Point};
     let mut f = Media::new(pool).await;
     let faults = Faults::default();
@@ -1269,9 +1249,7 @@ async fn media_uploads_are_limited_per_machine_and_one_body_per_id() {
 /// Общий предел медиа одной машины: под пределом загрузка проходит, сверх — обычный отказ
 /// `INVALID_ARGUMENT` (воркер переводит его в причину `share_*`, а не в обрыв потока),
 /// удаление сохранённого медиа освобождает место.
-#[tokio::test]
-async fn media_quota_is_per_machine_and_freed_by_deletion() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn media_quota_is_per_machine_and_freed_by_deletion(pool: PgPool) {
     let mut f = Media::new(pool).await.quota(1024 * 1024);
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -1318,9 +1296,7 @@ async fn media_quota_is_per_machine_and_freed_by_deletion() {
 
 /// Предел по умолчанию выключен: недели уже собранного медиа не должны внезапно начать
 /// отказывать `share_file` и снимкам после обновления хаба.
-#[tokio::test]
-async fn media_quota_is_off_by_default() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn media_quota_is_off_by_default(pool: PgPool) {
     let mut f = Media::new(pool).await;
     assert_eq!(f.hub.media_quota_bytes, 0, "the default quota is off");
     let (mut client, stop, task) = server(f.hub.clone()).await;
@@ -1341,9 +1317,7 @@ async fn media_quota_is_off_by_default() {
 
 // Файл, который сборщик освободил, пока запись BlockFile ждала в журнале: его blob удалён,
 // поэтому поздняя ссылка не появляется, а строка без ссылки уходит вместе с вложением.
-#[tokio::test]
-async fn late_block_file_after_release_is_not_attached() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn late_block_file_after_release_is_not_attached(pool: PgPool) {
     let mut f = Media::new(pool.clone()).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -1416,9 +1390,7 @@ async fn late_block_file_after_release_is_not_attached() {
 /// Картинка и файл агента сданы на хаб, а запись журнала о них задержалась дольше
 /// отсрочки сборщика (журнал стоит на неприменённой записи либо машина сутки без связи).
 /// Пока исполнение живо, сборщик их не трогает: поздняя запись прикрепляет оба.
-#[tokio::test]
-async fn gc_keeps_agent_media_whose_journal_record_is_late() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn gc_keeps_agent_media_whose_journal_record_is_late(pool: PgPool) {
     let mut f = Media::new(pool.clone()).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -1491,9 +1463,7 @@ async fn gc_keeps_agent_media_whose_journal_record_is_late() {
 
 /// Хаб уже знает, что исполнение кончилось, но его журнал ещё не закрыт: записи в нём
 /// могут доигрываться. Сборщик ждёт закрытия журнала и только потом убирает брошенное.
-#[tokio::test]
-async fn gc_drops_unattached_agent_media_only_after_the_journal_is_closed() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn gc_drops_unattached_agent_media_only_after_the_journal_is_closed(pool: PgPool) {
     let mut f = Media::new(pool.clone()).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -1579,9 +1549,7 @@ fn share_header(
 /// Пустой файл агента: blob нулевой длины с SHA-256 пустого ввода, готовое вложение, строка
 /// `block_files`, файл в ленте и скачивание `200` с `Content-Length: 0`. Второй пустой файл
 /// с тем же checksum — отдельное вложение.
-#[tokio::test]
-async fn empty_shared_file_is_a_zero_byte_attachment() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn empty_shared_file_is_a_zero_byte_attachment(pool: PgPool) {
     let mut f = Media::new(pool).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -1646,9 +1614,7 @@ async fn empty_shared_file_is_a_zero_byte_attachment() {
 }
 
 /// Отказ хаба называет причину в сообщении статуса: воркер переводит её в свой `share_*`.
-#[tokio::test]
-async fn share_refusals_carry_a_specific_reason() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn share_refusals_carry_a_specific_reason(pool: PgPool) {
     let mut f = Media::new(pool).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     let block = f.tool_block().await;
@@ -1722,4 +1688,45 @@ async fn share_refusals_carry_a_specific_reason() {
     }
     stop.cancel();
     task.await.unwrap();
+}
+
+/// Медиа агента: файл становится вложением, повтор и конфликт контрольной суммы,
+/// сбой до фиксации, проверки загрузки, выдача, диапазоны, превью.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn media_upload_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        shared_file_becomes_an_attachment_and_a_block_file,
+        media_retry_same_checksum_is_idempotent_and_other_checksum_conflicts,
+        crash_after_media_publish_before_commit_leaves_no_reference_and_retry_completes,
+        put_media_validates_header_execution_and_content,
+        block_media_record_attaches_only_published_media_and_reaches_read_models,
+        media_download_has_safe_headers_and_owner_check,
+        media_download_is_immutable_and_supports_if_none_match,
+        media_download_answers_byte_ranges,
+        media_preview_serves_downscaled_jpeg_with_cache_headers,
+        media_preview_passes_animation_through_and_rejects_unknown,
+    );
+}
+
+/// Сборка мусора медиа, лимиты загрузок и квоты машины, поздний файл блока,
+/// пустой файл и причины отказа.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn media_gc_and_quota_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        gc_keeps_referenced_media_and_removes_unreferenced_after_grace,
+        media_uploads_are_limited_per_machine_and_one_body_per_id,
+        media_quota_is_per_machine_and_freed_by_deletion,
+        media_quota_is_off_by_default,
+        late_block_file_after_release_is_not_attached,
+        gc_keeps_agent_media_whose_journal_record_is_late,
+        gc_drops_unattached_agent_media_only_after_the_journal_is_closed,
+        empty_shared_file_is_a_zero_byte_attachment,
+        share_refusals_carry_a_specific_reason,
+    );
 }
