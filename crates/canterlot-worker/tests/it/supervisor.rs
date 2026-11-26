@@ -2724,6 +2724,128 @@ async fn run_finished_has_no_git_facts_without_the_capability() {
     harness.shutdown().await;
 }
 
+/// Факты git конечного состояния: их несёт только конец исполнения с открытым ходом.
+fn terminal_git(bodies: &[Body]) -> Option<canterlot_proto::worker::v1::GitFacts> {
+    bodies.iter().find_map(|b| match b {
+        Body::ExecutionState(f) if f.state == "stopped" || f.state == "failed" => {
+            Some(f.interrupted_git.clone())
+        }
+        _ => None,
+    })?
+}
+
+fn journal_closed(bodies: &[Body]) -> bool {
+    bodies.iter().any(|b| matches!(b, Body::JournalClosed(_)))
+}
+
+// CLI умер посреди хода после коммита и с грязным файлом: RunFinished не будет, а факты git
+// хода приходят с конечным состоянием, после выхода всей группы процессов.
+#[tokio::test]
+async fn cli_death_mid_turn_reports_git_facts_with_the_terminal_state() {
+    let mut harness = Harness::start(&[]).await;
+    let root = harness._root.path().to_path_buf();
+    git_in(&root, &["init", "-q", "-b", "main"]);
+    // Шаг git_commit делает `add -A`: каталог исполнения и журналы стенда в копию не идут.
+    std::fs::write(root.join(".gitignore"), "*\n!*.txt\n!.gitignore\n").unwrap();
+    std::fs::write(root.join("base.txt"), "base").unwrap();
+    git_in(&root, &["add", ".gitignore", "base.txt"]);
+    git_in(&root, &["commit", "-q", "-m", "base"]);
+    let base = git_in(&root, &["rev-parse", "HEAD"]);
+    harness.attach_and_ship(0).await;
+    harness.start_cli_session_tools(true).await;
+    let id = Uuid::now_v7();
+    harness
+        .deliver(
+            id,
+            1,
+            &script(
+                r#"{"delta":"partial"},
+                {"git_commit":{"path":"work.txt","content":"work","subject":"work before the crash"}},
+                {"write_file":{"path":"dirty.txt","content":"dirty"}},
+                {"exit":3}"#,
+            ),
+        )
+        .await;
+    let bodies = harness.wait_records("closed", journal_closed).await;
+    assert!(!run_finished(&bodies, id), "the dead CLI ended no turn");
+    let stopping = index(&bodies, |b| state(b, "stopping")).unwrap();
+    let terminal = index(
+        &bodies,
+        |b| matches!(b, Body::ExecutionState(f) if f.state == "failed" && f.outcome == "crashed"),
+    )
+    .expect("terminal state");
+    assert!(stopping < terminal);
+    let facts = terminal_git(&bodies).expect("git facts of the interrupted turn");
+    assert!(facts.available);
+    assert_eq!(facts.head_before, base);
+    assert_eq!(facts.head_after, git_in(&root, &["rev-parse", "HEAD"]));
+    assert_eq!(facts.commits.len(), 1);
+    assert_eq!(facts.commits[0].subject, "work before the crash");
+    assert_eq!(facts.files.len(), 1);
+    assert_eq!(facts.files[0].path, "work.txt");
+    assert!(facts.dirty, "dirty.txt is uncommitted");
+    assert!(harness.wait_exit().await.success());
+}
+
+// Зависший git не держит конец исполнения: сбор ограничен тем же сроком, что у конца хода,
+// а фактов нет вовсе (хаб оставляет строку «unknown»).
+#[tokio::test]
+async fn hung_git_does_not_hold_the_terminal_state_of_a_dead_cli() {
+    let bin = TempDir::new().unwrap();
+    let fake = bin.path().join("git");
+    std::fs::write(&fake, "#!/bin/sh\nexec sleep 600\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut harness = Harness::start(&[("PATH", &path)]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli_session_tools(true).await;
+    let id = Uuid::now_v7();
+    harness
+        .deliver(id, 1, &script(r#"{"delta":"partial"},{"exit":3}"#))
+        .await;
+    let bodies = harness.wait_records("closed", journal_closed).await;
+    assert!(
+        bodies.iter().any(
+            |b| matches!(b, Body::ExecutionState(f) if f.state == "failed" && f.outcome == "crashed")
+        ),
+        "the failure is reported"
+    );
+    assert!(terminal_git(&bodies).is_none());
+    assert!(harness.wait_exit().await.success());
+}
+
+// Ход кончился как обычно: факты идут с RunFinished, а конечное состояние их не несёт.
+#[tokio::test]
+async fn a_finished_turn_leaves_the_terminal_state_without_git_facts() {
+    let mut harness = Harness::start(&[]).await;
+    let root = harness._root.path().to_path_buf();
+    git_in(&root, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("base.txt"), "base").unwrap();
+    git_in(&root, &["add", "base.txt"]);
+    git_in(&root, &["commit", "-q", "-m", "base"]);
+    harness.attach_and_ship(0).await;
+    harness.start_cli_session_tools(true).await;
+    let id = Uuid::now_v7();
+    harness.deliver(id, 1, "turn").await;
+    let bodies = harness.wait_records("turn", |b| run_finished(b, id)).await;
+    assert!(run_git_facts(&bodies, id).is_some_and(|facts| facts.available));
+    harness
+        .send(down::Msg::Stop(StopRequest {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            force: false,
+        }))
+        .await;
+    let bodies = harness.wait_records("closed", journal_closed).await;
+    assert!(bodies.iter().any(|b| state(b, "stopped")));
+    assert!(terminal_git(&bodies).is_none());
+    assert!(harness.wait_exit().await.success());
+}
+
 #[tokio::test]
 async fn background_work_reaches_the_journal_with_its_capability() {
     let mut harness = Harness::start(&[]).await;

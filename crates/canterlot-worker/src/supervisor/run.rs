@@ -240,6 +240,10 @@ struct Supervisor {
     suggestion_turn: Option<Uuid>,
     /// HEAD рабочего каталога на конец прошлого хода (или на старт CLI).
     git_head: Option<String>,
+    /// CLI не стало посреди хода: конца хода с фактами git уже не будет.
+    turn_cut: bool,
+    /// Факты git оборванного хода для конечного состояния; сняты, когда группа опустела.
+    terminal_git: Option<canterlot_proto::worker::v1::GitFacts>,
     background_drop_reported: bool,
     /// Потерю списка задач без возможности хаба показываем один раз, а не на каждое обновление.
     todo_drop_reported: bool,
@@ -467,6 +471,8 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         prompt_suggestions: false,
         suggestion_turn: None,
         git_head: None,
+        turn_cut: false,
+        terminal_git: None,
         background_drop_reported: false,
         todo_drop_reported: false,
         provider: String::new(),
@@ -696,6 +702,12 @@ impl Supervisor {
         } else {
             String::new()
         };
+        // Факты оборванного хода несёт только конечное состояние.
+        let interrupted_git = if matches!(state, "stopped" | "failed") {
+            self.terminal_git.take()
+        } else {
+            None
+        };
         self.record(Body::ExecutionState(
             canterlot_proto::worker::v1::ExecutionState {
                 execution_id: self.spec.execution_id.to_string(),
@@ -706,7 +718,7 @@ impl Supervisor {
                 fresh_fork,
                 canonical_workdir,
                 canonical_source,
-                interrupted_git: None,
+                interrupted_git,
             },
         ))?;
         Ok(())
@@ -2990,7 +3002,7 @@ impl Supervisor {
             }
             AdapterEvent::ProcessExited { code, signal } => {
                 self.adapter_exited = true;
-                self.active_turn = None;
+                self.turn_cut |= self.active_turn.take().is_some();
                 self.begin_stop(StopCause::Exited { code, signal }, false)?;
             }
             AdapterEvent::InputAccepted { command_id } => {
@@ -3155,6 +3167,16 @@ impl Supervisor {
             self.git_head = Some(facts.head_after.clone());
         }
         Some(facts)
+    }
+
+    /// Факты git хода, который кончился вместе с CLI: RunFinished у него не будет. Снимаются,
+    /// когда вся группа уже вышла и рабочая копия больше не меняется, тем же сбором и с тем же
+    /// сроком, что на конце хода. Недоступное чтение не отправляется: хаб оставит «unknown».
+    async fn cut_turn_git_facts(&mut self) -> Option<canterlot_proto::worker::v1::GitFacts> {
+        if !self.turn_cut && self.active_turn.is_none() {
+            return None;
+        }
+        self.turn_git_facts().await.filter(|facts| facts.available)
     }
 
     fn close_blocks(&mut self, reason: &str) -> Result<(), SupervisorError> {
@@ -3671,6 +3693,7 @@ impl Supervisor {
         let empty = matches!(result, Ok(Ok(Termination::Empty)))
             && matches!(self.containment.populated(), Ok(false));
         if empty {
+            self.terminal_git = self.cut_turn_git_facts().await;
             return self.finish_stop();
         }
         let survivors = match &result {
@@ -4210,6 +4233,8 @@ mod tests {
             prompt_suggestions: false,
             suggestion_turn: None,
             git_head: None,
+            turn_cut: false,
+            terminal_git: None,
             background_drop_reported: false,
             todo_drop_reported: false,
             provider: "claude_code".into(),

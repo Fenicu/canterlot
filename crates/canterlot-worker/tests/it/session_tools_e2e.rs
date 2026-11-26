@@ -473,6 +473,45 @@ async fn spawn_isolated_commit_summary_accept_cleanup() {
     b.finish().await;
 }
 
+// CLI потомка умер посреди хода после коммита и с черновиком в копии: итог оркестратору
+// называет коммит и грязную копию, а не «unknown», и говорит, что ход прерван.
+#[tokio::test]
+async fn crashed_child_reports_the_git_facts_of_its_interrupted_turn() {
+    let pool = canterlot_hub::testkit::db().await;
+    let mut b = Bench::new(&pool).await;
+    let repo = b.repo("repo");
+    let orchestrator = b.session("synthetic", &repo).await;
+    let brief = script(json!([
+        {"delta": "Начинаю"},
+        {"git_commit": {"path": "half.txt", "content": "половина\n", "subject": "Сделать половину"}},
+        {"write_file": {"path": "draft.txt", "content": "черновик\n"}},
+        {"exit": 3}
+    ]));
+    let (_child, _) = b
+        .spawn_child(
+            orchestrator,
+            json!({"harness": "synthetic", "model": "synthetic-small", "brief": brief,
+                   "title": "Исполнитель", "isolated": true}),
+        )
+        .await;
+    let report = b.report_with(orchestrator, "is now failed").await;
+    for needle in [
+        "1 interrupted",
+        "1 commit:",
+        "Сделать половину",
+        "half.txt",
+        "Uncommitted changes: yes",
+        "Git facts include the interrupted turn",
+    ] {
+        assert!(report.contains(needle), "{needle} is not in: {report}");
+    }
+    assert!(
+        !report.contains("never reported git facts"),
+        "facts replace the unknown line: {report}"
+    );
+    b.finish().await;
+}
+
 #[tokio::test]
 async fn dirty_worktree_waits_for_force_and_keeps_unmerged_commits() {
     let pool = canterlot_hub::testkit::db().await;
