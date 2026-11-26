@@ -17,6 +17,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 struct Fx {
     pool: PgPool,
     context: ToolContext,
@@ -157,9 +159,7 @@ fn sorted(mut ids: Vec<Uuid>) -> Vec<Uuid> {
     ids
 }
 
-#[tokio::test]
-async fn root_sees_all_delegated_sees_family_only() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn root_sees_all_delegated_sees_family_only(pool: PgPool) {
     let f = Fx::new(pool).await;
     let family = family(&f).await;
     let everyone = sorted(vec![
@@ -220,9 +220,7 @@ async fn root_sees_all_delegated_sees_family_only() {
     assert_eq!(me["activity"]["evidence"]["kind"], "idle");
 }
 
-#[tokio::test]
-async fn delegated_cannot_inspect_stranger() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn delegated_cannot_inspect_stranger(pool: PgPool) {
     let f = Fx::new(pool).await;
     let family = family(&f).await;
     let stranger = f
@@ -264,9 +262,7 @@ async fn delegated_cannot_inspect_stranger() {
 
 /// Боковые копии (отчёт рутины и личный чат «В стороне») скрыты: по известному UUID их не
 /// достать ни одним инструментом, а сама копия по-прежнему работает от своего имени.
-#[tokio::test]
-async fn hidden_side_copies_are_unreachable_by_uuid_but_work_as_callers() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn hidden_side_copies_are_unreachable_by_uuid_but_work_as_callers(pool: PgPool) {
     let f = Fx::new(pool).await;
     let report = f.conversation("копия отчёта", None, 0).await;
     let chat = f.conversation("чат в стороне", None, 0).await;
@@ -304,9 +300,7 @@ async fn hidden_side_copies_are_unreachable_by_uuid_but_work_as_callers() {
 
 /// Скрытая копия по UUID отвечает ровно так же, как несуществующая сессия, и ничего не пишет:
 /// ни доски плана, ни подписки, ни блокировки очереди копии.
-#[tokio::test]
-async fn hidden_copies_answer_like_a_missing_session_and_leave_no_rows() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn hidden_copies_answer_like_a_missing_session_and_leave_no_rows(pool: PgPool) {
     let f = Fx::new(pool).await;
     let mut hidden = Vec::new();
     for kind in ["report", "chat"] {
@@ -376,9 +370,7 @@ async fn pool_tx(f: &Fx) -> sqlx::Transaction<'static, sqlx::Postgres> {
     canterlot_hub::db::begin(&f.pool).await.unwrap()
 }
 
-#[tokio::test]
-async fn a_delegate_stays_narrow_after_its_parent_is_deleted() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_delegate_stays_narrow_after_its_parent_is_deleted(pool: PgPool) {
     let f = Fx::new(pool).await;
     let family = family(&f).await;
     // Так оставляет deletion.rs: потомок без родителя, но всё ещё делегированный.
@@ -395,9 +387,7 @@ async fn a_delegate_stays_narrow_after_its_parent_is_deleted() {
     assert!(!f.visible(family.child, family.parent).await);
 }
 
-#[tokio::test]
-async fn list_filters_limits_and_hides_archived() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn list_filters_limits_and_hides_archived(pool: PgPool) {
     let f = Fx::new(pool).await;
     let archived = f.conversation("в архиве", None, 0).await;
     sqlx::query("update conversations set archived_at=now() where id=$1")
@@ -468,9 +458,7 @@ async fn block(f: &Fx, conversation: Uuid, kind: &str, text: &str) -> Uuid {
     id
 }
 
-#[tokio::test]
-async fn inspect_truncates_and_redacts() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn inspect_truncates_and_redacts(pool: PgPool) {
     let f = Fx::new(pool).await;
     let target = f.conversation("цель", None, 0).await;
     let execution = executions::start(&f.pool, f.owner, target, Uuid::now_v7())
@@ -567,9 +555,7 @@ async fn inspect_truncates_and_redacts() {
     }
 }
 
-#[tokio::test]
-async fn a_long_block_is_paged_to_its_end() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_long_block_is_paged_to_its_end(pool: PgPool) {
     let f = Fx::new(pool).await;
     let target = f.conversation("цель", None, 0).await;
     executions::start(&f.pool, f.owner, target, Uuid::now_v7())
@@ -613,9 +599,7 @@ async fn a_long_block_is_paged_to_its_end() {
     assert_eq!(pages, 4);
 }
 
-#[tokio::test]
-async fn block_page_stays_within_what_inspect_shows() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn block_page_stays_within_what_inspect_shows(pool: PgPool) {
     let f = Fx::new(pool).await;
     let family = family(&f).await;
     for id in [family.child, family.stranger] {
@@ -673,9 +657,7 @@ async fn block_page_stays_within_what_inspect_shows() {
     assert_eq!(whole["block"]["next_offset"], Value::Null);
 }
 
-#[tokio::test]
-async fn inspect_shows_the_last_run_and_worktree() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn inspect_shows_the_last_run_and_worktree(pool: PgPool) {
     let f = Fx::new(pool).await;
     let target = f.conversation("цель", None, 0).await;
     let execution = executions::start(&f.pool, f.owner, target, Uuid::now_v7())
@@ -850,9 +832,7 @@ async fn run_with_tests(f: &Fx, commit_at: Option<i64>) -> (Uuid, Uuid) {
     (target, input.command_id)
 }
 
-#[tokio::test]
-async fn inspect_shows_tests_and_the_summary_names_the_stale_run() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn inspect_shows_tests_and_the_summary_names_the_stale_run(pool: PgPool) {
     let f = Fx::new(pool).await;
     let (target, _) = run_with_tests(&f, Some(TEST_BASE + 20_000)).await;
 
@@ -894,9 +874,7 @@ async fn inspect_shows_tests_and_the_summary_names_the_stale_run() {
     );
 }
 
-#[tokio::test]
-async fn an_untimed_commit_makes_freshness_unknown() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn an_untimed_commit_makes_freshness_unknown(pool: PgPool) {
     let f = Fx::new(pool).await;
     let (target, _) = run_with_tests(&f, None).await;
 
@@ -922,9 +900,7 @@ async fn an_untimed_commit_makes_freshness_unknown() {
     assert!(!text.contains("stale (before commit"), "{text}");
 }
 
-#[tokio::test]
-async fn inspect_and_summary_have_no_tests_without_test_output() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn inspect_and_summary_have_no_tests_without_test_output(pool: PgPool) {
     let f = Fx::new(pool).await;
     let mut r = worker::Run::new(&f.pool).await;
     let target = r.seed.conversation_id;
@@ -960,4 +936,39 @@ async fn inspect_and_summary_have_no_tests_without_test_output() {
         .unwrap()
         .unwrap();
     assert!(!summary::render(&summary).contains("Tests:"));
+}
+
+/// Видимость сессий агенту: семья делегата, чужие, скрытые копии, удалённый
+/// родитель, фильтры списка, обрезка inspect.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn visibility_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        root_sees_all_delegated_sees_family_only,
+        delegated_cannot_inspect_stranger,
+        hidden_side_copies_are_unreachable_by_uuid_but_work_as_callers,
+        hidden_copies_answer_like_a_missing_session_and_leave_no_rows,
+        a_delegate_stays_narrow_after_its_parent_is_deleted,
+        list_filters_limits_and_hides_archived,
+        inspect_truncates_and_redacts,
+    );
+}
+
+/// Длинный блок по страницам, последний ход и рабочая копия, тесты и сводка,
+/// свежесть коммита.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn inspect_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        a_long_block_is_paged_to_its_end,
+        block_page_stays_within_what_inspect_shows,
+        inspect_shows_the_last_run_and_worktree,
+        inspect_shows_tests_and_the_summary_names_the_stale_run,
+        an_untimed_commit_makes_freshness_unknown,
+        inspect_and_summary_have_no_tests_without_test_output,
+    );
 }
