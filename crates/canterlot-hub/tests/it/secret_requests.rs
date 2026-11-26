@@ -24,6 +24,8 @@ use sha2::Digest as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 const CAPS: &[&str] = &["pilot_v1", CAPABILITY_SECRET_REQUESTS_V2];
 
 struct Fx {
@@ -46,6 +48,7 @@ impl Fx {
         )
         .await;
         let owner = hub.installation.owner_id;
+        Snapshot::take(&pool).await;
         let seed = seed_for(&pool, owner).await;
         let client = TestClient::over_socket(hub.http_addr()).await.as_owner();
         let registry = hub.registry.clone();
@@ -56,6 +59,13 @@ impl Fx {
             seed,
             registry,
         }
+    }
+
+    /// Перед случаем таблицы: база как после запуска хаба и свои машина и разговор,
+    /// чтобы соединения прошлого случая в реестре не задели этот.
+    async fn reset(&mut self) {
+        restore(self.pool.clone()).await;
+        self.seed = seed_for(&self.pool, self.hub.installation.owner_id).await;
     }
 
     async fn open(&self, name: &str) -> secrets::SecretRequestView {
@@ -350,10 +360,7 @@ async fn cj(
     );
 }
 
-#[tokio::test]
-async fn three_open_requests_hold_the_card_and_the_fourth_is_refused() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn three_open_requests_hold_the_card_and_the_fourth_is_refused(fx: &mut Fx) {
     for index in 0..secrets::MAX_OPEN_PER_CONVERSATION {
         fx.open(&format!("Секрет {index}")).await;
     }
@@ -370,10 +377,7 @@ async fn three_open_requests_hold_the_card_and_the_fourth_is_refused() {
     assert!(matches!(error, secrets::SecretError::Limit), "{error:?}");
 }
 
-#[tokio::test]
-async fn a_value_is_delivered_once_over_the_live_stream_and_never_stored() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_value_is_delivered_once_over_the_live_stream_and_never_stored(fx: &mut Fx) {
     let marker = format!("canterlot-secret-PROBE-{}", Uuid::now_v7());
     let row = fx.open("Пароль от базы").await;
     assert_eq!(row.state, secrets::SecretState::Open);
@@ -409,10 +413,7 @@ async fn a_value_is_delivered_once_over_the_live_stream_and_never_stored() {
     assert_absent_everywhere(&fx.pool, &marker).await;
 }
 
-#[tokio::test]
-async fn a_decline_answers_the_card_and_tells_the_agent() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_decline_answers_the_card_and_tells_the_agent(fx: &mut Fx) {
     let row = fx.open("Токен").await;
     let response = fx.answer(row.id, json!({"decline": true})).await;
     assert_eq!(response.status, axum::http::StatusCode::OK);
@@ -426,10 +427,7 @@ async fn a_decline_answers_the_card_and_tells_the_agent() {
     assert_eq!(again.json::<Value>()["error"]["code"], "not_open");
 }
 
-#[tokio::test]
-async fn an_offline_machine_refuses_the_value_and_keeps_the_request_open() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn an_offline_machine_refuses_the_value_and_keeps_the_request_open(fx: &mut Fx) {
     let row = fx.open("Ключ").await;
     let response = fx
         .answer(row.id, json!({"value": "canterlot-secret-PROBE-offline"}))
@@ -441,10 +439,7 @@ async fn an_offline_machine_refuses_the_value_and_keeps_the_request_open() {
     assert_absent_everywhere(&fx.pool, "canterlot-secret-PROBE-offline").await;
 }
 
-#[tokio::test]
-async fn a_v1_only_worker_gets_no_deliver_and_no_revoke() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_v1_only_worker_gets_no_deliver_and_no_revoke(fx: &mut Fx) {
     let row = fx.open("Ключ").await;
     // Хаб не знает `secret_requests_v1` и не согласует его: для хаба это
     // воркер без возможности секретов.
@@ -496,10 +491,7 @@ async fn a_v1_only_worker_gets_no_deliver_and_no_revoke() {
     assert_absent_everywhere(&fx.pool, "canterlot-secret-PROBE-v1").await;
 }
 
-#[tokio::test]
-async fn the_idempotency_header_of_the_answer_leaves_no_row() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn the_idempotency_header_of_the_answer_leaves_no_row(fx: &mut Fx) {
     let row = fx.open("Ключ").await;
     let key = format!("answer-key-{}", Uuid::now_v7());
     let response = fx
@@ -518,10 +510,7 @@ async fn the_idempotency_header_of_the_answer_leaves_no_row() {
     assert_eq!(stored, 0);
 }
 
-#[tokio::test]
-async fn a_value_over_16_kib_answers_413() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_value_over_16_kib_answers_413(fx: &mut Fx) {
     let row = fx.open("Большой").await;
     let value = "x".repeat(secrets::MAX_VALUE_BYTES + 1);
     let response = fx.answer(row.id, json!({"value": value})).await;
@@ -530,10 +519,7 @@ async fn a_value_over_16_kib_answers_413() {
     assert_eq!(fx.row(row.id).await.generation, 0);
 }
 
-#[tokio::test]
-async fn a_delivered_secret_is_revoked_and_the_queued_message_is_withdrawn() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_delivered_secret_is_revoked_and_the_queued_message_is_withdrawn(fx: &mut Fx) {
     let row = fx.open("Пароль").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
     let deliver = fx.send_value(&mut worker, row.id, "value\n").await;
@@ -602,10 +588,7 @@ async fn a_delivered_secret_is_revoked_and_the_queued_message_is_withdrawn() {
     );
 }
 
-#[tokio::test]
-async fn a_timed_out_attempt_becomes_lost_with_an_obligation() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_timed_out_attempt_becomes_lost_with_an_obligation(fx: &mut Fx) {
     let row = fx.open("Ключ").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
     let deliver = fx.send_value(&mut worker, row.id, "value\n").await;
@@ -621,10 +604,7 @@ async fn a_timed_out_attempt_becomes_lost_with_an_obligation() {
     );
 }
 
-#[tokio::test]
-async fn a_hub_restart_turns_sending_into_lost_with_an_obligation() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_hub_restart_turns_sending_into_lost_with_an_obligation(fx: &mut Fx) {
     let row = fx.open("Ключ").await;
     sqlx::query(
         "update secret_requests set state='sending', generation=1,
@@ -687,10 +667,7 @@ async fn a_stand_returns_only_after_the_startup_sweep() {
     drop(hub);
 }
 
-#[tokio::test]
-async fn re_filling_a_lost_request_supersedes_the_old_generation() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn re_filling_a_lost_request_supersedes_the_old_generation(fx: &mut Fx) {
     let row = fx.open("Ключ").await;
     sqlx::query("update secret_requests set state='lost', generation=1, note=$2 where id=$1")
         .bind(row.id)
@@ -709,10 +686,7 @@ async fn re_filling_a_lost_request_supersedes_the_old_generation() {
     assert_eq!(fx.state(row.id).await, "sending");
 }
 
-#[tokio::test]
-async fn a_late_delivery_receipt_after_loss_is_ignored_and_the_obligation_stays() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_late_delivery_receipt_after_loss_is_ignored_and_the_obligation_stays(fx: &mut Fx) {
     let row = fx.open("Ключ").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
     let deliver = fx.send_value(&mut worker, row.id, "value\n").await;
@@ -730,10 +704,7 @@ async fn a_late_delivery_receipt_after_loss_is_ignored_and_the_obligation_stays(
     );
 }
 
-#[tokio::test]
-async fn an_expired_delivery_becomes_revoking_until_the_worker_confirms() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn an_expired_delivery_becomes_revoking_until_the_worker_confirms(fx: &mut Fx) {
     let row = fx.open("Ключ").await;
     sqlx::query(
         "update secret_requests set state='delivered', generation=1,
@@ -763,10 +734,7 @@ async fn an_expired_delivery_becomes_revoking_until_the_worker_confirms() {
     );
 }
 
-#[tokio::test]
-async fn session_end_revokes_every_generation_that_may_have_materialised() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn session_end_revokes_every_generation_that_may_have_materialised(fx: &mut Fx) {
     let open = fx.open("Открытый").await;
     let delivered = fx.open("Переданный").await;
     let sending = fx.open("Отправляемый").await;
@@ -814,10 +782,7 @@ async fn session_end_revokes_every_generation_that_may_have_materialised() {
     );
 }
 
-#[tokio::test]
-async fn purge_keeps_the_obligation_and_a_later_receipt_completes_it() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn purge_keeps_the_obligation_and_a_later_receipt_completes_it(fx: &mut Fx) {
     let row = fx.open("Пережить уборку").await;
     sqlx::query(
         "update secret_requests set state='delivered', generation=1, path='/run/p' where id=$1",
@@ -888,10 +853,7 @@ async fn purge_keeps_the_obligation_and_a_later_receipt_completes_it() {
     );
 }
 
-#[tokio::test]
-async fn an_older_cap_receipt_does_not_close_a_newer_obligation() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn an_older_cap_receipt_does_not_close_a_newer_obligation(fx: &mut Fx) {
     let row = fx.open("Новое поколение").await;
     sqlx::query(
         "update secret_requests set state='revoking', generation=2, path='/run/new' where id=$1",
@@ -931,10 +893,7 @@ async fn an_older_cap_receipt_does_not_close_a_newer_obligation() {
     assert!(fx.obligation(row.id).await.is_none());
 }
 
-#[tokio::test]
-async fn a_removal_failure_reschedules_the_obligation_and_keeps_revoking() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_removal_failure_reschedules_the_obligation_and_keeps_revoking(fx: &mut Fx) {
     let row = fx.open("Не удалился").await;
     sqlx::query(
         "update secret_requests set state='revoking', generation=1, path='/run/x' where id=$1",
@@ -994,10 +953,7 @@ async fn a_removal_failure_reschedules_the_obligation_and_keeps_revoking() {
     assert!(due, "the retry is not immediate");
 }
 
-#[tokio::test]
-async fn a_successful_removal_retires_the_revoke_command() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_successful_removal_retires_the_revoke_command(fx: &mut Fx) {
     let row = fx.open("Убранная команда").await;
     sqlx::query("update secret_requests set state='revoking', generation=1 where id=$1")
         .bind(row.id)
@@ -1017,10 +973,7 @@ async fn a_successful_removal_retires_the_revoke_command() {
     assert!(fx.obligation(row.id).await.is_none());
 }
 
-#[tokio::test]
-async fn a_failed_removal_retires_the_command_and_the_obligation_resends() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_failed_removal_retires_the_command_and_the_obligation_resends(fx: &mut Fx) {
     let row = fx.open("Повтор после ошибки").await;
     sqlx::query("update secret_requests set state='revoking', generation=1 where id=$1")
         .bind(row.id)
@@ -1100,10 +1053,7 @@ async fn a_failed_removal_retires_the_command_and_the_obligation_resends() {
     assert_eq!(total, 2);
 }
 
-#[tokio::test]
-async fn a_rejected_revoke_is_retired_and_rescheduled() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_rejected_revoke_is_retired_and_rescheduled(fx: &mut Fx) {
     let row = fx.open("Отказ воркера").await;
     sqlx::query("update secret_requests set state='revoking', generation=1 where id=$1")
         .bind(row.id)
@@ -1152,10 +1102,7 @@ async fn a_rejected_revoke_is_retired_and_rescheduled() {
     assert_eq!(attempts, 1);
 }
 
-#[tokio::test]
-async fn an_offline_backlog_does_not_starve_a_live_obligation() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn an_offline_backlog_does_not_starve_a_live_obligation(fx: &mut Fx) {
     let offline = Uuid::now_v7();
     sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'Офлайн')")
         .bind(offline)
@@ -1217,10 +1164,7 @@ async fn an_offline_backlog_does_not_starve_a_live_obligation() {
     assert_eq!(offline_commands, 0, "offline machines get no command");
 }
 
-#[tokio::test]
-async fn a_vanished_obligation_does_not_abort_the_batch() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_vanished_obligation_does_not_abort_the_batch(fx: &mut Fx) {
     let _worker = fx.connect(CAPS, "epoch-1").await;
     let gone = fx.open("Исчезнет").await;
     let stays = fx.open("Останется").await;
@@ -1279,10 +1223,7 @@ async fn a_vanished_obligation_does_not_abort_the_batch() {
     assert_eq!(vanished, 0);
 }
 
-#[tokio::test]
-async fn a_huge_attempt_count_does_not_overflow_the_backoff() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_huge_attempt_count_does_not_overflow_the_backoff(fx: &mut Fx) {
     let row = fx.open("Много попыток").await;
     let _worker = fx.connect(CAPS, "epoch-1").await;
     sqlx::query(
@@ -1327,10 +1268,7 @@ async fn a_huge_attempt_count_does_not_overflow_the_backoff() {
     assert_eq!(reason, "revoked");
 }
 
-#[tokio::test]
-async fn an_epoch_change_marks_delivered_requests_lost() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn an_epoch_change_marks_delivered_requests_lost(fx: &mut Fx) {
     let row = fx.open("Ключ").await;
     let journal = Uuid::now_v7();
     let mut worker = fx.connect_journal(CAPS, "epoch-a", journal).await;
@@ -1360,10 +1298,7 @@ async fn an_epoch_change_marks_delivered_requests_lost() {
     assert_eq!((up_to, reason.as_str()), (1, "epoch"));
 }
 
-#[tokio::test]
-async fn a_re_filled_generation_gets_its_own_delivered_message() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_re_filled_generation_gets_its_own_delivered_message(fx: &mut Fx) {
     let row = fx.open("Дважды переданный").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
     let journal = Uuid::now_v7();
@@ -1396,10 +1331,7 @@ async fn a_re_filled_generation_gets_its_own_delivered_message() {
     assert!(prompts.iter().any(|text| text.contains("/run/two")));
 }
 
-#[tokio::test]
-async fn a_delivered_secret_message_shows_the_full_expiry_date() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_delivered_secret_message_shows_the_full_expiry_date(fx: &mut Fx) {
     let row = fx.open("Срок в сообщении").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
     let deliver = fx.send_value(&mut worker, row.id, "value\n").await;
@@ -1421,10 +1353,7 @@ async fn a_delivered_secret_message_shows_the_full_expiry_date() {
     );
 }
 
-#[tokio::test]
-async fn a_removal_receipt_from_another_conversation_is_ignored() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_removal_receipt_from_another_conversation_is_ignored(fx: &mut Fx) {
     let row = fx.open("Чужой разговор").await;
     sqlx::query("update secret_requests set state='revoking', generation=1 where id=$1")
         .bind(row.id)
@@ -1461,10 +1390,7 @@ async fn a_removal_receipt_from_another_conversation_is_ignored() {
     assert!(fx.obligation(row.id).await.is_none());
 }
 
-#[tokio::test]
-async fn a_delivery_receipt_from_another_conversation_is_ignored() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_delivery_receipt_from_another_conversation_is_ignored(fx: &mut Fx) {
     let row = fx.open("Чужой разговор доставки").await;
     sqlx::query("update secret_requests set state='sending', generation=1 where id=$1")
         .bind(row.id)
@@ -1488,10 +1414,7 @@ async fn a_delivery_receipt_from_another_conversation_is_ignored() {
     assert!(kept.path.is_none(), "a foreign path is not recorded");
 }
 
-#[tokio::test]
-async fn an_epoch_change_marks_sending_requests_lost() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn an_epoch_change_marks_sending_requests_lost(fx: &mut Fx) {
     let row = fx.open("В полёте").await;
     // Живое соединение: стартовая сверка не вправе объявить строку потерянной
     // раньше проверки эпохи.
@@ -1521,10 +1444,7 @@ async fn an_epoch_change_marks_sending_requests_lost() {
     assert_eq!((up_to, reason.as_str()), (1, "epoch"));
 }
 
-#[tokio::test]
-async fn a_replayed_delivery_receipt_from_an_old_epoch_becomes_lost() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_replayed_delivery_receipt_from_an_old_epoch_becomes_lost(fx: &mut Fx) {
     let row = fx.open("Квитанция из прошлой загрузки").await;
     let _worker = fx.connect(CAPS, "epoch-b").await;
     sqlx::query(
@@ -1568,10 +1488,7 @@ async fn a_replayed_delivery_receipt_from_an_old_epoch_becomes_lost() {
     assert_eq!((up_to, reason.as_str()), (1, "epoch"));
 }
 
-#[tokio::test]
-async fn a_revoke_command_carries_the_hub_expiry_of_the_covered_generation() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_revoke_command_carries_the_hub_expiry_of_the_covered_generation(fx: &mut Fx) {
     let row = fx.open("Срок в отзыве").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
     let deliver = fx.send_value(&mut worker, row.id, "value\n").await;
@@ -1608,10 +1525,7 @@ async fn a_revoke_command_carries_the_hub_expiry_of_the_covered_generation() {
     );
 }
 
-#[tokio::test]
-async fn a_session_end_obligation_carries_the_generation_expiry() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_session_end_obligation_carries_the_generation_expiry(fx: &mut Fx) {
     let row = fx.open("Срок конца сессии").await;
     let mut worker = fx.connect(CAPS, "epoch-1").await;
     let deliver = fx.send_value(&mut worker, row.id, "value\n").await;
@@ -1629,10 +1543,7 @@ async fn a_session_end_obligation_carries_the_generation_expiry() {
     assert_eq!(max, i64::try_from(deliver.expires_at_ms).unwrap());
 }
 
-#[tokio::test]
-async fn a_delayed_epoch_reconciliation_from_the_previous_connection_changes_nothing() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn a_delayed_epoch_reconciliation_from_the_previous_connection_changes_nothing(fx: &mut Fx) {
     let old = fx.open("Старая загрузка").await;
     let fresh = fx.open("Новая загрузка").await;
     let journal = Uuid::now_v7();
@@ -1695,10 +1606,7 @@ async fn a_delayed_epoch_reconciliation_from_the_previous_connection_changes_not
     assert!(fx.obligation(fresh.id).await.is_none());
 }
 
-#[tokio::test]
-async fn an_open_secret_keeps_the_session_in_waiting_for_user() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn an_open_secret_keeps_the_session_in_waiting_for_user(fx: &mut Fx) {
     fx.open("Пароль").await;
     activity::refresh(
         &fx.pool,
@@ -1728,10 +1636,8 @@ async fn an_open_secret_keeps_the_session_in_waiting_for_user() {
     assert_eq!(evidence["question"], "Пароль");
 }
 
-#[tokio::test]
-async fn twenty_open_requests_per_owner_are_the_limit_across_conversations() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool.clone()).await;
+async fn twenty_open_requests_per_owner_are_the_limit_across_conversations(fx: &mut Fx) {
+    let pool = fx.pool.clone();
     let per_conversation = secrets::MAX_OPEN_PER_CONVERSATION;
     let conversations = (secrets::MAX_OPEN_PER_OWNER + per_conversation - 1) / per_conversation;
     let mut opened = 0;
@@ -1768,10 +1674,7 @@ async fn twenty_open_requests_per_owner_are_the_limit_across_conversations() {
     assert!(matches!(error, secrets::SecretError::Limit), "{error:?}");
 }
 
-#[tokio::test]
-async fn secret_request_is_refused_while_owner_stop_is_pending() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn secret_request_is_refused_while_owner_stop_is_pending(fx: &mut Fx) {
     sqlx::query(
         "insert into queue_state (conversation_id, pause_reasons)
          values ($1, '[{\"reason\":\"user_stop\"}]'::jsonb)
@@ -1876,10 +1779,7 @@ async fn the_session_tool_returns_a_request_id_and_holds_the_limit() {
     );
 }
 
-#[tokio::test]
-async fn the_whole_path_leaves_no_plaintext_or_hash_in_the_database() {
-    let pool = canterlot_hub::testkit::db().await;
-    let fx = Fx::new(pool).await;
+async fn the_whole_path_leaves_no_plaintext_or_hash_in_the_database(fx: &mut Fx) {
     let marker = format!("canterlot-secret-PROBE-{}", Uuid::now_v7());
     let value = format!("{marker}\n");
     let row = fx.open("Пароль").await;
@@ -1931,3 +1831,84 @@ fn hex(bytes: &[u8]) -> String {
 
 #[allow(dead_code)]
 fn _unused(_: Answer, _: ControlUp) {}
+
+/// Карточка и ответ владельца: лимит карточек, доставка по живому потоку, отказ,
+/// машина без связи, воркер v1, ключ идемпотентности, размер значения, отзыв.
+/// Случаи идут на одном хабе; перед каждым база возвращается к снимку, а случай
+/// получает свою машину и разговор.
+#[tokio::test]
+async fn answer_cases() {
+    let mut fx = Fx::new(canterlot_hub::testkit::db().await).await;
+    run_cases!(&mut fx, before = Fx::reset;
+        three_open_requests_hold_the_card_and_the_fourth_is_refused,
+        a_value_is_delivered_once_over_the_live_stream_and_never_stored,
+        a_decline_answers_the_card_and_tells_the_agent,
+        an_offline_machine_refuses_the_value_and_keeps_the_request_open,
+        a_v1_only_worker_gets_no_deliver_and_no_revoke,
+        the_idempotency_header_of_the_answer_leaves_no_row,
+        a_value_over_16_kib_answers_413,
+        a_delivered_secret_is_revoked_and_the_queued_message_is_withdrawn,
+        a_timed_out_attempt_becomes_lost_with_an_obligation,
+    );
+}
+
+/// Потерянные поколения и обязательства отзыва: перезапуск хаба, повторное
+/// заполнение, поздние квитанции, истечение, конец сессии, очистка, старый предел.
+/// Случаи идут на одном хабе; перед каждым база возвращается к снимку, а случай
+/// получает свою машину и разговор.
+#[tokio::test]
+async fn lost_and_revoke_cases() {
+    let mut fx = Fx::new(canterlot_hub::testkit::db().await).await;
+    run_cases!(&mut fx, before = Fx::reset;
+        a_hub_restart_turns_sending_into_lost_with_an_obligation,
+        re_filling_a_lost_request_supersedes_the_old_generation,
+        a_late_delivery_receipt_after_loss_is_ignored_and_the_obligation_stays,
+        an_expired_delivery_becomes_revoking_until_the_worker_confirms,
+        session_end_revokes_every_generation_that_may_have_materialised,
+        purge_keeps_the_obligation_and_a_later_receipt_completes_it,
+        an_older_cap_receipt_does_not_close_a_newer_obligation,
+        a_removal_failure_reschedules_the_obligation_and_keeps_revoking,
+        a_successful_removal_retires_the_revoke_command,
+    );
+}
+
+/// Квитанции удаления и команда отзыва: отказ, успех, повтор, отсрочка, бэклог
+/// без связи, исчезнувшее обязательство, переполнение отсрочки, смена эпохи.
+/// Случаи идут на одном хабе; перед каждым база возвращается к снимку, а случай
+/// получает свою машину и разговор.
+#[tokio::test]
+async fn removal_receipt_cases() {
+    let mut fx = Fx::new(canterlot_hub::testkit::db().await).await;
+    run_cases!(&mut fx, before = Fx::reset;
+        a_failed_removal_retires_the_command_and_the_obligation_resends,
+        a_rejected_revoke_is_retired_and_rescheduled,
+        an_offline_backlog_does_not_starve_a_live_obligation,
+        a_vanished_obligation_does_not_abort_the_batch,
+        a_huge_attempt_count_does_not_overflow_the_backoff,
+        an_epoch_change_marks_delivered_requests_lost,
+        a_re_filled_generation_gets_its_own_delivered_message,
+        a_delivered_secret_message_shows_the_full_expiry_date,
+        a_removal_receipt_from_another_conversation_is_ignored,
+    );
+}
+
+/// Чужие квитанции, смена эпохи и поздняя сверка, срок в команде отзыва, ожидание
+/// владельца, лимит на владельца и путь без открытого значения в базе.
+/// Случаи идут на одном хабе; перед каждым база возвращается к снимку, а случай
+/// получает свою машину и разговор.
+#[tokio::test]
+async fn epoch_and_limit_cases() {
+    let mut fx = Fx::new(canterlot_hub::testkit::db().await).await;
+    run_cases!(&mut fx, before = Fx::reset;
+        a_delivery_receipt_from_another_conversation_is_ignored,
+        an_epoch_change_marks_sending_requests_lost,
+        a_replayed_delivery_receipt_from_an_old_epoch_becomes_lost,
+        a_revoke_command_carries_the_hub_expiry_of_the_covered_generation,
+        a_session_end_obligation_carries_the_generation_expiry,
+        a_delayed_epoch_reconciliation_from_the_previous_connection_changes_nothing,
+        an_open_secret_keeps_the_session_in_waiting_for_user,
+        twenty_open_requests_per_owner_are_the_limit_across_conversations,
+        secret_request_is_refused_while_owner_stop_is_pending,
+        the_whole_path_leaves_no_plaintext_or_hash_in_the_database,
+    );
+}
