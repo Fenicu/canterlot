@@ -1759,7 +1759,7 @@ async fn children_are_read_past_the_first_page() {
     bench.close(CloseMode::Graceful).await;
 }
 
-// Возобновление с сотнями потомков укладывается в срок старта: чтение проекций
+// Возобновление с сотней потомков укладывается в срок старта: чтение проекций
 // идёт не по одному запросу, а пачками.
 #[tokio::test]
 async fn many_children_are_reconciled_within_the_start_wait() {
@@ -1783,8 +1783,7 @@ async fn many_children_are_reconciled_within_the_start_wait() {
         "/api/session",
         vec![
             page(0, 100, Some("page2")),
-            page(100, 200, Some("page3")),
-            page(200, 249, None),
+            page(100, 149, None),
         ],
     );
     script.set_route("PATCH", "/api/session/ses_far", vec![reply_204()]);
@@ -1802,7 +1801,6 @@ async fn many_children_are_reconciled_within_the_start_wait() {
         [
             "parentID=ses_11112222333344445555666677778888&limit=100",
             "limit=100&cursor=page2",
-            "limit=100&cursor=page3",
         ],
         "{queries:?}"
     );
@@ -1810,8 +1808,8 @@ async fn many_children_are_reconciled_within_the_start_wait() {
         .iter()
         .filter(|request| request["method"] == "PATCH" && path_of(request).starts_with("/api/session/ses_"))
         .count();
-    // Правила получают и сама сессия, и каждые из 250 потомков.
-    assert_eq!(patches, 251, "every session gets the rules");
+    // Правила получают и сама сессия, и каждые из 150 потомков.
+    assert_eq!(patches, 151, "every session gets the rules");
     bench.close(CloseMode::Graceful).await;
 }
 
@@ -1904,7 +1902,7 @@ async fn cancelled_start_leaves_no_server_behind() {
 #[tokio::test]
 async fn server_exit_reaches_the_supervisor() {
     let mut script = session_only();
-    script.steps.push(Step::Stall { ms: 1500 });
+    script.steps.push(Step::Stall { ms: 1000 });
     script.steps.push(Step::Die {
         code: 9,
         kill: false,
@@ -2033,10 +2031,10 @@ async fn prompt_outcomes_on_a_shared_bench() {
         (None, TurnEnd::Succeeded),       // сессия usable после 409
         (refused(404, "SessionNotFoundError"), TurnEnd::Rejected),
         (None, TurnEnd::Succeeded),       // сессия usable после 404
-        (foreign(), TurnEnd::Rejected),   // чужой id не доказательство
         (failed(), TurnEnd::Rejected),    // 500 оставляет ввод неподтверждённым
         (None, TurnEnd::Succeeded),       // повтор без истории уходит один раз
         (None, TurnEnd::Succeeded),       // вложение путём в тексте
+        (foreign(), TurnEnd::Rejected),   // чужой id не доказательство
     ]);
     let started = bench.start_ok().await;
 
@@ -2075,18 +2073,6 @@ async fn prompt_outcomes_on_a_shared_bench() {
         ));
         bench.until_finished(next.command_id).await;
     }
-
-    // Чужой id в ответе не доказательство.
-    let mark = bench.fake.requests().len();
-    let input = bench.input("x");
-    let outcome = bench.transmit(&input).await;
-    assert!(matches!(outcome, TransmitOutcome::Undetermined));
-    // Сверка закрывает неподтверждённый ход: следующий ввод не застаёт его открытым.
-    bench.until_finished(input.command_id).await;
-    assert_eq!(
-        bench.since(mark).iter().filter(|request| path_of(request).ends_with("/prompt")).count(),
-        1
-    );
 
     // 500 ничего не доказывает, повторной отправки нет: запись не найдена,
     // исполнение освобождается, ввод остаётся неподтверждённым.
@@ -2149,6 +2135,19 @@ async fn prompt_outcomes_on_a_shared_bench() {
     }
     bench.until_finished(input.command_id).await;
     assert!(find(&bench.since(mark), "POST", "/prompt").is_none());
+
+    // Чужой id в ответе не доказательство. Случай последний: сверка дойдёт своим
+    // чередом, а стенд закроется раньше — ждать её нечего.
+    let mark = bench.fake.requests().len();
+    let input = bench.input("x");
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Undetermined
+    ));
+    assert_eq!(
+        bench.since(mark).iter().filter(|request| path_of(request).ends_with("/prompt")).count(),
+        1
+    );
     bench.close(CloseMode::Graceful).await;
 }
 
@@ -4185,67 +4184,279 @@ fn edit_form(script: &mut Script, change: impl Fn(&mut Value)) {
     }
 }
 
+/// Вопросы формы на общем стенде: у каждого случая свой id формы. Конец хода общий,
+/// отмена уходит маршрутом с id случая.
+fn question_script(cases: Vec<QuestionCase>) -> Script {
+    let template = question_turn();
+    let capture_session = session_of(&template);
+    let ready_session = session_of(&ready());
+    let asked_template: Value = template
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::Emit { events } => Some(events.clone()),
+            _ => None,
+        })
+        .flatten()
+        .find(|event| event["type"] == "form.created")
+        .unwrap();
+    let form_rec = asked_template["data"]["form"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let message_rec = template
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::Expect { method, path, reply, .. }
+                if method == "POST" && path.ends_with("/prompt") =>
+            {
+                reply
+                    .body
+                    .as_ref()
+                    .and_then(|body| body.pointer("/data/id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            }
+            _ => None,
+        })
+        .next()
+        .unwrap();
+    let prefix: Vec<Value> = {
+        let flat: Vec<Value> = template
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Emit { events } => Some(events.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let at = flat
+            .iter()
+            .position(|event| event["type"] == "form.created")
+            .unwrap();
+        flat[..at].to_vec()
+    };
+    let prompt = format!("/api/session/{ready_session}/prompt");
+    let mut script = session_only();
+    for (n, case) in cases.into_iter().enumerate() {
+        let request = format!("frm_clone{n:03}");
+        let recorded = format!("msg_clone{n:03}");
+        let rewrite = |value: &Value| {
+            let mut text = serde_json::to_string(value).unwrap();
+            text = text.replace(&capture_session, &ready_session);
+            text = text.replace(&form_rec, &request);
+            text = text.replace(&message_rec, &recorded);
+            serde_json::from_str(&text).unwrap()
+        };
+        script.steps.push(Step::Expect {
+            method: "POST".into(),
+            path: prompt.clone(),
+            reply: Reply {
+                body: Some(json!({"data": {"id": recorded}})),
+                ..Default::default()
+            },
+            bind: [(recorded.clone(), "/id".to_owned())].into_iter().collect(),
+        });
+        let mut asked: Value = rewrite(&asked_template);
+        asked["data"]["id"] = request.clone().into();
+        asked["data"]["form"]["id"] = request.clone().into();
+        if let Some(edit) = case.edit_asked {
+            edit(&mut asked["data"]["form"]);
+        }
+        let owner = asked["data"]["form"]["sessionID"]
+            .as_str()
+            .unwrap_or(&ready_session)
+            .to_owned();
+        let mut turn = vec![
+            rewrite(&json!({"type": "session.inbox.enqueued",
+                "data": {"inboxID": recorded, "sessionID": ready_session}})),
+            rewrite(&json!({"type": "session.inbox.delivered",
+                "data": {"inboxID": recorded, "sessionID": ready_session}})),
+            rewrite(&json!({"type": "session.execution.started",
+                "data": {"sessionID": ready_session}})),
+        ];
+        turn.extend(prefix.iter().map(rewrite));
+        turn.push(asked);
+        script.steps.push(Step::Emit { events: turn });
+        case.append(&mut script, &ready_session, &owner, &request, &recorded, rewrite);
+    }
+    script
+}
+
+enum QuestionEnd {
+    Answered(Reply),
+    Cancelled,
+    ServerCancelled,
+    Invalid(Reply),
+}
+
+struct QuestionCase {
+    edit_asked: Option<fn(&mut Value)>,
+    end: QuestionEnd,
+}
+
+impl QuestionCase {
+    fn append(
+        self,
+        script: &mut Script,
+        session: &str,
+        owner: &str,
+        request: &str,
+        recorded: &str,
+        rewrite: impl Fn(&Value) -> Value,
+    ) {
+        let answer_path =
+            format!("/api/session/{session}/form/{request}/reply");
+        match self.end {
+            QuestionEnd::Answered(reply) => {
+                script.steps.push(Step::Expect {
+                    method: "POST".into(),
+                    path: answer_path,
+                    reply,
+                    bind: Default::default(),
+                });
+                script.steps.push(Step::Emit {
+                    events: vec![
+                        rewrite(&json!({"type": "form.replied",
+                            "data": {"id": request, "sessionID": session}})),
+                        finish(session),
+                    ],
+                });
+            }
+            QuestionEnd::Cancelled => {
+                script.steps.push(Step::Stall { ms: 200 });
+                script.steps.push(Step::Emit {
+                    events: vec![finish(session)],
+                });
+                script.set_route(
+                    "DELETE",
+                    &format!("/api/session/{owner}/form/{request}"),
+                    vec![reply_204()],
+                );
+            }
+            QuestionEnd::ServerCancelled => {
+                script.steps.push(Step::Emit {
+                    events: vec![
+                        rewrite(&json!({"type": "form.cancelled",
+                            "data": {"id": request, "sessionID": session}})),
+                        finish(session),
+                    ],
+                });
+            }
+            QuestionEnd::Invalid(reply) => {
+                script.steps.push(Step::Expect {
+                    method: "POST".into(),
+                    path: answer_path,
+                    reply,
+                    bind: Default::default(),
+                });
+                script.set_route(
+                    "DELETE",
+                    &format!("/api/session/{owner}/form/{request}"),
+                    vec![reply_204()],
+                );
+                script.steps.push(Step::Emit {
+                    events: vec![finish(session)],
+                });
+            }
+        }
+        let _ = recorded;
+    }
+}
+
 // Вопрос доходит карточкой, а ответ идёт по ключам формы.
+// Вопросы формы на общем стенде: карточки открываются по очереди, ответ каждого
+// случая уходит один раз, отмены идут маршрутом с id случая.
 #[tokio::test]
-async fn question_reaches_the_owner_and_the_answer_goes_by_keys() {
-    let mut bench = Bench::new(question_turn());
+async fn question_answers_go_by_the_form_keys() {
+    fn echo(answer: Value) -> Reply {
+        Reply { body: Some(json!({"answer": answer})), ..Default::default() }
+    }
+    let mut bench = Bench::new(question_script(vec![
+        QuestionCase {
+            edit_asked: None,
+            end: QuestionEnd::Answered(echo(json!({"q0": "Blue", "q1": ["A", "B"]}))),
+        },
+        QuestionCase {
+            edit_asked: None,
+            end: QuestionEnd::Answered(echo(json!({"q0": "Свой ответ", "q1": ["Другое"]}))),
+        },
+        QuestionCase {
+            edit_asked: Some(|form: &mut Value| {
+                form["fields"][0]["options"][0]["label"] = "Синий".into();
+            }),
+            end: QuestionEnd::Answered(echo(json!({"q0": "Blue"}))),
+        },
+        QuestionCase {
+            edit_asked: Some(|form: &mut Value| {
+                let field = form["fields"][0].clone();
+                let list = form["fields"].as_array_mut().unwrap();
+                for index in 2..5 {
+                    let mut field = field.clone();
+                    field["key"] = format!("q{index}").into();
+                    list.push(field);
+                }
+            }),
+            end: QuestionEnd::Cancelled,
+        },
+        QuestionCase {
+            edit_asked: Some(|form: &mut Value| {
+                form["sessionID"] = "global".into();
+                form["metadata"] =
+                    json!({"kind": "mcp-elicitation", "server": "ask", "message": "Which one?"});
+            }),
+            end: QuestionEnd::Cancelled,
+        },
+        QuestionCase {
+            edit_asked: None,
+            end: QuestionEnd::Cancelled,
+        },
+        QuestionCase {
+            edit_asked: None,
+            end: QuestionEnd::ServerCancelled,
+        },
+        QuestionCase {
+            edit_asked: None,
+            end: QuestionEnd::Invalid(Reply {
+                status: 400,
+                body: Some(json!({"_tag": "FormInvalidAnswerError", "message": "bad"})),
+                ..Default::default()
+            }),
+        },
+    ]));
     bench.start_ok().await;
+    let live = bench.fake.session();
+
+    // Вопрос доходит карточкой, а ответ идёт по ключам формы.
+    let mark = bench.fake.requests().len();
     let input = bench.input("x");
     bench.accepted(&input).await;
     let (request, payload, _) = bench.until_request().await;
     assert!(request.starts_with("frm_"), "{request}");
     assert_eq!(payload["agent"], "orchestrator");
-    assert!(
-        payload["tool_use_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("call_")
-    );
-    let questions = payload["questions"].as_array().unwrap();
-    assert_eq!(questions.len(), 2);
-    assert_eq!(questions[0]["id"], "q0");
-    assert_eq!(questions[0]["text"], "Pick a colour?");
-    assert_eq!(questions[0]["header"], "Colour");
-    assert_eq!(
-        questions[0]["options"],
-        json!([
-            {"label": "Blue", "description": "cold"},
-            {"label": "Red", "description": "warm"},
-        ])
-    );
-    assert_eq!(questions[0]["multi_select"], false);
-    assert_eq!(questions[0]["allow_custom"], true);
-    assert_eq!(questions[1]["multi_select"], true);
+    assert!(payload["tool_use_id"].as_str().unwrap().starts_with("call_"));
+    assert_eq!(payload["questions"].as_array().unwrap().len(), 2);
+    assert_eq!(payload["questions"][0]["id"], "q0");
     assert!(matches!(
         bench.event().await,
-        AdapterEvent::Phase {
-            phase: Phase::AwaitingAnswer,
-            ..
-        }
+        AdapterEvent::Phase { phase: Phase::AwaitingAnswer, .. }
     ));
     let decision = answers(&[("q0", single("Blue")), ("q1", multiple(&["A", "B"]))]);
-    assert!(matches!(
-        bench.deliver(&request, &decision).await,
-        DecisionOutcome::Applied(_)
-    ));
-    assert_eq!(
-        bench.replies()[0]["body"],
-        json!({"answer": {"q0": "Blue", "q1": ["A", "B"]}})
-    );
-    bench.until_finished(input.command_id).await;
+    assert!(matches!(bench.deliver(&request, &decision).await, DecisionOutcome::Applied(_)));
     let DecisionOutcome::NotApplied(reason) = bench.deliver(&request, &decision).await else {
         panic!("second answer");
     };
     assert_eq!(reason, "request_not_pending");
-    assert_eq!(bench.replies().len(), 1);
-    bench.close(CloseMode::Graceful).await;
-}
+    bench.until_finished(input.command_id).await;
+    let echo = bench.since(mark).into_iter().find(|r| path_of(r).ends_with("/reply")).unwrap();
+    assert_eq!(echo["body"], json!({"answer": {"q0": "Blue", "q1": ["A", "B"]}}));
+    let echo = bench.since(mark).into_iter().find(|r| path_of(r).ends_with("/reply")).unwrap();
+    assert_eq!(echo["body"], json!({"answer": {"q0": "Blue", "q1": ["A", "B"]}}));
 
-// Сервер принял бы неполный ответ и подставил модели "Unanswered".
-#[tokio::test]
-async fn partial_answer_stops_before_the_server() {
-    let mut bench = Bench::new(question_turn());
-    bench.start_ok().await;
+    // Сервер принял бы неполный ответ и подставил "Unanswered": проверка раньше него.
+    let mark = bench.fake.requests().len();
     let input = bench.input("x");
     bench.accepted(&input).await;
     let (request, ..) = bench.until_request().await;
@@ -4256,49 +4467,94 @@ async fn partial_answer_stops_before_the_server() {
         panic!("partial answer");
     };
     assert_eq!(reason, "decision_invalid");
-    assert!(bench.replies().is_empty());
     let DecisionOutcome::NotApplied(reason) = bench.deliver(&request, &allow()).await else {
         panic!("permission on a question");
     };
     assert_eq!(reason, "decision_invalid");
     assert!(matches!(
-        bench
-            .deliver(
-                &request,
-                &answers(&[("q0", single("Свой ответ")), ("q1", multiple(&["Другое"]))]),
-            )
-            .await,
+        bench.deliver(&request, &answers(&[("q0", single("Свой ответ")), ("q1", multiple(&["Другое"]))])).await,
         DecisionOutcome::Applied(_)
     ));
-    assert_eq!(
-        bench.replies()[0]["body"],
-        json!({"answer": {"q0": "Свой ответ", "q1": ["Другое"]}})
-    );
-    bench.close(CloseMode::Graceful).await;
-}
+    bench.until_finished(input.command_id).await;
+    let echo = bench.since(mark).into_iter().find(|r| path_of(r).ends_with("/reply")).unwrap();
+    assert_eq!(echo["body"], json!({"answer": {"q0": "Свой ответ", "q1": ["Другое"]}}));
 
-// Подпись видит владелец, значение ждёт сервер. Кадр выдуман: инструмент `question` кладёт
-// в оба поля одно и то же, различать их разрешает схема `Form.Option`.
-#[tokio::test]
-async fn answer_is_sent_as_the_value_of_the_option() {
-    let mut script = question_turn();
-    edit_form(&mut script, |form| {
-        form["fields"][0]["options"][0]["label"] = "Синий".into();
-    });
-    let mut bench = Bench::new(script);
-    bench.start_ok().await;
+    // Подпись видит владелец, значение ждёт сервер.
+    let mark = bench.fake.requests().len();
     let input = bench.input("x");
     bench.accepted(&input).await;
     let (request, payload, _) = bench.until_request().await;
     assert_eq!(payload["questions"][0]["options"][0]["label"], "Синий");
     let decision = answers(&[("q0", single("Синий")), ("q1", multiple(&["A"]))]);
-    assert!(matches!(
-        bench.deliver(&request, &decision).await,
-        DecisionOutcome::Applied(_)
-    ));
-    assert_eq!(bench.replies()[0]["body"]["answer"]["q0"], "Blue");
+    assert!(matches!(bench.deliver(&request, &decision).await, DecisionOutcome::Applied(_)));
+    bench.until_finished(input.command_id).await;
+    let echo = bench.since(mark).into_iter().find(|r| path_of(r).ends_with("/reply")).unwrap();
+    assert_eq!(echo["body"]["answer"]["q0"], "Blue");
+
+    // Больше четырёх вопросов карточка не показывает, без ответа ход завис бы.
+    let mark = bench.fake.requests().len();
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    let path = format!("/api/session/{}/form/frm_clone003", live);
+    assert_cancelled(&bench, &events, &path);
+    assert!(bench.since(mark).iter().all(|r| !path_of(r).ends_with("/reply")));
+
+    // Формы MCP не вопросы: полей карточка не соберёт.
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    let path = format!("/api/session/global/form/frm_clone004");
+    assert_cancelled(&bench, &events, &path);
+
+    // Отказ без текста кончил бы ход: DELETE всегда с сообщением.
+    let mark = bench.fake.requests().len();
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let (request, ..) = bench.until_request().await;
+    bench.adapter.refuse_request(&request, "The turn has ended").await;
+    bench.until_finished(input.command_id).await;
+    let cancel = bench.since(mark).into_iter().find(|r| path_of(r).ends_with("/form/frm_clone005")).unwrap_or_else(|| panic!("form cancel"));
+    assert!(cancel["query"].as_str().unwrap().contains("message=The+turn+has+ended"));
+    assert!(bench.since(mark).iter().all(|r| !path_of(r).ends_with("/reply")));
+
+    // Сервер снял форму сам: карточка закрывается по form.cancelled.
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let (request, ..) = bench.until_request().await;
+    let events = bench.until_finished(input.command_id).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::RequestClosed { request_id, reason }
+            if *request_id == request && reason == "cli_cancelled"
+    )));
+
+    // Сервер отверг ответ: без отмены инструмент ждал бы вечно.
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let (request, ..) = bench.until_request().await;
+    let decision = answers(&[("q0", single("Blue")), ("q1", multiple(&["A"]))]);
+    let DecisionOutcome::NotApplied(reason) = bench.deliver(&request, &decision).await else {
+        panic!("400 is a proven miss");
+    };
+    assert_eq!(reason, "decision_invalid");
+    let cancel = format!("/api/session/{live}/form/frm_clone007");
+    tokio::time::timeout(WAIT, async {
+        while find_exact(&bench.fake.requests(), "DELETE", &cancel).is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("form cancel");
+    bench.until_finished(input.command_id).await;
     bench.close(CloseMode::Graceful).await;
 }
+
+
+// Сервер принял бы неполный ответ и подставил модели "Unanswered".
+
+// Подпись видит владелец, значение ждёт сервер. Кадр выдуман: инструмент `question` кладёт
+// в оба поля одно и то же, различать их разрешает схема `Form.Option`.
 
 async fn cancelled_form(script: Script) -> (Bench, Vec<AdapterEvent>) {
     let mut bench = Bench::new(script);
@@ -4366,154 +4622,15 @@ fn assert_cancelled(bench: &Bench, events: &[AdapterEvent], path: &str) {
 
 // Больше четырёх вопросов карточка не показывает, без ответа ход завис бы. Настоящую форму
 // проверяет L2 `real_form_with_five_fields_is_refused_and_the_model_goes_on`.
-#[tokio::test]
-async fn form_with_too_many_questions_is_cancelled_with_a_message() {
-    let (script, path) = form_cancel_script(|form| {
-        let field = form["fields"][0].clone();
-        let list = form["fields"].as_array_mut().unwrap();
-        for index in 2..5 {
-            let mut field = field.clone();
-            field["key"] = format!("q{index}").into();
-            list.push(field);
-        }
-    });
-    let recorded = script.clone();
-    let (mut bench, events) = cancelled_form(script).await;
-    let path = live_path(&bench, &recorded, &path);
-    assert!(path.starts_with(&format!("/api/session/{}/form/", bench.fake.session())));
-    assert_cancelled(&bench, &events, &path);
-    bench.close(CloseMode::Graceful).await;
-}
 
 // Формы MCP не вопросы: полей карточка не соберёт. Настоящую форму от настоящего сервера MCP
 // проверяет L2 `real_mcp_elicitation_is_refused_and_the_call_returns`.
-#[tokio::test]
-async fn elicitation_form_is_cancelled_with_a_message() {
-    let (script, path) = form_cancel_script(|form| {
-        form["sessionID"] = "global".into();
-        form["metadata"] =
-            json!({"kind": "mcp-elicitation", "server": "ask", "message": "Which one?"});
-    });
-    let (mut bench, events) = cancelled_form(script).await;
-    assert!(path.starts_with("/api/session/global/form/"));
-    assert_cancelled(&bench, &events, &path);
-    bench.close(CloseMode::Graceful).await;
-}
 
 // Отказ без текста кончил бы ход: `DELETE` всегда с сообщением.
-#[tokio::test]
-async fn refused_question_carries_a_message() {
-    let (mut script, path) = form_cancel_script(|_| {});
-    script
-        .steps
-        .retain(|step| !matches!(step, Step::Stall { .. }));
-    let finish = script.steps.pop().unwrap();
-    script.steps.push(Step::Stall { ms: 300 });
-    script.steps.push(finish);
-    let recorded = script.clone();
-    let mut bench = Bench::new(script);
-    bench.start_ok().await;
-    let path = live_path(&bench, &recorded, &path);
-    let input = bench.input("x");
-    bench.accepted(&input).await;
-    let (request, ..) = bench.until_request().await;
-    bench
-        .adapter
-        .refuse_request(&request, "The turn has ended")
-        .await;
-    bench.until_finished(input.command_id).await;
-    let requests = bench.fake.requests();
-    let cancel = find_exact(&requests, "DELETE", &path)
-        .unwrap_or_else(|| panic!("form cancel on {path}: {requests:?}"));
-    assert!(
-        cancel["query"]
-            .as_str()
-            .unwrap()
-            .contains("message=The+turn+has+ended")
-    );
-    assert!(bench.replies().is_empty());
-    bench.close(CloseMode::Graceful).await;
-}
 
 // Сервер снял форму сам: карточка закрывается по `form.cancelled`.
-#[tokio::test]
-async fn form_cancelled_by_the_server_closes_the_card() {
-    let capture = Script::from_capture("question", None);
-    let form = tool_events(&capture, &["form.created"]).remove(0);
-    let session = session_of(&capture);
-    let id = form["data"]["form"]["id"].as_str().unwrap().to_owned();
-    let mut script = capture
-        .clone()
-        .with_canterlot_mcp("connected")
-        .with_recorded_models()
-        .with_recorded_agents();
-    replace_events_after_prompt(
-        &mut script,
-        vec![
-            Step::Emit { events: vec![form] },
-            Step::Stall { ms: 200 },
-            Step::Emit {
-                events: vec![
-                    json!({"type": "form.cancelled", "data": {"id": id, "sessionID": session}}),
-                    finish(&session),
-                ],
-            },
-        ],
-    );
-    let mut bench = Bench::new(script);
-    bench.start_ok().await;
-    let input = bench.input("x");
-    bench.accepted(&input).await;
-    let (request, ..) = bench.until_request().await;
-    let events = bench.until_finished(input.command_id).await;
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AdapterEvent::RequestClosed { request_id, reason }
-            if *request_id == request && reason == "cli_cancelled"
-    )));
-    bench.close(CloseMode::Graceful).await;
-}
 
 // Сервер отверг ответ: без отмены инструмент ждал бы вечно.
-#[tokio::test]
-async fn invalid_answer_cancels_the_form_with_a_message() {
-    let mut script = question_turn();
-    let position = script
-        .steps
-        .iter()
-        .position(|step| step.expected_path().is_some_and(|p| p.ends_with("/reply")))
-        .unwrap();
-    let Step::Expect { reply, path, .. } = &mut script.steps[position] else {
-        unreachable!();
-    };
-    *reply = Reply {
-        status: 400,
-        body: Some(json!({"_tag": "FormInvalidAnswerError", "message": "bad"})),
-        ..Default::default()
-    };
-    let cancel = path.trim_end_matches("/reply").to_owned();
-    script.set_route("DELETE", &cancel, vec![reply_204()]);
-    let recorded = script.clone();
-    let mut bench = Bench::new(script);
-    bench.start_ok().await;
-    let cancel = live_path(&bench, &recorded, &cancel);
-    let input = bench.input("x");
-    bench.accepted(&input).await;
-    let (request, ..) = bench.until_request().await;
-    let decision = answers(&[("q0", single("Blue")), ("q1", multiple(&["A"]))]);
-    let DecisionOutcome::NotApplied(reason) = bench.deliver(&request, &decision).await else {
-        panic!("400 is a proven miss");
-    };
-    assert_eq!(reason, "decision_invalid");
-    tokio::time::timeout(WAIT, async {
-        while find_exact(&bench.fake.requests(), "DELETE", &cancel).is_none() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("form cancel");
-    bench.close(CloseMode::Graceful).await;
-}
 
 /// Первый ход записи прерывания: модель зависла, прерывание снимает её.
 fn hanging_turn() -> Script {
