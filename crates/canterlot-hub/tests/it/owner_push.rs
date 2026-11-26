@@ -38,6 +38,8 @@ use sqlx::PgPool;
 use tokio::time::Instant;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 const TOKEN: &str = "AbCdEf-gotify-SECRET-token_123";
 const APP: &str = "https://app.example.test";
 
@@ -500,9 +502,7 @@ fn presence_sender(config: &GotifyConfig, presence: &Presence) -> Sender {
 
 // ---------- тесты ----------
 
-#[tokio::test]
-async fn a_question_of_any_session_is_pushed_once_with_the_key_in_the_header() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_question_of_any_session_is_pushed_once_with_the_key_in_the_header(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -548,9 +548,7 @@ async fn a_question_of_any_session_is_pushed_once_with_the_key_in_the_header() {
     assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 0);
 }
 
-#[tokio::test]
-async fn a_question_in_another_payload_shape_keeps_its_text() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_question_in_another_payload_shape_keeps_its_text(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -570,9 +568,7 @@ async fn a_question_in_another_payload_shape_keeps_its_text() {
     assert_eq!(fake.seen()[0].body["message"], "Ждёт ответа: Выкатить?");
 }
 
-#[tokio::test]
-async fn a_question_answered_before_delivery_is_not_pushed() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_question_answered_before_delivery_is_not_pushed(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -593,9 +589,7 @@ async fn a_question_answered_before_delivery_is_not_pushed() {
     assert!(fake.seen().is_empty());
 }
 
-#[tokio::test]
-async fn a_finished_turn_of_a_root_session_is_pushed_once_and_a_delegate_turn_is_not() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_finished_turn_of_a_root_session_is_pushed_once_and_a_delegate_turn_is_not(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -645,9 +639,7 @@ async fn a_finished_turn_of_a_root_session_is_pushed_once_and_a_delegate_turn_is
     );
 }
 
-#[tokio::test]
-async fn a_turn_held_by_a_background_task_is_pushed_when_the_background_ends() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_turn_held_by_a_background_task_is_pushed_when_the_background_ends(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -676,9 +668,7 @@ async fn a_turn_held_by_a_background_task_is_pushed_when_the_background_ends() {
     );
 }
 
-#[tokio::test]
-async fn a_turn_from_the_owner_is_pushed_and_a_turn_from_an_event_is_silent() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_turn_from_the_owner_is_pushed_and_a_turn_from_an_event_is_silent(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -737,9 +727,7 @@ async fn a_turn_from_the_owner_is_pushed_and_a_turn_from_an_event_is_silent() {
     );
 }
 
-#[tokio::test]
-async fn an_owner_turn_without_delegates_gives_exactly_one_push() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn an_owner_turn_without_delegates_gives_exactly_one_push(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -777,9 +765,7 @@ async fn an_owner_turn_without_delegates_gives_exactly_one_push() {
     assert_eq!(final_pushes, 0, "пуш о ходе владельца и есть итог");
 }
 
-#[tokio::test]
-async fn the_last_delegate_result_sends_one_all_done_push() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn the_last_delegate_result_sends_one_all_done_push(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -909,9 +895,7 @@ async fn the_last_delegate_result_sends_one_all_done_push() {
     );
 }
 
-#[tokio::test]
-async fn a_delegate_stuck_on_the_owner_holds_the_all_done_push() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_delegate_stuck_on_the_owner_holds_the_all_done_push(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -988,9 +972,7 @@ async fn a_delegate_stuck_on_the_owner_holds_the_all_done_push() {
     assert_eq!(turn_finished(&pool, s.conversation_id).await, 2);
 }
 
-#[tokio::test]
-async fn a_queued_spawn_holds_the_all_done_push() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_queued_spawn_holds_the_all_done_push(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -1080,9 +1062,7 @@ async fn a_queued_spawn_holds_the_all_done_push() {
     assert_eq!(turn_finished(&pool, s.conversation_id).await, 2);
 }
 
-#[tokio::test]
-async fn the_owner_mark_is_reloaded_from_the_database() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn the_owner_mark_is_reloaded_from_the_database(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -1187,9 +1167,7 @@ async fn block(
     .unwrap();
 }
 
-#[tokio::test]
-async fn a_finished_turn_without_text_does_not_show_the_previous_answer() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_finished_turn_without_text_does_not_show_the_previous_answer(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1240,9 +1218,7 @@ async fn a_finished_turn_without_text_does_not_show_the_previous_answer() {
     assert_eq!(seen[0].body["message"], "Ход завершён");
 }
 
-#[tokio::test]
-async fn a_turn_is_pushed_once_even_when_the_state_flaps() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_turn_is_pushed_once_even_when_the_state_flaps(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     let now = Utc::now();
@@ -1314,9 +1290,7 @@ async fn owner_reclaimed(pool: &PgPool, execution: Uuid) {
     .unwrap();
 }
 
-#[tokio::test]
-async fn a_reopened_request_is_pushed_only_if_the_first_push_never_left() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_reopened_request_is_pushed_only_if_the_first_push_never_left(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1355,9 +1329,7 @@ async fn a_reopened_request_is_pushed_only_if_the_first_push_never_left() {
     assert_eq!(fake.seen().len(), 2);
 }
 
-#[tokio::test]
-async fn a_revived_waiting_push_is_fresh_even_if_the_first_row_is_old() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_revived_waiting_push_is_fresh_even_if_the_first_row_is_old(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1392,9 +1364,7 @@ async fn a_revived_waiting_push_is_fresh_even_if_the_first_row_is_old() {
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[tokio::test]
-async fn an_old_idle_session_does_not_push_after_a_restart() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn an_old_idle_session_does_not_push_after_a_restart(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -1413,9 +1383,7 @@ async fn an_old_idle_session_does_not_push_after_a_restart() {
     assert!(pushes(&pool).await.is_empty());
 }
 
-#[tokio::test]
-async fn a_late_event_does_not_revive_an_old_turn_push() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_late_event_does_not_revive_an_old_turn_push(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -1456,9 +1424,7 @@ async fn lose(pool: &PgPool, conversation: Uuid, execution: Uuid) {
     }
 }
 
-#[tokio::test]
-async fn a_failure_of_a_root_session_is_pushed_once_and_a_delegate_failure_is_not() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_failure_of_a_root_session_is_pushed_once_and_a_delegate_failure_is_not(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1479,9 +1445,7 @@ async fn a_failure_of_a_root_session_is_pushed_once_and_a_delegate_failure_is_no
     assert_eq!(seen[0].body["message"], "Сессия упала: воркер потерян");
 }
 
-#[tokio::test]
-async fn one_failure_push_per_episode_survives_a_failed_idle_bounce() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn one_failure_push_per_episode_survives_a_failed_idle_bounce(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     start(&pool, s.owner_id, s.conversation_id).await;
@@ -1524,9 +1488,7 @@ async fn one_failure_push_per_episode_survives_a_failed_idle_bounce() {
     assert_eq!(failure_pushes(&pool, s.conversation_id).await, 1);
 }
 
-#[tokio::test]
-async fn one_failure_push_per_episode_survives_a_stalled_working_bounce() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn one_failure_push_per_episode_survives_a_stalled_working_bounce(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     start(&pool, s.owner_id, s.conversation_id).await;
@@ -1574,9 +1536,7 @@ async fn one_failure_push_per_episode_survives_a_stalled_working_bounce() {
     assert_eq!(failure_pushes(&pool, s.conversation_id).await, 1);
 }
 
-#[tokio::test]
-async fn a_read_episode_never_pushes_again() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_read_episode_never_pushes_again(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     start(&pool, s.owner_id, s.conversation_id).await;
@@ -1628,9 +1588,7 @@ async fn a_read_episode_never_pushes_again() {
     assert_eq!(failure_pushes(&pool, s.conversation_id).await, 0);
 }
 
-#[tokio::test]
-async fn a_new_execution_failing_is_a_new_episode() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_new_execution_failing_is_a_new_episode(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     let first = start(&pool, s.owner_id, s.conversation_id).await;
@@ -1673,9 +1631,7 @@ async fn a_new_execution_failing_is_a_new_episode() {
     assert_eq!(failure_pushes(&pool, s.conversation_id).await, 2);
 }
 
-#[tokio::test]
-async fn another_reason_is_a_new_episode() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn another_reason_is_a_new_episode(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     start(&pool, s.owner_id, s.conversation_id).await;
@@ -1705,9 +1661,7 @@ async fn another_reason_is_a_new_episode() {
     assert_eq!(failure_pushes(&pool, s.conversation_id).await, 2);
 }
 
-#[tokio::test]
-async fn delivery_uses_the_database_clock() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn delivery_uses_the_database_clock(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1770,9 +1724,7 @@ async fn queue_turn_finished(
 
 /// Сервер пушей лежит дольше трёх обычных попыток, а запрос всё ещё открыт и агент стоит.
 /// Пуш не бросается: он повторяется и уходит, как только сервер вернулся.
-#[tokio::test]
-async fn a_waiting_push_outlives_a_gotify_outage() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_waiting_push_outlives_a_gotify_outage(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     fake.script(&[500, 503, 500, 502]);
@@ -1804,9 +1756,7 @@ async fn a_waiting_push_outlives_a_gotify_outage() {
 
 /// Паузы после обычных попыток растут вдвое до потолка в 15 минут, а не обнуляются:
 /// лежащий сервер не получает запрос каждую секунду.
-#[tokio::test]
-async fn a_waiting_push_retries_with_a_growing_pause() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_waiting_push_retries_with_a_growing_pause(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     fake.script(&[500; 6]);
@@ -1839,9 +1789,7 @@ async fn a_waiting_push_retries_with_a_growing_pause() {
 
 /// Строка старше получаса при открытом запросе всё равно уходит: лимит в минуту или
 /// долгий сбой сервера не отменяют того, что агент ждёт владельца.
-#[tokio::test]
-async fn an_old_waiting_push_is_sent_while_the_request_is_open() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn an_old_waiting_push_is_sent_while_the_request_is_open(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1862,9 +1810,7 @@ async fn an_old_waiting_push_is_sent_while_the_request_is_open() {
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[tokio::test]
-async fn an_attempt_is_recorded_before_the_request_goes_out() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn an_attempt_is_recorded_before_the_request_goes_out(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1893,9 +1839,7 @@ async fn an_attempt_is_recorded_before_the_request_goes_out() {
     );
 }
 
-#[tokio::test]
-async fn a_server_error_is_retried_and_then_delivered() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_server_error_is_retried_and_then_delivered(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     fake.script(&[500]);
@@ -1926,9 +1870,7 @@ async fn a_server_error_is_retried_and_then_delivered() {
     );
 }
 
-#[tokio::test]
-async fn delivery_gives_up_after_the_last_attempt_without_leaking_the_key() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn delivery_gives_up_after_the_last_attempt_without_leaking_the_key(pool: PgPool) {
     capture_logs();
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
@@ -1967,9 +1909,7 @@ async fn delivery_gives_up_after_the_last_attempt_without_leaking_the_key() {
     }
 }
 
-#[tokio::test]
-async fn a_client_error_is_not_retried() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_client_error_is_not_retried(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     fake.script(&[401]);
@@ -1991,9 +1931,7 @@ async fn a_client_error_is_not_retried() {
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[tokio::test]
-async fn the_rate_limit_defers_the_rest() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn the_rate_limit_defers_the_rest(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "max_per_minute = 2\n");
     enable(&pool).await;
@@ -2014,9 +1952,7 @@ async fn the_rate_limit_defers_the_rest() {
     assert_eq!(sender.deliver_due(&pool).await.unwrap().deferred, 1);
 }
 
-#[tokio::test]
-async fn without_the_section_nothing_is_queued() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn without_the_section_nothing_is_queued(pool: PgPool) {
     let (_dir, config) = load("", None);
     assert!(config.unwrap().notify.gotify.is_none());
     enable(&pool).await;
@@ -2033,9 +1969,7 @@ async fn without_the_section_nothing_is_queued() {
     assert!(pushes(&pool).await.is_empty());
 }
 
-#[tokio::test]
-async fn disabling_at_start_cancels_what_was_pending() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn disabling_at_start_cancels_what_was_pending(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -2049,9 +1983,7 @@ async fn disabling_at_start_cancels_what_was_pending() {
     assert_eq!(pushes(&pool).await[0].2, "cancelled");
 }
 
-#[tokio::test]
-async fn finished_rows_are_cleaned_without_the_section() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn finished_rows_are_cleaned_without_the_section(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2081,9 +2013,7 @@ async fn finished_rows_are_cleaned_without_the_section() {
     assert_eq!(left, [format!("waiting:{fresh}")]);
 }
 
-#[tokio::test]
-async fn trash_cancels_pending_pushes_and_purge_removes_them() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn trash_cancels_pending_pushes_and_purge_removes_them(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2151,9 +2081,7 @@ async fn trash_cancels_pending_pushes_and_purge_removes_them() {
     assert!(pushes(&pool).await.is_empty());
 }
 
-#[tokio::test]
-async fn an_unknown_timezone_is_refused_at_start() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn an_unknown_timezone_is_refused_at_start(pool: PgPool) {
     let error = notify::configure(
         &pool,
         Some(&PushSettings {
@@ -2254,9 +2182,7 @@ fn config_errors_are_clear_at_start() {
     );
 }
 
-#[tokio::test]
-async fn a_visible_and_read_chat_suppresses_waiting_and_turn_finished() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_visible_and_read_chat_suppresses_waiting_and_turn_finished(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2329,9 +2255,7 @@ async fn a_visible_and_read_chat_suppresses_waiting_and_turn_finished() {
     }
 }
 
-#[tokio::test]
-async fn a_hidden_chat_does_not_suppress() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_hidden_chat_does_not_suppress(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2357,9 +2281,7 @@ async fn a_hidden_chat_does_not_suppress() {
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[tokio::test]
-async fn a_second_device_keeps_a_chat_visible_when_another_goes_hidden() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_second_device_keeps_a_chat_visible_when_another_goes_hidden(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2392,9 +2314,7 @@ async fn a_second_device_keeps_a_chat_visible_when_another_goes_hidden() {
     assert!(fake.seen().is_empty());
 }
 
-#[tokio::test]
-async fn a_visible_but_unread_chat_gets_the_push_after_the_postpone() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_visible_but_unread_chat_gets_the_push_after_the_postpone(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2436,9 +2356,7 @@ async fn a_visible_but_unread_chat_gets_the_push_after_the_postpone() {
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[tokio::test]
-async fn a_still_visible_chat_is_postponed_twice_and_then_gets_the_push() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_still_visible_chat_is_postponed_twice_and_then_gets_the_push(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2489,9 +2407,7 @@ async fn a_still_visible_chat_is_postponed_twice_and_then_gets_the_push() {
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[tokio::test]
-async fn presence_expires_after_45_seconds_of_silence() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn presence_expires_after_45_seconds_of_silence(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2517,9 +2433,7 @@ async fn presence_expires_after_45_seconds_of_silence() {
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[tokio::test]
-async fn sign_in_pushes_are_never_suppressed() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn sign_in_pushes_are_never_suppressed(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2537,4 +2451,105 @@ async fn sign_in_pushes_are_never_suppressed() {
         .unwrap();
     assert_eq!((report.sent, report.suppressed), (1, 0));
     assert_eq!(fake.seen()[0].body["title"], "Новый вход в canterlot");
+}
+
+/// Пуш вопроса и итога хода: один раз, ключ в заголовке, делегаты и фоновые задачи.
+/// Перед каждым случаем база возвращается к снимку пустой базы, у каждого случая свой
+/// поддельный Gotify.
+#[tokio::test]
+async fn question_and_turn_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        a_question_of_any_session_is_pushed_once_with_the_key_in_the_header,
+        a_question_in_another_payload_shape_keeps_its_text,
+        a_question_answered_before_delivery_is_not_pushed,
+        a_finished_turn_of_a_root_session_is_pushed_once_and_a_delegate_turn_is_not,
+        a_turn_held_by_a_background_task_is_pushed_when_the_background_ends,
+        a_turn_from_the_owner_is_pushed_and_a_turn_from_an_event_is_silent,
+        an_owner_turn_without_delegates_gives_exactly_one_push,
+        the_last_delegate_result_sends_one_all_done_push,
+        a_delegate_stuck_on_the_owner_holds_the_all_done_push,
+    );
+}
+
+/// Пуш «все делегаты готовы», отметка владельца, повторно открытый запрос,
+/// старые и поздние события.
+/// Перед каждым случаем база возвращается к снимку пустой базы, у каждого случая свой
+/// поддельный Gotify.
+#[tokio::test]
+async fn all_done_and_revive_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        a_queued_spawn_holds_the_all_done_push,
+        the_owner_mark_is_reloaded_from_the_database,
+        a_finished_turn_without_text_does_not_show_the_previous_answer,
+        a_turn_is_pushed_once_even_when_the_state_flaps,
+        a_reopened_request_is_pushed_only_if_the_first_push_never_left,
+        a_revived_waiting_push_is_fresh_even_if_the_first_row_is_old,
+        an_old_idle_session_does_not_push_after_a_restart,
+        a_late_event_does_not_revive_an_old_turn_push,
+    );
+}
+
+/// Пуш сбоя: один на эпизод, новое исполнение и причина, часы базы, перерыв Gotify.
+/// Перед каждым случаем база возвращается к снимку пустой базы, у каждого случая свой
+/// поддельный Gotify.
+#[tokio::test]
+async fn failure_episode_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        a_failure_of_a_root_session_is_pushed_once_and_a_delegate_failure_is_not,
+        one_failure_push_per_episode_survives_a_failed_idle_bounce,
+        one_failure_push_per_episode_survives_a_stalled_working_bounce,
+        a_read_episode_never_pushes_again,
+        a_new_execution_failing_is_a_new_episode,
+        another_reason_is_a_new_episode,
+        delivery_uses_the_database_clock,
+        a_waiting_push_outlives_a_gotify_outage,
+    );
+}
+
+/// Повторы отправки, лимит частоты и настройки пушей. Случай с перехватом логов
+/// идёт последним: после него логи пишутся в общий буфер.
+/// Перед каждым случаем база возвращается к снимку пустой базы, у каждого случая свой
+/// поддельный Gotify.
+#[tokio::test]
+async fn retry_and_settings_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        a_waiting_push_retries_with_a_growing_pause,
+        an_old_waiting_push_is_sent_while_the_request_is_open,
+        an_attempt_is_recorded_before_the_request_goes_out,
+        a_server_error_is_retried_and_then_delivered,
+        a_client_error_is_not_retried,
+        the_rate_limit_defers_the_rest,
+        without_the_section_nothing_is_queued,
+        disabling_at_start_cancels_what_was_pending,
+        finished_rows_are_cleaned_without_the_section,
+        delivery_gives_up_after_the_last_attempt_without_leaking_the_key,
+    );
+}
+
+/// Корзина, часовой пояс и присутствие владельца в чате.
+/// Перед каждым случаем база возвращается к снимку пустой базы, у каждого случая свой
+/// поддельный Gotify.
+#[tokio::test]
+async fn trash_and_presence_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        trash_cancels_pending_pushes_and_purge_removes_them,
+        an_unknown_timezone_is_refused_at_start,
+        a_visible_and_read_chat_suppresses_waiting_and_turn_finished,
+        a_hidden_chat_does_not_suppress,
+        a_second_device_keeps_a_chat_visible_when_another_goes_hidden,
+        a_visible_but_unread_chat_gets_the_push_after_the_postpone,
+        a_still_visible_chat_is_postponed_twice_and_then_gets_the_push,
+        presence_expires_after_45_seconds_of_silence,
+        sign_in_pushes_are_never_suppressed,
+    );
 }
