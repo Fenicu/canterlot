@@ -674,8 +674,8 @@ async fn edit_keeps_attachments_of_a_forwarded_input(pool: PgPool) -> TestResult
     Ok(())
 }
 
-/// Правка ввода в очереди: ревизия, отказ после отправки, гонки с диспетчером и
-/// outbox, вливание, вложения, NUL.
+/// Правка ввода в очереди: ревизия, отказ после отправки, гонка с диспетчером,
+/// вливание.
 /// Перед каждым случаем база возвращается к снимку пустой базы.
 #[tokio::test]
 async fn edit_cases() {
@@ -687,6 +687,16 @@ async fn edit_cases() {
         edit_refused_once_not_queued,
         edit_races_dispatch_without_double_delivery,
         edit_updates_pending_steer_and_refuses_in_flight,
+    );
+}
+
+/// Гонка правки с захватом outbox, список вложений, NUL, вложения пересланного ввода.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn edit_race_and_attachment_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
         edit_races_outbox_claim_without_losing_the_new_text,
         edit_replaces_attachment_list,
         edit_refuses_nul_character,

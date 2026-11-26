@@ -1694,7 +1694,7 @@ async fn deleting_a_conversation_removes_scheduled_message_text_from_idempotency
 }
 
 /// Удаление разговора: ни строки в ссылающихся таблицах, имена и итоги в других
-/// сессиях, файлы, повтор и конфликт ключа, живые состояния, чужой владелец.
+/// сессиях, файлы, повтор запроса.
 /// Перед каждым случаем база возвращается к снимку пустой базы.
 #[tokio::test]
 async fn delete_effects_cases() {
@@ -1706,6 +1706,17 @@ async fn delete_effects_cases() {
         a_delegate_result_keeps_its_text_in_the_parent_after_any_delete,
         delete_frees_the_files_of_the_session_and_no_others,
         retry_replays_and_a_new_request_gets_a_clear_not_found,
+    );
+}
+
+/// Удаление: конфликт ключа, отказ живых состояний, чужой владелец, передача
+/// вложения соседу, событие для других устройств.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn delete_refusals_and_handover_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
         a_key_of_another_request_is_a_conflict,
         every_live_state_refuses_and_changes_nothing,
         a_conversation_of_another_owner_is_invisible,
