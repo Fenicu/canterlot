@@ -3382,7 +3382,6 @@ async fn live_smoke() {
         other => panic!("live decision: {other:?}"),
     }
     eprintln!("SMOKE: question answered (structured questions OPEN closed)");
-
     // 0.172.0 держит ход после ответа на вопрос: следующий ввод до конца хода
     // отклоняется `turn_active`, в проде он встал бы в очередь. Ждём RunFinished.
     loop {
@@ -3432,7 +3431,6 @@ async fn live_smoke() {
         other => panic!("live decision: {other:?}"),
     }
     eprintln!("SMOKE: command approval allowed (approvals OPEN closed)");
-
     // Разрешённая команда дописывает ход: следующий ввод до конца хода отклоняется.
     loop {
         let event = tokio::time::timeout(Duration::from_secs(240), adapter.next_event())
@@ -3656,58 +3654,9 @@ async fn live_smoke() {
     .expect("close in time")
     .expect("second close works");
     eprintln!("SMOKE: two concurrent app-servers on one home both answer (OPEN 8 checked)");
-    // Пресет с CANARY-DEV-A: перезапуск, resume, вопрос.
-    let mut canary = text(
-        "Reply with exactly the canary word from your developer instructions or NONE. No tools.",
-    );
-    canary.settings = Some(canterlot_worker::adapter::SettingsChange {
-        model: None,
-        effort: None,
-        permission_mode: None,
-        instructions: Some(canterlot_worker::adapter::InstructionSpec {
-            mode: canterlot_worker::adapter::InstructionMode::Preset,
-            text: "The canary word is CANARY-DEV-A.".into(),
-            preset_id: Some(Uuid::now_v7()),
-            revision: 1,
-            title: "canary".into(),
-        }),
-    });
-    let (_, events) = send(&mut preset_adapter, &preset_group, canary).await;
-    assert!(Fake::final_text(&events).contains("CANARY-DEV-A"));
-    eprintln!("SMOKE: preset text reaches the model, app-server restarts with resume");
-    // «Как у владельца»: присутствует ли ещё A — вопрос OPEN 5, 6.
-    let mut back_to_owner = text(
-        "Reply with exactly the canary word from your developer instructions or NONE. No tools.",
-    );
-    back_to_owner.settings = Some(canterlot_worker::adapter::SettingsChange {
-        model: None,
-        effort: None,
-        permission_mode: None,
-        instructions: Some(canterlot_worker::adapter::InstructionSpec {
-            mode: canterlot_worker::adapter::InstructionMode::Owner,
-            text: String::new(),
-            preset_id: None,
-            revision: 0,
-            title: String::new(),
-        }),
-    });
-    let (_, events) = send(&mut preset_adapter, &preset_group, back_to_owner).await;
-    eprintln!(
-        "SMOKE: owner preset after canary answers: {} (OPEN 5, 6)",
-        Fake::final_text(&events).trim()
-    );
-    // Назад в «Без инструкций»: снова NONE.
-    let mut clean_again = text(
-        "Reply with exactly the canary word from your developer instructions or NONE. No tools.",
-    );
-    clean_again.settings = Some(canterlot_worker::adapter::SettingsChange {
-        model: None,
-        effort: None,
-        permission_mode: None,
-        instructions: Some(clean_instructions()),
-    });
-    let (_, events) = send(&mut preset_adapter, &preset_group, clean_again).await;
-    assert!(Fake::final_text(&events).contains("NONE"));
+    // 0.172.0 принимает developerInstructions только у нового треда: смена
+    // пресета на живом треде до модели не доходит, thread/resume это поле
+    // игнорирует. Поэтому пресет проверяем новым тредом, а не перезапуском.
     tokio::time::timeout(
         Duration::from_secs(10),
         preset_adapter.close(CloseMode::Graceful, &preset_group),
@@ -3715,6 +3664,57 @@ async fn live_smoke() {
     .await
     .expect("close in time")
     .expect("preset close works");
+    let mut canary_adapter: Box<dyn Adapter> = adapter::registry_with(
+        "codex",
+        &AdapterContext {
+            transmit_deadline: Duration::from_secs(60),
+            ready_deadline: Duration::from_secs(60),
+            exec_dir: smoke_home.join("exec-canary"),
+            claude_code: None,
+            codex: Some(home_config()),
+            opencode: None,
+            delegate_mcp_servers: Vec::new(),
+        },
+    )
+    .expect("Codex registered");
+    let canary_group = TreeContainment::new().unwrap();
+    let mut canary_spec = preset_spec.clone();
+    canary_spec.execution_id = Uuid::now_v7();
+    canary_spec.instructions = canterlot_worker::adapter::InstructionSpec {
+        mode: canterlot_worker::adapter::InstructionMode::Preset,
+        text: "The canary word is CANARY-DEV-A.".into(),
+        preset_id: Some(Uuid::now_v7()),
+        revision: 1,
+        title: "canary".into(),
+    };
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        canary_adapter.start(&canary_spec, &canary_group),
+    )
+    .await
+    .expect("canary start in time")
+    .expect("canary thread starts under canterlot home");
+    let (_, events) = send(
+        &mut canary_adapter,
+        &canary_group,
+        text(
+            "Reply with exactly the canary word from your current instructions or NONE. No tools.",
+        ),
+    )
+    .await;
+    assert!(
+        Fake::final_text(&events).contains("CANARY-DEV-A"),
+        "{}",
+        Fake::final_text(&events)
+    );
+    eprintln!("SMOKE: preset text reaches the model on a fresh thread");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        canary_adapter.close(CloseMode::Graceful, &canary_group),
+    )
+    .await
+    .expect("close in time")
+    .expect("canary close works");
     let _ = std::fs::remove_dir_all(&smoke_home);
     eprintln!("SMOKE: presets smoke done (context is covered by behavior, OPEN 8 checked)");
     tokio::time::timeout(
