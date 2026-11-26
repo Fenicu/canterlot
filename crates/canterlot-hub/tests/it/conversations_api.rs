@@ -17,6 +17,8 @@ use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, run_cases};
+
 struct Fixture {
     pool: PgPool,
     client: TestClient,
@@ -24,6 +26,7 @@ struct Fixture {
     machine: Uuid,
     registry: canterlot_hub::session::Registry,
     _leases: Vec<canterlot_hub::session::TestLease>,
+    snapshot: Option<Snapshot>,
     _dir: tempfile::TempDir,
 }
 impl Fixture {
@@ -43,11 +46,21 @@ impl Fixture {
             machine,
             registry,
             _leases: Vec::new(),
+            snapshot: None,
             _dir: dir,
         };
         // Машина пилота по умолчанию знает снимок инструкций (план 2c, задача 3).
         this.caps(&["pilot_v1", "instructions_v1"]);
+        this.snapshot = Some(Snapshot::take(&this.pool).await);
         this
+    }
+
+    /// Перед случаем таблицы: база как после `new`, машина снова с прежними способностями.
+    async fn reset(&mut self) {
+        if let Some(snapshot) = &self.snapshot {
+            snapshot.restore(&self.pool).await;
+        }
+        self.caps(&["pilot_v1", "instructions_v1"]);
     }
 
     fn caps(&mut self, capabilities: &[&str]) {
@@ -179,10 +192,7 @@ impl Fixture {
     }
 }
 
-#[tokio::test]
-async fn create_validates_against_machine_catalog_with_distinct_codes() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn create_validates_against_machine_catalog_with_distinct_codes(f: &mut Fixture) {
     for (field, value, code) in [
         ("machine_id", json!(Uuid::now_v7()), "machine_not_found"),
         ("harness", json!("missing"), "harness_unknown"),
@@ -244,10 +254,7 @@ async fn create_validates_against_machine_catalog_with_distinct_codes() {
         0
     );
 }
-#[tokio::test]
-async fn create_is_idempotent_by_key() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn create_is_idempotent_by_key(f: &mut Fixture) {
     let a = f
         .client
         .send(
@@ -284,10 +291,7 @@ async fn create_is_idempotent_by_key() {
     assert_eq!(f.list("").await["items"].as_array().unwrap().len(), 1);
     assert_eq!(f.events("conversation_created").await.len(), 1);
 }
-#[tokio::test]
-async fn create_with_start_queues_start_execution_with_settings() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn create_with_start_queues_start_execution_with_settings(f: &mut Fixture) {
     let id = f
         .create(json!({"start":true,"permission_mode":"bypass"}))
         .await;
@@ -313,10 +317,7 @@ async fn create_with_start_queues_start_execution_with_settings() {
     assert_eq!(created[0]["model"], "synthetic-small");
     assert_eq!(created[0]["counts"]["all"], 1);
 }
-#[tokio::test]
-async fn new_conversation_has_queue_state_and_no_live_execution_hold() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn new_conversation_has_queue_state_and_no_live_execution_hold(f: &mut Fixture) {
     let id = f.create(json!({})).await;
     let hold: Value =
         sqlx::query_scalar("select hold_reasons from queue_state where conversation_id=$1")
@@ -330,10 +331,7 @@ async fn new_conversation_has_queue_state_and_no_live_execution_hold() {
     assert!(d["execution"].is_null());
     assert_eq!(d["settings"]["effective"]["permission_mode"], "bypass");
 }
-#[tokio::test]
-async fn new_conversation_defaults_to_bypass_and_keeps_an_explicit_choice() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn new_conversation_defaults_to_bypass_and_keeps_an_explicit_choice(f: &mut Fixture) {
     let default = f.create(json!({})).await;
     assert_eq!(f.get(default).await["permission_mode"], "bypass");
     sqlx::query("update machine_harnesses set permission_modes='[\"owner\",\"bypass\"]'")
@@ -343,10 +341,7 @@ async fn new_conversation_defaults_to_bypass_and_keeps_an_explicit_choice() {
     let chosen = f.create(json!({"permission_mode":"owner"})).await;
     assert_eq!(f.get(chosen).await["permission_mode"], "owner");
 }
-#[tokio::test]
-async fn session_without_a_chosen_mode_starts_as_owner_and_keeps_its_stored_value() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn session_without_a_chosen_mode_starts_as_owner_and_keeps_its_stored_value(f: &mut Fixture) {
     let id = f.create(json!({})).await;
     sqlx::query("update conversations set permission_mode='' where id=$1")
         .bind(id)
@@ -376,10 +371,7 @@ async fn session_without_a_chosen_mode_starts_as_owner_and_keeps_its_stored_valu
             .unwrap();
     assert_eq!(stored, "");
 }
-#[tokio::test]
-async fn pin_color_archive_title_roundtrip_and_emit_list_events() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn pin_color_archive_title_roundtrip_and_emit_list_events(f: &mut Fixture) {
     let id = f.create(json!({})).await;
     let d = f
         .patch(id, json!({"title":"Название","color":"teal","pinned":true}))
@@ -394,10 +386,9 @@ async fn pin_color_archive_title_roundtrip_and_emit_list_events() {
     f.patch(id, json!({"archived":false,"pinned":false})).await;
     assert_eq!(f.events("conversation_updated").await.len(), 3);
 }
-#[tokio::test]
-async fn conversation_updated_carries_attributes_and_counts_and_never_volatile_fields() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn conversation_updated_carries_attributes_and_counts_and_never_volatile_fields(
+    f: &mut Fixture,
+) {
     let id = f.create(json!({})).await;
     f.patch(id, json!({"title":"Ручное"})).await;
     let p = &f.events("conversation_updated").await[0];
@@ -426,10 +417,7 @@ async fn conversation_updated_carries_attributes_and_counts_and_never_volatile_f
     .unwrap();
     assert_eq!(*p, chat);
 }
-#[tokio::test]
-async fn archived_conversations_leave_default_list_and_appear_in_archive() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn archived_conversations_leave_default_list_and_appear_in_archive(f: &mut Fixture) {
     let id = f.create(json!({})).await;
     f.patch(id, json!({"pinned":true,"archived":true})).await;
     assert!(f.list("").await["items"].as_array().unwrap().is_empty());
@@ -444,10 +432,7 @@ async fn archived_conversations_leave_default_list_and_appear_in_archive() {
     assert_eq!(archived["counts"]["archived"], 1);
     assert_eq!(archived["counts"]["all"], 0);
 }
-#[tokio::test]
-async fn archiving_with_active_crunch_or_schedule_answers_409_unless_forced() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn archiving_with_active_crunch_or_schedule_answers_409_unless_forced(f: &mut Fixture) {
     let id = f.create(json!({"crunch":{"enabled":true}})).await;
     f.request(Method::POST,&format!("/api/v1/conversations/{id}/scheduled"),Some(json!({"run_at":Utc::now()+TimeDelta::hours(1),"content":[{"type":"text","text":"scheduled"}]})),201).await;
     let path = format!("/api/v1/conversations/{id}");
@@ -490,12 +475,9 @@ async fn archive_refusal(f: &Fixture, id: Uuid) -> Value {
     r["error"]["details"]["reasons"].clone()
 }
 
-#[tokio::test]
-async fn idle_process_archives_without_a_warning_and_stays_alive() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn idle_process_archives_without_a_warning_and_stays_alive(f: &mut Fixture) {
     let id = f.create(json!({"start":true})).await;
-    set_phase(&f, id, "awaiting_input").await;
+    set_phase(f, id, "awaiting_input").await;
     let archived = f.patch(id, json!({"archived":true})).await;
     assert_eq!(archived["archived"], true);
     let state: String = sqlx::query_scalar("select state from executions where conversation_id=$1")
@@ -506,10 +488,7 @@ async fn idle_process_archives_without_a_warning_and_stays_alive() {
     assert_eq!(state, "running");
 }
 
-#[tokio::test]
-async fn a_turn_in_progress_still_asks_before_archiving() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn a_turn_in_progress_still_asks_before_archiving(f: &mut Fixture) {
     for phase in [
         "generating",
         "running_tool",
@@ -518,16 +497,16 @@ async fn a_turn_in_progress_still_asks_before_archiving() {
         "awaiting_answer",
     ] {
         let id = f.create(json!({"start":true})).await;
-        set_phase(&f, id, phase).await;
+        set_phase(f, id, phase).await;
         assert_eq!(
-            archive_refusal(&f, id).await,
+            archive_refusal(f, id).await,
             json!(["live_execution"]),
             "{phase}"
         );
         f.patch(id, json!({"archived":true,"force":true})).await;
     }
     let held = f.create(json!({"start":true})).await;
-    set_phase(&f, held, "awaiting_input").await;
+    set_phase(f, held, "awaiting_input").await;
     sqlx::query(
         "update queue_state set run_slot='running',run_slot_input_id=$2 where conversation_id=$1",
     )
@@ -536,9 +515,9 @@ async fn a_turn_in_progress_still_asks_before_archiving() {
     .execute(&f.pool)
     .await
     .unwrap();
-    assert_eq!(archive_refusal(&f, held).await, json!(["live_execution"]));
+    assert_eq!(archive_refusal(f, held).await, json!(["live_execution"]));
     let asked = f.create(json!({"start":true})).await;
-    set_phase(&f, asked, "awaiting_input").await;
+    set_phase(f, asked, "awaiting_input").await;
     sqlx::query(
         "insert into requests(id,conversation_id,execution_id,generation,kind,native_request_id,state,request_payload)
          select $1,$2,e.id,e.generation,'question','archive','open','{}' from executions e where e.conversation_id=$2",
@@ -548,13 +527,10 @@ async fn a_turn_in_progress_still_asks_before_archiving() {
     .execute(&f.pool)
     .await
     .unwrap();
-    assert_eq!(archive_refusal(&f, asked).await, json!(["live_execution"]));
+    assert_eq!(archive_refusal(f, asked).await, json!(["live_execution"]));
 }
 
-#[tokio::test]
-async fn the_lost_owner_is_no_turn_and_a_repeated_archive_answers_the_same() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn the_lost_owner_is_no_turn_and_a_repeated_archive_answers_the_same(f: &mut Fixture) {
     let id = f.create(json!({"start":true})).await;
     sqlx::query(
         "update executions set state='owner_lost',phase='generating' where conversation_id=$1",
@@ -578,10 +554,7 @@ async fn the_lost_owner_is_no_turn_and_a_repeated_archive_answers_the_same() {
     assert_eq!(second.status.as_u16(), 200);
     assert_eq!(first.body, second.body);
 }
-#[tokio::test]
-async fn title_search_is_case_insensitive_and_escapes_like_wildcards() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn title_search_is_case_insensitive_and_escapes_like_wildcards(f: &mut Fixture) {
     for title in ["Ёлка", "Сборка", "100%_done\\", "100xxdone"] {
         f.create(json!({"title":title})).await;
     }
@@ -596,10 +569,7 @@ async fn title_search_is_case_insensitive_and_escapes_like_wildcards() {
         assert_eq!(p["items"][0]["title"], title);
     }
 }
-#[tokio::test]
-async fn groups_are_many_to_many_and_counted() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn groups_are_many_to_many_and_counted(f: &mut Fixture) {
     let a = f.group("А").await;
     let b = f.group("Б").await;
     let id = f.create(json!({"group_ids":[a,b]})).await;
@@ -627,10 +597,7 @@ async fn groups_are_many_to_many_and_counted() {
         1
     );
 }
-#[tokio::test]
-async fn group_names_are_unique_case_insensitively() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn group_names_are_unique_case_insensitively(f: &mut Fixture) {
     let a = f.group("Ёлка").await;
     let b = f.group("Другая").await;
     let r = f
@@ -666,10 +633,8 @@ async fn group_names_are_unique_case_insensitively() {
     )
     .await;
 }
-#[tokio::test]
-async fn group_icon_is_set_on_create_changed_by_patch_and_checked() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool.clone()).await;
+async fn group_icon_is_set_on_create_changed_by_patch_and_checked(f: &mut Fixture) {
+    let pool = f.pool.clone();
     let work = f
         .request(
             Method::POST,
@@ -740,10 +705,7 @@ async fn group_icon_is_set_on_create_changed_by_patch_and_checked() {
         "{check}"
     );
 }
-#[tokio::test]
-async fn deleting_a_group_keeps_its_conversations() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn deleting_a_group_keeps_its_conversations(f: &mut Fixture) {
     let g = f.group("Группа").await;
     let id = f.create(json!({"group_ids":[g]})).await;
     f.request(Method::DELETE, &format!("/api/v1/groups/{g}"), None, 204)
@@ -751,10 +713,7 @@ async fn deleting_a_group_keeps_its_conversations() {
     assert_eq!(f.get(id).await["groups"], json!([]));
     assert_eq!(f.list("").await["counts"]["all"], 1);
 }
-#[tokio::test]
-async fn group_deletion_emits_conversation_updated_for_former_members_with_counts() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn group_deletion_emits_conversation_updated_for_former_members_with_counts(f: &mut Fixture) {
     let g = f.group("Группа").await;
     let ids = vec![
         f.create(json!({"group_ids":[g]})).await,
@@ -775,10 +734,7 @@ async fn group_deletion_emits_conversation_updated_for_former_members_with_count
         2
     );
 }
-#[tokio::test]
-async fn list_pages_by_cursor_without_gaps() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn list_pages_by_cursor_without_gaps(f: &mut Fixture) {
     let mut ids = Vec::new();
     for i in 0..9 {
         let id = f.create(json!({})).await;
@@ -811,18 +767,13 @@ async fn list_pages_by_cursor_without_gaps() {
     }
     assert_eq!(seen.len(), ids.len());
 }
-#[tokio::test]
-async fn list_item_machine_is_id_and_name_only() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn list_item_machine_is_id_and_name_only(f: &mut Fixture) {
     f.create(json!({})).await;
     let m = f.list("").await["items"][0]["machine"].clone();
     assert_eq!(m, json!({"id":f.machine,"name":"Машина"}));
 }
-#[tokio::test]
-async fn list_item_carries_working_time_without_owner_waits() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool.clone()).await;
+async fn list_item_carries_working_time_without_owner_waits(f: &mut Fixture) {
+    let pool = f.pool.clone();
     let id = f.create(json!({})).await;
     let execution = executions::start(&pool, f.owner, id, Uuid::now_v7())
         .await
@@ -878,10 +829,8 @@ async fn list_item_carries_working_time_without_owner_waits() {
     assert_eq!(item["working_ms"], json!(300_000));
 }
 
-#[tokio::test]
-async fn list_item_merges_overlapping_owner_waits() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool.clone()).await;
+async fn list_item_merges_overlapping_owner_waits(f: &mut Fixture) {
+    let pool = f.pool.clone();
     let id = f.create(json!({})).await;
     let execution = executions::start(&pool, f.owner, id, Uuid::now_v7())
         .await
@@ -942,10 +891,7 @@ async fn list_item_merges_overlapping_owner_waits() {
     assert_eq!(item["working_ms"], json!(180_000));
 }
 
-#[tokio::test]
-async fn foreign_conversation_ids_are_not_found() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn foreign_conversation_ids_are_not_found(f: &mut Fixture) {
     let foreign = testkit::seed(&f.pool).await;
     let g = Uuid::now_v7();
     sqlx::query("insert into conversation_groups(id,owner_id,name) values($1,$2,'Чужая')")
@@ -1004,10 +950,7 @@ async fn foreign_conversation_ids_are_not_found() {
     )
     .await;
 }
-#[tokio::test]
-async fn unread_marker_is_monotonic() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn unread_marker_is_monotonic(f: &mut Fixture) {
     let id = f.create(json!({})).await;
     for seq in ["20", "10", "30", "0"] {
         f.request(
@@ -1034,10 +977,7 @@ async fn unread_marker_is_monotonic() {
     )
     .await;
 }
-#[tokio::test]
-async fn read_marker_on_one_device_updates_unread_on_another_via_derived_changed() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn read_marker_on_one_device_updates_unread_on_another_via_derived_changed(f: &mut Fixture) {
     let id = f.create(json!({"start":true})).await;
     sqlx::query("insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,created_seq) select $1,id,$2,'text','final',1,5 from executions where conversation_id=$2").bind(Uuid::now_v7()).bind(id).execute(&f.pool).await.unwrap();
     canterlot_hub::activity::refresh(
@@ -1066,10 +1006,7 @@ async fn read_marker_on_one_device_updates_unread_on_another_via_derived_changed
     );
     assert_eq!(f.get(id).await["unread_count"], 0);
 }
-#[tokio::test]
-async fn sibling_with_common_prefix_is_not_under_the_root() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn sibling_with_common_prefix_is_not_under_the_root(f: &mut Fixture) {
     sqlx::query("update machines set allowed_roots='[\"/home/a\"]' where id=$1")
         .bind(f.machine)
         .execute(&f.pool)
@@ -1105,11 +1042,8 @@ fn incompressible_workdir(bytes: usize) -> String {
     path
 }
 
-#[tokio::test]
-async fn workdir_length_is_capped_with_a_validation_error() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn workdir_length_is_capped_with_a_validation_error(f: &mut Fixture) {
     use canterlot_hub::conversations::MAX_WORKDIR_BYTES;
-    let f = Fixture::new(pool).await;
     for bytes in [3000, MAX_WORKDIR_BYTES + 1, 4096] {
         let mut b = f.body();
         b["workdir"] = json!(incompressible_workdir(bytes));
@@ -1123,10 +1057,7 @@ async fn workdir_length_is_capped_with_a_validation_error() {
     let id = f.create(json!({"workdir":longest})).await;
     assert_eq!(f.get(id).await["workdir"], longest);
 }
-#[tokio::test]
-async fn recent_workdirs_shows_last_three_from_remembered_table() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn recent_workdirs_shows_last_three_from_remembered_table(f: &mut Fixture) {
     for i in 0..23 {
         f.create(json!({"workdir":format!("/tmp/{i}")})).await;
     }
@@ -1223,12 +1154,9 @@ async fn metrics(f: &Fixture, free: u64, ms: u64) {
     .await
     .unwrap();
 }
-#[tokio::test]
-async fn machines_endpoint_lists_catalog_os_metrics_and_disk_warning() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn machines_endpoint_lists_catalog_os_metrics_and_disk_warning(f: &mut Fixture) {
     let id = f.create(json!({"title":"Сессия"})).await;
-    metrics(&f, 30_500_000_000, 1).await;
+    metrics(f, 30_500_000_000, 1).await;
     let path = format!("/api/v1/machines/{}", f.machine);
     let m = f.request(Method::GET, &path, None, 200).await;
     assert_eq!(m["os"], "linux");
@@ -1245,7 +1173,7 @@ async fn machines_endpoint_lists_catalog_os_metrics_and_disk_warning() {
     assert_eq!(m["sessions"][0]["activity_state"], "idle");
     assert_eq!(m["availability"], "available");
     assert_eq!(m["warnings"], json!([]));
-    metrics(&f, 30_000_000_000, 2).await;
+    metrics(f, 30_000_000_000, 2).await;
     let m = f.request(Method::GET, &path, None, 200).await;
     assert_eq!(m["warnings"], json!(["disk_usage_high"]));
     assert_eq!(
@@ -1255,11 +1183,8 @@ async fn machines_endpoint_lists_catalog_os_metrics_and_disk_warning() {
     assert!(m.get("availability_since").is_some());
     assert!(m.get("heartbeat_age_ms").is_some());
 }
-#[tokio::test]
-async fn machines_endpoint_flags_limits_mismatch_and_stale_metrics() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
-    metrics(&f, 30_500_000_000, 1).await;
+async fn machines_endpoint_flags_limits_mismatch_and_stale_metrics(f: &mut Fixture) {
+    metrics(f, 30_500_000_000, 1).await;
     sqlx::query("update machines set limits_ok=false where id=$1")
         .bind(f.machine)
         .execute(&f.pool)
@@ -1279,11 +1204,8 @@ async fn machines_endpoint_flags_limits_mismatch_and_stale_metrics() {
         .await;
     assert_eq!(m["warnings"], json!(["metrics_stale", "limits_mismatch"]));
 }
-#[tokio::test]
-async fn machines_endpoint_shows_a_journal_stop_until_its_cursor_passes() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
-    metrics(&f, 30_500_000_000, 1).await;
+async fn machines_endpoint_shows_a_journal_stop_until_its_cursor_passes(f: &mut Fixture) {
+    metrics(f, 30_500_000_000, 1).await;
     let (cj, sj) = (Uuid::now_v7(), Uuid::now_v7());
     for (journal, kind) in [(cj, "cj"), (sj, "sj")] {
         sqlx::query(
@@ -1336,11 +1258,10 @@ async fn limits_fixture(f: &Fixture) {
     sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens) select input_command_id,'synthetic-small',agent,10,20,0,0 from runs cross join (values('main'),('helper')) a(agent)").execute(&f.pool).await.unwrap();
 }
 const HISTORY: &str = "/api/v1/limits/history?provider=claude&from=2026-10-26T00%3A00%3A00Z&to=2026-10-28T00%3A00%3A00Z&tz=Europe%2FMoscow";
-#[tokio::test]
-async fn limits_endpoint_returns_current_reserve_flag_and_history_grouped_by_day_session_model() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
-    limits_fixture(&f).await;
+async fn limits_endpoint_returns_current_reserve_flag_and_history_grouped_by_day_session_model(
+    f: &mut Fixture,
+) {
+    limits_fixture(f).await;
     let current = f.request(Method::GET, "/api/v1/limits", None, 200).await;
     assert_eq!(current[0]["weekly_reserve_active"], true);
     assert_eq!(current[0]["weekly"]["used_permille"], 954);
@@ -1363,11 +1284,8 @@ async fn limits_endpoint_returns_current_reserve_flag_and_history_grouped_by_day
     f.request(Method::GET, &format!("{HISTORY}bad"), None, 400)
         .await;
 }
-#[tokio::test]
-async fn limits_history_has_five_hour_series_and_agent_breakdown() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
-    limits_fixture(&f).await;
+async fn limits_history_has_five_hour_series_and_agent_breakdown(f: &mut Fixture) {
+    limits_fixture(f).await;
     let h = f.request(Method::GET, HISTORY, None, 200).await;
     assert_eq!(h["series"][0]["five_hour"][0]["used_permille"], 123);
     assert_eq!(h["series"][0]["weekly"][0]["used_permille"], 954);
@@ -1380,11 +1298,8 @@ async fn limits_history_has_five_hour_series_and_agent_breakdown() {
     agents.sort();
     assert_eq!(agents, vec!["helper", "main"]);
 }
-#[tokio::test]
-async fn limits_history_reports_median_speed_per_model_for_today_and_the_period() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
-    limits_fixture(&f).await;
+async fn limits_history_reports_median_speed_per_model_for_today_and_the_period(f: &mut Fixture) {
+    limits_fixture(f).await;
     let h = f.request(Method::GET, HISTORY, None, 200).await;
     assert_eq!(h["speed"], json!([]));
     sqlx::query("update runs set finished_at=started_at+interval '10 seconds',exact=true")
@@ -1418,10 +1333,7 @@ async fn limits_history_reports_median_speed_per_model_for_today_and_the_period(
     );
 }
 
-#[tokio::test]
-async fn forced_archive_skips_claimed_jobs_and_rolls_back_every_effect() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn forced_archive_skips_claimed_jobs_and_rolls_back_every_effect(f: &mut Fixture) {
     let id = f.create(json!({"crunch":{"enabled":true}})).await;
     let message=f.request(Method::POST,&format!("/api/v1/conversations/{id}/scheduled"),Some(json!({"run_at":Utc::now()+TimeDelta::hours(1),"content":[{"type":"text","text":"scheduled"}]})),201).await;
     let job: Uuid = message["id"].as_str().unwrap().parse().unwrap();
@@ -1463,10 +1375,7 @@ async fn forced_archive_skips_claimed_jobs_and_rolls_back_every_effect() {
     assert_eq!(r.status, 200);
 }
 
-#[tokio::test]
-async fn projector_materialises_settings_and_crunch_without_attribute_event() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn projector_materialises_settings_and_crunch_without_attribute_event(f: &mut Fixture) {
     let id = f.create(json!({})).await;
     f.request(
         Method::PUT,
@@ -1497,10 +1406,7 @@ async fn projector_materialises_settings_and_crunch_without_attribute_event() {
         canterlot_hub::config::LimitsConfig::default().default_resume_text
     );
 }
-#[tokio::test]
-async fn missing_derived_rows_remain_listable_and_refresh_upserts() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn missing_derived_rows_remain_listable_and_refresh_upserts(f: &mut Fixture) {
     let id = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
     assert_eq!(f.get(id).await["activity"]["state"], "idle");
     assert_eq!(f.list("").await["items"][0]["id"], id.to_string());
@@ -1524,12 +1430,9 @@ async fn missing_derived_rows_remain_listable_and_refresh_upserts() {
         1
     );
 }
-#[tokio::test]
-async fn start_in_tx_preserves_resume_native_id_and_outbox_settings() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn start_in_tx_preserves_resume_native_id_and_outbox_settings(f: &mut Fixture) {
     use canterlot_hub::{executions, outbox};
     use canterlot_proto::worker::v1::command;
-    let f = Fixture::new(pool).await;
     let id = f
         .create(json!({"start":true,"permission_mode":"bypass"}))
         .await;
@@ -1577,11 +1480,8 @@ async fn start_in_tx_preserves_resume_native_id_and_outbox_settings() {
     );
 }
 
-#[tokio::test]
-async fn machine_api_exposes_the_reported_home_and_an_old_worker_leaves_it_empty() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn machine_api_exposes_the_reported_home_and_an_old_worker_leaves_it_empty(f: &mut Fixture) {
     use canterlot_proto::worker::v1::MachineReport;
-    let f = Fixture::new(pool).await;
     let path = format!("/api/v1/machines/{}", f.machine);
     assert_eq!(
         f.request(Method::GET, &path, None, 200).await["home_dir"],
@@ -1632,10 +1532,7 @@ fn answer(machine: Uuid, directories: &[&str], request: SuggestWorkdirs, registr
     );
 }
 
-#[tokio::test]
-async fn workdir_suggestions_come_from_the_live_worker() {
-    let pool = canterlot_hub::testkit::db().await;
-    let mut f = Fixture::new(pool).await;
+async fn workdir_suggestions_come_from_the_live_worker(f: &mut Fixture) {
     f._leases.clear();
     let mut session = testkit::fake_session(
         &f.registry,
@@ -1668,10 +1565,7 @@ async fn workdir_suggestions_come_from_the_live_worker() {
     worker.await.unwrap();
 }
 
-#[tokio::test]
-async fn workdir_suggestions_are_empty_without_a_capable_live_worker() {
-    let pool = canterlot_hub::testkit::db().await;
-    let mut f = Fixture::new(pool).await;
+async fn workdir_suggestions_are_empty_without_a_capable_live_worker(f: &mut Fixture) {
     let path = format!("/api/v1/machines/{}/workdirs/suggest?path=/tmp/", f.machine);
     f._leases.clear();
     assert_eq!(
@@ -1723,10 +1617,7 @@ async fn workdir_suggestions_are_empty_without_a_capable_live_worker() {
     assert_eq!(missing["error"]["code"], "invalid_request");
 }
 
-#[tokio::test]
-async fn suggestion_wait_is_bounded_and_answers_match_the_asking_machine() {
-    let pool = canterlot_hub::testkit::db().await;
-    let mut f = Fixture::new(pool).await;
+async fn suggestion_wait_is_bounded_and_answers_match_the_asking_machine(f: &mut Fixture) {
     f._leases.clear();
     let mut session = testkit::fake_session(
         &f.registry,
@@ -1793,11 +1684,10 @@ async fn suggestion_wait_is_bounded_and_answers_match_the_asking_machine() {
     }
 }
 
-#[tokio::test]
-async fn catalog_changes_publish_new_harness_attributes_in_both_conversation_scopes() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn catalog_changes_publish_new_harness_attributes_in_both_conversation_scopes(
+    f: &mut Fixture,
+) {
     use canterlot_proto::worker::v1::{HarnessInfo, MachineReport, ModelInfo};
-    let f = Fixture::new(pool).await;
     let id = f.create(json!({})).await;
     let report = MachineReport {
         worker_version: "updated".into(),
@@ -1839,13 +1729,9 @@ async fn catalog_changes_publish_new_harness_attributes_in_both_conversation_sco
 }
 
 // Отчёт воркера с новой возможностью проходит через боевой composed-роутер до снимка машины.
-#[tokio::test]
-async fn machine_report_cli_versions_reach_the_machine_snapshot() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn machine_report_cli_versions_reach_the_machine_snapshot(f: &mut Fixture) {
     use canterlot_hub::session::CAPABILITY_CLI_VERSIONS_V1;
     use canterlot_proto::worker::v1::{HarnessInfo, MachineReport, ModelInfo};
-
-    let f = Fixture::new(pool).await;
     let report = MachineReport {
         worker_version: "updated".into(),
         allowed_roots: vec!["/tmp".into()],
@@ -1914,13 +1800,9 @@ async fn machine_report_cli_versions_reach_the_machine_snapshot() {
 }
 
 // Каталог slash-команд проходит через боевой composed-роутер: отчёт воркера -> хаб -> снимок.
-#[tokio::test]
-async fn machine_report_slash_catalog_reaches_the_machine_snapshot() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn machine_report_slash_catalog_reaches_the_machine_snapshot(f: &mut Fixture) {
     use canterlot_hub::session::CAPABILITY_SLASH_CATALOG_V1;
     use canterlot_proto::worker::v1::{CatalogEntry, HarnessInfo, MachineReport};
-
-    let f = Fixture::new(pool).await;
     let report = MachineReport {
         worker_version: "updated".into(),
         os: "linux".into(),
@@ -1992,11 +1874,8 @@ async fn machine_report_slash_catalog_reaches_the_machine_snapshot() {
 }
 
 // Картинки и окно контекста у OpenCode свои у каждой модели: отчёт доходит до формы как есть.
-#[tokio::test]
-async fn machine_report_keeps_the_per_model_facts() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn machine_report_keeps_the_per_model_facts(f: &mut Fixture) {
     use canterlot_proto::worker::v1::{HarnessInfo, MachineReport, ModelInfo};
-    let f = Fixture::new(pool).await;
     let report = MachineReport {
         worker_version: "updated".into(),
         allowed_roots: vec!["/tmp".into()],
@@ -2039,10 +1918,7 @@ async fn machine_report_keeps_the_per_model_facts() {
     assert!(models[1]["context_window"].is_null());
 }
 
-#[tokio::test]
-async fn create_defaults_to_clean_preset() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn create_defaults_to_clean_preset(f: &mut Fixture) {
     let id = f.create(json!({})).await;
     let detail = f.get(id).await;
     assert_eq!(
@@ -2055,10 +1931,7 @@ async fn create_defaults_to_clean_preset() {
     assert_eq!(preset["deleted"], false);
 }
 
-#[tokio::test]
-async fn create_with_custom_preset_pins_current_revision() {
-    let pool = canterlot_hub::testkit::db().await;
-    let mut f = Fixture::new(pool).await;
+async fn create_with_custom_preset_pins_current_revision(f: &mut Fixture) {
     f.caps(&["pilot_v1", "instructions_v1"]);
     let preset = f.create_preset("Исполнитель", "текст A").await;
     let id = f.create(json!({"instruction_profile": preset["id"]})).await;
@@ -2084,10 +1957,7 @@ async fn create_with_custom_preset_pins_current_revision() {
     );
 }
 
-#[tokio::test]
-async fn create_with_deleted_or_foreign_preset_is_profile_unknown() {
-    let pool = canterlot_hub::testkit::db().await;
-    let mut f = Fixture::new(pool).await;
+async fn create_with_deleted_or_foreign_preset_is_profile_unknown(f: &mut Fixture) {
     f.caps(&["pilot_v1", "instructions_v1"]);
     let preset = f.create_preset("Временный", "текст").await;
     let id: String = preset["id"].as_str().unwrap().into();
@@ -2115,10 +1985,7 @@ async fn create_with_deleted_or_foreign_preset_is_profile_unknown() {
     }
 }
 
-#[tokio::test]
-async fn non_owner_preset_needs_instructions_v1() {
-    let pool = canterlot_hub::testkit::db().await;
-    let mut f = Fixture::new(pool).await;
+async fn non_owner_preset_needs_instructions_v1(f: &mut Fixture) {
     let preset = f.create_preset("Исполнитель", "текст").await;
     let id: String = preset["id"].as_str().unwrap().into();
     // Без capability сессия со стартом отклоняется.
@@ -2162,10 +2029,7 @@ async fn non_owner_preset_needs_instructions_v1() {
     );
 }
 
-#[tokio::test]
-async fn start_and_resume_check_instructions_v1_and_disconnect_is_unavailable() {
-    let pool = canterlot_hub::testkit::db().await;
-    let mut f = Fixture::new(pool).await;
+async fn start_and_resume_check_instructions_v1_and_disconnect_is_unavailable(f: &mut Fixture) {
     // Машина без сеанса: это недоступность, а не старый воркер.
     f._leases.clear();
     let mut body = f.body();
@@ -2225,10 +2089,7 @@ async fn start_and_resume_check_instructions_v1_and_disconnect_is_unavailable() 
     );
 }
 
-#[tokio::test]
-async fn input_switching_preset_on_old_worker_shows_capability_hold() {
-    let pool = canterlot_hub::testkit::db().await;
-    let mut f = Fixture::new(pool).await;
+async fn input_switching_preset_on_old_worker_shows_capability_hold(f: &mut Fixture) {
     f.caps(&["pilot_v1"]);
     let id = f.create(json!({"instruction_profile": "owner"})).await;
     sqlx::query("update conversations set pending_settings='{\"instruction_profile\":\"clean\"}' where id=$1")
@@ -2298,10 +2159,7 @@ impl Fixture {
     }
 }
 
-#[tokio::test]
-async fn group_pin_is_scoped_ordered_and_idempotent() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn group_pin_is_scoped_ordered_and_idempotent(f: &mut Fixture) {
     let a = f.group("А").await;
     let b = f.group("Б").await;
     let first = f.create(json!({"group_ids":[a,b]})).await;
@@ -2362,10 +2220,7 @@ async fn group_pin_is_scoped_ordered_and_idempotent() {
     );
 }
 
-#[tokio::test]
-async fn group_pin_survives_archive_and_unpin_is_idempotent() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn group_pin_survives_archive_and_unpin_is_idempotent(f: &mut Fixture) {
     let a = f.group("А").await;
     let id = f.create(json!({"group_ids":[a]})).await;
     f.pin(id, a, true, 200).await;
@@ -2380,10 +2235,7 @@ async fn group_pin_survives_archive_and_unpin_is_idempotent() {
     assert_eq!(page["items"][0]["group_pins"], json!([]));
 }
 
-#[tokio::test]
-async fn group_pin_requires_membership_and_emits_list_update() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn group_pin_requires_membership_and_emits_list_update(f: &mut Fixture) {
     let a = f.group("А").await;
     let b = f.group("Б").await;
     let id = f.create(json!({"group_ids":[a]})).await;
@@ -2407,10 +2259,7 @@ async fn group_pin_requires_membership_and_emits_list_update() {
     );
 }
 
-#[tokio::test]
-async fn leaving_or_deleting_a_group_drops_its_group_pins() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn leaving_or_deleting_a_group_drops_its_group_pins(f: &mut Fixture) {
     let a = f.group("А").await;
     let b = f.group("Б").await;
     let id = f.create(json!({"group_ids":[a,b]})).await;
@@ -2447,10 +2296,7 @@ async fn leaving_or_deleting_a_group_drops_its_group_pins() {
     assert_eq!(f.get(id).await["group_pins"], json!([]));
 }
 
-#[tokio::test]
-async fn deleting_a_conversation_drops_its_group_pins() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool).await;
+async fn deleting_a_conversation_drops_its_group_pins(f: &mut Fixture) {
     let a = f.group("А").await;
     let id = f.create(json!({"group_ids":[a]})).await;
     f.pin(id, a, true, 200).await;
@@ -2508,10 +2354,7 @@ fn resume_body(machine: Uuid, native: &str) -> Value {
     })
 }
 
-#[tokio::test]
-async fn resume_history_starts_the_new_session_on_the_existing_native_id() {
-    let pool = canterlot_hub::testkit::db().await;
-    let mut f = Fixture::new(pool).await;
+async fn resume_history_starts_the_new_session_on_the_existing_native_id(f: &mut Fixture) {
     f.caps(&[
         "pilot_v1",
         "instructions_v1",
@@ -2554,10 +2397,9 @@ async fn resume_history_starts_the_new_session_on_the_existing_native_id() {
     assert_eq!(detail["execution"]["native_conversation_id"], native);
 }
 
-#[tokio::test]
-async fn resume_history_rejects_a_bad_id_another_harness_and_a_worker_without_the_capability() {
-    let pool = canterlot_hub::testkit::db().await;
-    let mut f = Fixture::new(pool).await;
+async fn resume_history_rejects_a_bad_id_another_harness_and_a_worker_without_the_capability(
+    f: &mut Fixture,
+) {
     f.caps(&["pilot_v1", "instructions_v1"]);
     claude_code_catalog(&f.pool, f.machine).await;
     let missing = f
@@ -2604,10 +2446,7 @@ async fn resume_history_rejects_a_bad_id_another_harness_and_a_worker_without_th
     assert_eq!(refused["error"]["code"], "resume_harness_unsupported");
 }
 
-#[tokio::test]
-async fn claude_histories_come_from_the_live_worker() {
-    let pool = canterlot_hub::testkit::db().await;
-    let mut f = Fixture::new(pool).await;
+async fn claude_histories_come_from_the_live_worker(f: &mut Fixture) {
     f._leases.clear();
     let mut session = testkit::fake_session(
         &f.registry,
@@ -2669,10 +2508,7 @@ async fn claude_histories_come_from_the_live_worker() {
     worker.await.unwrap();
 }
 
-#[tokio::test]
-async fn claude_histories_are_empty_without_a_capable_live_worker() {
-    let pool = canterlot_hub::testkit::db().await;
-    let mut f = Fixture::new(pool).await;
+async fn claude_histories_are_empty_without_a_capable_live_worker(f: &mut Fixture) {
     let path = format!(
         "/api/v1/machines/{}/claude-histories?workdir=/srv/project",
         f.machine
@@ -2795,4 +2631,120 @@ async fn group_retry_across_the_icon_release_replays_the_old_answer() {
         with_reset,
         Err(groups::GroupError::IdempotencyConflict)
     ));
+}
+
+/// Создание разговора, режим по умолчанию, атрибуты и архив.
+/// Случаи идут на одном приложении; перед каждым база возвращается к снимку.
+#[tokio::test]
+async fn create_and_archive_cases() {
+    let mut f = Fixture::new(canterlot_hub::testkit::db().await).await;
+    run_cases!(&mut f, before = Fixture::reset;
+        create_validates_against_machine_catalog_with_distinct_codes,
+        create_is_idempotent_by_key,
+        create_with_start_queues_start_execution_with_settings,
+        new_conversation_has_queue_state_and_no_live_execution_hold,
+        new_conversation_defaults_to_bypass_and_keeps_an_explicit_choice,
+        session_without_a_chosen_mode_starts_as_owner_and_keeps_its_stored_value,
+        pin_color_archive_title_roundtrip_and_emit_list_events,
+        conversation_updated_carries_attributes_and_counts_and_never_volatile_fields,
+        archived_conversations_leave_default_list_and_appear_in_archive,
+        archiving_with_active_crunch_or_schedule_answers_409_unless_forced,
+        idle_process_archives_without_a_warning_and_stays_alive,
+        a_turn_in_progress_still_asks_before_archiving,
+        the_lost_owner_is_no_turn_and_a_repeated_archive_answers_the_same,
+        forced_archive_skips_claimed_jobs_and_rolls_back_every_effect,
+    );
+}
+
+/// Группы, поиск по названию и страницы списка.
+/// Случаи идут на одном приложении; перед каждым база возвращается к снимку.
+#[tokio::test]
+async fn groups_and_list_cases() {
+    let mut f = Fixture::new(canterlot_hub::testkit::db().await).await;
+    run_cases!(&mut f, before = Fixture::reset;
+        title_search_is_case_insensitive_and_escapes_like_wildcards,
+        groups_are_many_to_many_and_counted,
+        group_names_are_unique_case_insensitively,
+        group_icon_is_set_on_create_changed_by_patch_and_checked,
+        deleting_a_group_keeps_its_conversations,
+        group_deletion_emits_conversation_updated_for_former_members_with_counts,
+        list_pages_by_cursor_without_gaps,
+        list_item_machine_is_id_and_name_only,
+        list_item_carries_working_time_without_owner_waits,
+        list_item_merges_overlapping_owner_waits,
+    );
+}
+
+/// Чужие идентификаторы, отметки прочтения, рабочие папки и производные строки.
+/// Случаи идут на одном приложении; перед каждым база возвращается к снимку.
+#[tokio::test]
+async fn access_read_and_workdir_cases() {
+    let mut f = Fixture::new(canterlot_hub::testkit::db().await).await;
+    run_cases!(&mut f, before = Fixture::reset;
+        foreign_conversation_ids_are_not_found,
+        unread_marker_is_monotonic,
+        read_marker_on_one_device_updates_unread_on_another_via_derived_changed,
+        sibling_with_common_prefix_is_not_under_the_root,
+        workdir_length_is_capped_with_a_validation_error,
+        recent_workdirs_shows_last_three_from_remembered_table,
+        projector_materialises_settings_and_crunch_without_attribute_event,
+        missing_derived_rows_remain_listable_and_refresh_upserts,
+        start_in_tx_preserves_resume_native_id_and_outbox_settings,
+    );
+}
+
+/// Машины, их метрики и отчёты, лимиты и их история.
+/// Случаи идут на одном приложении; перед каждым база возвращается к снимку.
+#[tokio::test]
+async fn machines_and_limits_cases() {
+    let mut f = Fixture::new(canterlot_hub::testkit::db().await).await;
+    run_cases!(&mut f, before = Fixture::reset;
+        machines_endpoint_lists_catalog_os_metrics_and_disk_warning,
+        machines_endpoint_flags_limits_mismatch_and_stale_metrics,
+        machines_endpoint_shows_a_journal_stop_until_its_cursor_passes,
+        limits_endpoint_returns_current_reserve_flag_and_history_grouped_by_day_session_model,
+        limits_history_has_five_hour_series_and_agent_breakdown,
+        limits_history_reports_median_speed_per_model_for_today_and_the_period,
+        machine_api_exposes_the_reported_home_and_an_old_worker_leaves_it_empty,
+        catalog_changes_publish_new_harness_attributes_in_both_conversation_scopes,
+        machine_report_cli_versions_reach_the_machine_snapshot,
+        machine_report_slash_catalog_reaches_the_machine_snapshot,
+        machine_report_keeps_the_per_model_facts,
+    );
+}
+
+/// Ответы живого воркера: подсказки папок, история Claude и продолжение по ней.
+/// Случаи идут на одном приложении; перед каждым база возвращается к снимку.
+#[tokio::test]
+async fn live_worker_cases() {
+    let mut f = Fixture::new(canterlot_hub::testkit::db().await).await;
+    run_cases!(&mut f, before = Fixture::reset;
+        workdir_suggestions_come_from_the_live_worker,
+        workdir_suggestions_are_empty_without_a_capable_live_worker,
+        suggestion_wait_is_bounded_and_answers_match_the_asking_machine,
+        resume_history_starts_the_new_session_on_the_existing_native_id,
+        resume_history_rejects_a_bad_id_another_harness_and_a_worker_without_the_capability,
+        claude_histories_come_from_the_live_worker,
+        claude_histories_are_empty_without_a_capable_live_worker,
+    );
+}
+
+/// Пресеты инструкций и способность instructions_v1, закрепление в группе.
+/// Случаи идут на одном приложении; перед каждым база возвращается к снимку.
+#[tokio::test]
+async fn presets_and_group_pin_cases() {
+    let mut f = Fixture::new(canterlot_hub::testkit::db().await).await;
+    run_cases!(&mut f, before = Fixture::reset;
+        create_defaults_to_clean_preset,
+        create_with_custom_preset_pins_current_revision,
+        create_with_deleted_or_foreign_preset_is_profile_unknown,
+        non_owner_preset_needs_instructions_v1,
+        start_and_resume_check_instructions_v1_and_disconnect_is_unavailable,
+        input_switching_preset_on_old_worker_shows_capability_hold,
+        group_pin_is_scoped_ordered_and_idempotent,
+        group_pin_survives_archive_and_unpin_is_idempotent,
+        group_pin_requires_membership_and_emits_list_update,
+        leaving_or_deleting_a_group_drops_its_group_pins,
+        deleting_a_conversation_drops_its_group_pins,
+    );
 }
