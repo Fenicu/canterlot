@@ -693,197 +693,200 @@ async fn the_reservation_the_budget_and_the_consent_follow_the_price_rules() -> 
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    // Две ставки часа берутся из каталога SKU провайдера.
-    let pricing = rig.service.pricing().await?;
-    assert!(
-        pricing.preemptible,
-        "priced for the configured kind of machine"
-    );
-    assert_eq!(pricing.profiles.len(), 1);
-    assert_eq!(pricing.profiles[0].compute_kopecks_per_hour, COMPUTE);
-    assert_eq!(pricing.profiles[0].disk_kopecks_per_hour, DISK);
-    assert_eq!(pricing.max_hourly_kopecks(), Some(HOURLY));
-    // 60 + 30 + 30 = 120 минут: 2 часа и час запаса.
-    let id = rig.create(60).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.reservation_kopecks, 3 * HOURLY);
-    assert_eq!(
-        window.reservation_kopecks,
-        price::reservation_kopecks(HOURLY, 120)?,
-        "both rates are reserved together"
-    );
-    assert_eq!(window.price_hourly_kopecks, HOURLY);
-    assert_eq!(
-        (
-            window.compute_kopecks_per_hour,
-            window.disk_kopecks_per_hour
-        ),
-        (COMPUTE, DISK)
-    );
-    assert!(window.preemptible);
-    assert_eq!(window.folder_id, FOLDER);
-    assert_eq!(window.month, windows::month_of(window.created_at));
-    assert_eq!(window.name, format!("canterlot-runner-{id}"));
-    windows::fail_in_tx(&mut *rig.pool.acquire().await?, id, "test").await?;
-    // 61 минута округляется вверх: 121 минута → 3 часа и час запаса.
-    let id = rig.create(61).await;
-    assert_eq!(rig.window(id).await.reservation_kopecks, 4 * HOURLY);
-    windows::fail_in_tx(&mut *rig.pool.acquire().await?, id, "test").await?;
+        // Две ставки часа берутся из каталога SKU провайдера.
+        let pricing = rig.service.pricing().await?;
+        assert!(
+            pricing.preemptible,
+            "priced for the configured kind of machine"
+        );
+        assert_eq!(pricing.profiles.len(), 1);
+        assert_eq!(pricing.profiles[0].compute_kopecks_per_hour, COMPUTE);
+        assert_eq!(pricing.profiles[0].disk_kopecks_per_hour, DISK);
+        assert_eq!(pricing.max_hourly_kopecks(), Some(HOURLY));
+        // 60 + 30 + 30 = 120 минут: 2 часа и час запаса.
+        let id = rig.create(60).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.reservation_kopecks, 3 * HOURLY);
+        assert_eq!(
+            window.reservation_kopecks,
+            price::reservation_kopecks(HOURLY, 120)?,
+            "both rates are reserved together"
+        );
+        assert_eq!(window.price_hourly_kopecks, HOURLY);
+        assert_eq!(
+            (
+                window.compute_kopecks_per_hour,
+                window.disk_kopecks_per_hour
+            ),
+            (COMPUTE, DISK)
+        );
+        assert!(window.preemptible);
+        assert_eq!(window.folder_id, FOLDER);
+        assert_eq!(window.month, windows::month_of(window.created_at));
+        assert_eq!(window.name, format!("canterlot-runner-{id}"));
+        windows::fail_in_tx(&mut *rig.pool.acquire().await?, id, "test").await?;
+        // 61 минута округляется вверх: 121 минута → 3 часа и час запаса.
+        let id = rig.create(61).await;
+        assert_eq!(rig.window(id).await.reservation_kopecks, 4 * HOURLY);
+        windows::fail_in_tx(&mut *rig.pool.acquire().await?, id, "test").await?;
 
-    // Срок на доработку и запас на снос идут из конфигурации.
-    let rig2 = rig_with(rig.pool.clone(), |config| {
-        config.drain_grace = Duration::from_secs(45 * 60);
-        config.teardown_margin = Duration::from_secs(60);
-    })
-    .await;
-    let id = rig2.create(60).await;
-    // 60 + 45 + 1 = 106 минут: 2 часа и час запаса.
-    assert_eq!(rig2.window(id).await.reservation_kopecks, 3 * HOURLY);
-    windows::fail_in_tx(&mut *rig.pool.acquire().await?, id, "test").await?;
+        // Срок на доработку и запас на снос идут из конфигурации.
+        let rig2 = rig_with(rig.pool.clone(), |config| {
+            config.drain_grace = Duration::from_secs(45 * 60);
+            config.teardown_margin = Duration::from_secs(60);
+        })
+        .await;
+        let id = rig2.create(60).await;
+        // 60 + 45 + 1 = 106 минут: 2 часа и час запаса.
+        assert_eq!(rig2.window(id).await.reservation_kopecks, 3 * HOURLY);
+        windows::fail_in_tx(&mut *rig.pool.acquire().await?, id, "test").await?;
 
-    // Обычная машина дороже прерываемой, и окно запоминает свой вид вместе с ценой.
-    let regular = rig_with(rig.pool.clone(), |config| config.preemptible = false).await;
-    let id = regular.create(60).await;
-    let window = regular.window(id).await;
-    assert!(!window.preemptible);
-    // 32×1.24 + 64×0.33 + 0.26352 = 61.06352 ₽ → 6107 копеек; диск тот же.
-    assert_eq!(
-        (
-            window.compute_kopecks_per_hour,
-            window.disk_kopecks_per_hour
-        ),
-        (6107, DISK)
-    );
-    assert_eq!(window.reservation_kopecks, 3 * (6107 + DISK));
+        // Обычная машина дороже прерываемой, и окно запоминает свой вид вместе с ценой.
+        let regular = rig_with(rig.pool.clone(), |config| config.preemptible = false).await;
+        let id = regular.create(60).await;
+        let window = regular.window(id).await;
+        assert!(!window.preemptible);
+        // 32×1.24 + 64×0.33 + 0.26352 = 61.06352 ₽ → 6107 копеек; диск тот же.
+        assert_eq!(
+            (
+                window.compute_kopecks_per_hour,
+                window.disk_kopecks_per_hour
+            ),
+            (6107, DISK)
+        );
+        assert_eq!(window.reservation_kopecks, 3 * (6107 + DISK));
     }
     // ── Нулевой бюджет: проходит только точное согласие ──
     rig.clean().await;
     {
-    let reservation = rig.reservation(60);
-    let attempt = |consent: Option<i64>| {
-        let service = rig.service.clone();
-        async move {
-            service
-                .create(CreateRequest {
-                    trigger: Trigger::Card,
-                    proposal_id: Some(Uuid::now_v7()),
-                    replaces_window_id: None,
-                    hard_cap_minutes: 60,
-                    consent_over_budget_kopecks: consent,
-                    prepare: None,
-                })
-                .await
-        }
-    };
-    for consent in [None, Some(reservation - 1), Some(reservation + 1), Some(0)] {
-        match attempt(consent).await {
-            Err(CreateRefusal::OverBudget {
-                reservation_kopecks,
-                remaining_kopecks,
-            }) => {
-                assert_eq!(reservation_kopecks, reservation);
-                assert_eq!(remaining_kopecks, 0);
+        let reservation = rig.reservation(60);
+        let attempt = |consent: Option<i64>| {
+            let service = rig.service.clone();
+            async move {
+                service
+                    .create(CreateRequest {
+                        trigger: Trigger::Card,
+                        proposal_id: Some(Uuid::now_v7()),
+                        replaces_window_id: None,
+                        hard_cap_minutes: 60,
+                        consent_over_budget_kopecks: consent,
+                        prepare: None,
+                    })
+                    .await
             }
-            other => panic!("consent {consent:?} must be refused, got {other:?}"),
+        };
+        for consent in [None, Some(reservation - 1), Some(reservation + 1), Some(0)] {
+            match attempt(consent).await {
+                Err(CreateRefusal::OverBudget {
+                    reservation_kopecks,
+                    remaining_kopecks,
+                }) => {
+                    assert_eq!(reservation_kopecks, reservation);
+                    assert_eq!(remaining_kopecks, 0);
+                }
+                other => panic!("consent {consent:?} must be refused, got {other:?}"),
+            }
         }
-    }
-    let count: i64 = sqlx::query_scalar("select count(*) from cloud_windows")
-        .fetch_one(&rig.pool)
-        .await?;
-    assert_eq!(count, 0, "a refusal leaves no row");
-    let id = attempt(Some(reservation)).await?;
-    let window = rig.window(id).await;
-    assert_eq!(
-        (window.trigger.as_str(), window.state.as_str()),
-        ("card", "create_intent")
-    );
-    assert!(window.proposal_id.is_some());
-
+        let count: i64 = sqlx::query_scalar("select count(*) from cloud_windows")
+            .fetch_one(&rig.pool)
+            .await?;
+        assert_eq!(count, 0, "a refusal leaves no row");
+        let id = attempt(Some(reservation)).await?;
+        let window = rig.window(id).await;
+        assert_eq!(
+            (window.trigger.as_str(), window.state.as_str()),
+            ("card", "create_intent")
+        );
+        assert!(window.proposal_id.is_some());
     }
     // ── Бюджет месяца: итоговая цена законченных и резерв живых ──
     rig.clean().await;
     {
-    let reservation = rig.reservation(60);
-    sqlx::query("update cloud_budget set monthly_budget_kopecks = $1")
-        .bind(2 * reservation)
-        .execute(&rig.pool)
-        .await?;
-    // Помещается без согласия.
-    let first = rig
-        .service
-        .create(CreateRequest {
-            trigger: Trigger::Owner,
-            proposal_id: None,
-            replaces_window_id: None,
-            hard_cap_minutes: 60,
-            consent_over_budget_kopecks: None,
-            prepare: None,
-        })
-        .await?;
-    // Окно закончилось дешевле резерва: расход месяца — итоговая цена.
-    sqlx::query("update cloud_windows set state = 'ended', final_cost_kopecks = $2 where id = $1")
+        let reservation = rig.reservation(60);
+        sqlx::query("update cloud_budget set monthly_budget_kopecks = $1")
+            .bind(2 * reservation)
+            .execute(&rig.pool)
+            .await?;
+        // Помещается без согласия.
+        let first = rig
+            .service
+            .create(CreateRequest {
+                trigger: Trigger::Owner,
+                proposal_id: None,
+                replaces_window_id: None,
+                hard_cap_minutes: 60,
+                consent_over_budget_kopecks: None,
+                prepare: None,
+            })
+            .await?;
+        // Окно закончилось дешевле резерва: расход месяца — итоговая цена.
+        sqlx::query(
+            "update cloud_windows set state = 'ended', final_cost_kopecks = $2 where id = $1",
+        )
         .bind(first)
         .bind(reservation - 1000)
         .execute(&rig.pool)
         .await?;
-    let mut conn = rig.pool.acquire().await?;
-    let month = rig.window(first).await.month;
-    assert_eq!(
-        windows::spent_in_month(&mut conn, &month, Utc::now()).await?,
-        reservation - 1000
-    );
-    drop(conn);
-    // Второе помещается: (резерв − 1000) + резерв ≤ 2 × резерв.
-    let second = rig
-        .service
-        .create(CreateRequest {
-            trigger: Trigger::Owner,
-            proposal_id: None,
-            replaces_window_id: None,
-            hard_cap_minutes: 60,
-            consent_over_budget_kopecks: None,
-            prepare: None,
-        })
-        .await?;
-    // Живое окно считается по резерву; в месяц попадает целиком.
-    sqlx::query("update cloud_windows set state = 'ended', final_cost_kopecks = $2 where id = $1")
+        let mut conn = rig.pool.acquire().await?;
+        let month = rig.window(first).await.month;
+        assert_eq!(
+            windows::spent_in_month(&mut conn, &month, Utc::now()).await?,
+            reservation - 1000
+        );
+        drop(conn);
+        // Второе помещается: (резерв − 1000) + резерв ≤ 2 × резерв.
+        let second = rig
+            .service
+            .create(CreateRequest {
+                trigger: Trigger::Owner,
+                proposal_id: None,
+                replaces_window_id: None,
+                hard_cap_minutes: 60,
+                consent_over_budget_kopecks: None,
+                prepare: None,
+            })
+            .await?;
+        // Живое окно считается по резерву; в месяц попадает целиком.
+        sqlx::query(
+            "update cloud_windows set state = 'ended', final_cost_kopecks = $2 where id = $1",
+        )
         .bind(second)
         .bind(reservation)
         .execute(&rig.pool)
         .await?;
-    // Теперь расход 2 × резерв − 1000: третье окно не помещается.
-    let refused = rig
-        .service
-        .create(CreateRequest {
-            trigger: Trigger::Owner,
-            proposal_id: None,
-            replaces_window_id: None,
-            hard_cap_minutes: 60,
-            consent_over_budget_kopecks: None,
-            prepare: None,
-        })
-        .await;
-    match refused {
-        Err(CreateRefusal::OverBudget {
-            remaining_kopecks, ..
-        }) => assert_eq!(remaining_kopecks, 1000),
-        other => panic!("expected over budget, got {other:?}"),
-    }
-    // Окно прошлого месяца в расход не входит.
-    sqlx::query("update cloud_windows set month = '2000-01'")
-        .execute(&rig.pool)
-        .await?;
-    rig.service
-        .create(CreateRequest {
-            trigger: Trigger::Owner,
-            proposal_id: None,
-            replaces_window_id: None,
-            hard_cap_minutes: 60,
-            consent_over_budget_kopecks: None,
-            prepare: None,
-        })
-        .await?;
-    Ok(())
+        // Теперь расход 2 × резерв − 1000: третье окно не помещается.
+        let refused = rig
+            .service
+            .create(CreateRequest {
+                trigger: Trigger::Owner,
+                proposal_id: None,
+                replaces_window_id: None,
+                hard_cap_minutes: 60,
+                consent_over_budget_kopecks: None,
+                prepare: None,
+            })
+            .await;
+        match refused {
+            Err(CreateRefusal::OverBudget {
+                remaining_kopecks, ..
+            }) => assert_eq!(remaining_kopecks, 1000),
+            other => panic!("expected over budget, got {other:?}"),
+        }
+        // Окно прошлого месяца в расход не входит.
+        sqlx::query("update cloud_windows set month = '2000-01'")
+            .execute(&rig.pool)
+            .await?;
+        rig.service
+            .create(CreateRequest {
+                trigger: Trigger::Owner,
+                proposal_id: None,
+                replaces_window_id: None,
+                hard_cap_minutes: 60,
+                consent_over_budget_kopecks: None,
+                prepare: None,
+            })
+            .await?;
+        Ok(())
     }
 }
 
@@ -892,96 +895,97 @@ async fn only_one_window_is_live_even_under_concurrent_creates() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    let first = rig.create(60).await;
-    for state in [
-        "create_intent",
-        "create_unknown",
-        "identified",
-        "ready",
-        "draining",
-        "deleting",
-    ] {
-        sqlx::query("update cloud_windows set state = $2 where id = $1")
+        let first = rig.create(60).await;
+        for state in [
+            "create_intent",
+            "create_unknown",
+            "identified",
+            "ready",
+            "draining",
+            "deleting",
+        ] {
+            sqlx::query("update cloud_windows set state = $2 where id = $1")
+                .bind(first)
+                .bind(state)
+                .execute(&rig.pool)
+                .await?;
+            assert!(
+                matches!(
+                    rig.try_create(60).await,
+                    Err(CreateRefusal::LiveWindowExists)
+                ),
+                "{state} is live"
+            );
+        }
+        for state in ["ended", "failed", "gone"] {
+            sqlx::query(
+                "update cloud_windows set state = $2, final_cost_kopecks = 0 where id = $1",
+            )
             .bind(first)
             .bind(state)
             .execute(&rig.pool)
             .await?;
-        assert!(
-            matches!(
-                rig.try_create(60).await,
-                Err(CreateRefusal::LiveWindowExists)
-            ),
-            "{state} is live"
-        );
-    }
-    for state in ["ended", "failed", "gone"] {
-        sqlx::query("update cloud_windows set state = $2, final_cost_kopecks = 0 where id = $1")
+            rig.try_create(60)
+                .await
+                .expect("a closed window frees the slot");
+            sqlx::query(
+                "update cloud_windows set state = 'failed', final_cost_kopecks = 0 where id <> $1",
+            )
             .bind(first)
-            .bind(state)
             .execute(&rig.pool)
             .await?;
-        rig.try_create(60)
-            .await
-            .expect("a closed window frees the slot");
-        sqlx::query(
-            "update cloud_windows set state = 'failed', final_cost_kopecks = 0 where id <> $1",
-        )
-        .bind(first)
-        .execute(&rig.pool)
-        .await?;
-    }
-    // И база держит то же правило сама, помимо замка.
-    let live_row = "insert into cloud_windows (id, name, state, trigger, folder_id, preemptible,
+        }
+        // И база держит то же правило сама, помимо замка.
+        let live_row = "insert into cloud_windows (id, name, state, trigger, folder_id, preemptible,
                                     host_key_public, price_hourly_kopecks, reservation_kopecks,
                                     month, hard_cap_minutes, created_at, profiles)
          select $1, 'canterlot-runner-' || $1::text, 'ready', 'owner', 'b1gfakefolder000000', true,
                 'k', 1, 1, '2026-11', 60, now(),
                 '[{\"cores\":2,\"memory_gb\":2,\"disk_gb\":10,\"compute_kopecks_per_hour\":1,\"disk_kopecks_per_hour\":0}]'::jsonb";
-    // Предыдущий цикл оставил `ended`, живого нет: вставка проходит один раз, второй нет.
-    sqlx::query(live_row)
-        .bind(Uuid::now_v7())
-        .execute(&rig.pool)
-        .await
-        .expect("the first live row");
-    let second = sqlx::query(live_row)
-        .bind(Uuid::now_v7())
-        .execute(&rig.pool)
-        .await;
-    assert!(second.is_err(), "the unique index allows one live row");
-
+        // Предыдущий цикл оставил `ended`, живого нет: вставка проходит один раз, второй нет.
+        sqlx::query(live_row)
+            .bind(Uuid::now_v7())
+            .execute(&rig.pool)
+            .await
+            .expect("the first live row");
+        let second = sqlx::query(live_row)
+            .bind(Uuid::now_v7())
+            .execute(&rig.pool)
+            .await;
+        assert!(second.is_err(), "the unique index allows one live row");
     }
     // ── Четыре одновременных создания дают ровно одно окно ──
     rig.clean().await;
     {
-    sqlx::query("update cloud_budget set monthly_budget_kopecks = 10000000")
-        .execute(&rig.pool)
-        .await?;
-    let request = || CreateRequest {
-        trigger: Trigger::Owner,
-        proposal_id: None,
-        replaces_window_id: None,
-        hard_cap_minutes: 60,
-        consent_over_budget_kopecks: None,
-        prepare: None,
-    };
-    let results = tokio::join!(
-        rig.service.create(request()),
-        rig.service.create(request()),
-        rig.service.create(request()),
-        rig.service.create(request()),
-    );
-    let all = [results.0, results.1, results.2, results.3];
-    let created = all.iter().filter(|result| result.is_ok()).count();
-    let refused = all
-        .iter()
-        .filter(|result| matches!(result, Err(CreateRefusal::LiveWindowExists)))
-        .count();
-    assert_eq!((created, refused), (1, 3), "{all:?}");
-    let rows: i64 = sqlx::query_scalar("select count(*) from cloud_windows")
-        .fetch_one(&rig.pool)
-        .await?;
-    assert_eq!(rows, 1);
-    Ok(())
+        sqlx::query("update cloud_budget set monthly_budget_kopecks = 10000000")
+            .execute(&rig.pool)
+            .await?;
+        let request = || CreateRequest {
+            trigger: Trigger::Owner,
+            proposal_id: None,
+            replaces_window_id: None,
+            hard_cap_minutes: 60,
+            consent_over_budget_kopecks: None,
+            prepare: None,
+        };
+        let results = tokio::join!(
+            rig.service.create(request()),
+            rig.service.create(request()),
+            rig.service.create(request()),
+            rig.service.create(request()),
+        );
+        let all = [results.0, results.1, results.2, results.3];
+        let created = all.iter().filter(|result| result.is_ok()).count();
+        let refused = all
+            .iter()
+            .filter(|result| matches!(result, Err(CreateRefusal::LiveWindowExists)))
+            .count();
+        assert_eq!((created, refused), (1, 3), "{all:?}");
+        let rows: i64 = sqlx::query_scalar("select count(*) from cloud_windows")
+            .fetch_one(&rig.pool)
+            .await?;
+        assert_eq!(rows, 1);
+        Ok(())
     }
 }
 
@@ -1134,73 +1138,72 @@ async fn a_rejected_create_closes_the_window_and_releases_the_reservation() -> T
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    rig.fake.control().create = CreateMode::Error {
-        http: 400,
-        code: 3,
-        message: "Illegal argument subnetId".into(),
-    };
-    let t0 = now_micros();
-    let id = rig.create(60).await;
-    rig.tick(t0).await;
-    // Вызов был: окно не заканчивается сразу, а уходит на снос.
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "deleting");
-    assert_eq!(window.delete_reason.as_deref(), Some("create_failed"));
-    assert!(matches!(
-        rig.try_create(60).await,
-        Err(CreateRefusal::LiveWindowExists)
-    ));
-    // Полные списки машин и дисков каталога без имени окна: платить было не за что.
-    rig.tick(t0 + TimeDelta::seconds(1)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "failed");
-    assert_eq!(window.final_cost_kopecks, Some(0));
-    assert_eq!(window.last_error.as_deref(), Some("32x64:400/3"));
-    assert!(window.server_gone_at.is_some() && window.disk_gone_at.is_some());
-    assert_eq!((rig.posts(), rig.deletes()), (1, 0));
-    let mut conn = rig.pool.acquire().await?;
-    assert_eq!(
-        windows::spent_in_month(&mut conn, &window.month, Utc::now()).await?,
-        0
-    );
-    drop(conn);
-    // Окно закрыто: можно создать следующее.
-    rig.try_create(60).await.expect("the slot is free again");
-
+        rig.fake.control().create = CreateMode::Error {
+            http: 400,
+            code: 3,
+            message: "Illegal argument subnetId".into(),
+        };
+        let t0 = now_micros();
+        let id = rig.create(60).await;
+        rig.tick(t0).await;
+        // Вызов был: окно не заканчивается сразу, а уходит на снос.
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(window.delete_reason.as_deref(), Some("create_failed"));
+        assert!(matches!(
+            rig.try_create(60).await,
+            Err(CreateRefusal::LiveWindowExists)
+        ));
+        // Полные списки машин и дисков каталога без имени окна: платить было не за что.
+        rig.tick(t0 + TimeDelta::seconds(1)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "failed");
+        assert_eq!(window.final_cost_kopecks, Some(0));
+        assert_eq!(window.last_error.as_deref(), Some("32x64:400/3"));
+        assert!(window.server_gone_at.is_some() && window.disk_gone_at.is_some());
+        assert_eq!((rig.posts(), rig.deletes()), (1, 0));
+        let mut conn = rig.pool.acquire().await?;
+        assert_eq!(
+            windows::spent_in_month(&mut conn, &window.month, Utc::now()).await?,
+            0
+        );
+        drop(conn);
+        // Окно закрыто: можно создать следующее.
+        rig.try_create(60).await.expect("the slot is free again");
     }
     // ── Пока списки не прочитаны, окно остаётся открытым ──
     rig.clean().await;
     {
-    rig.fake.control().create = CreateMode::Error {
-        http: 403,
-        code: 7,
-        message: "Permission denied".into(),
-    };
-    let t0 = now_micros();
-    let id = rig.create(60).await;
-    rig.tick(t0).await;
-    assert_eq!(rig.state(id).await, "deleting");
-    // Список дисков не читается: окно остаётся открытым, сколько бы проходов ни было.
-    rig.fake.control().list_fail_page = Some(FailPage {
-        list: "disks",
-        page: 0,
-        status: 500,
-        times: None,
-    });
-    for seconds in [1, 20, 200] {
-        rig.tick(t0 + TimeDelta::seconds(seconds)).await;
+        rig.fake.control().create = CreateMode::Error {
+            http: 403,
+            code: 7,
+            message: "Permission denied".into(),
+        };
+        let t0 = now_micros();
+        let id = rig.create(60).await;
+        rig.tick(t0).await;
+        assert_eq!(rig.state(id).await, "deleting");
+        // Список дисков не читается: окно остаётся открытым, сколько бы проходов ни было.
+        rig.fake.control().list_fail_page = Some(FailPage {
+            list: "disks",
+            page: 0,
+            status: 500,
+            times: None,
+        });
+        for seconds in [1, 20, 200] {
+            rig.tick(t0 + TimeDelta::seconds(seconds)).await;
+            let window = rig.window(id).await;
+            assert_eq!(window.state, "deleting", "after {seconds} s");
+            assert!(window.server_gone_at.is_some() && window.disk_gone_at.is_none());
+        }
+        rig.fake.control().list_fail_page = None;
+        rig.tick(t0 + TimeDelta::seconds(210)).await;
         let window = rig.window(id).await;
-        assert_eq!(window.state, "deleting", "after {seconds} s");
-        assert!(window.server_gone_at.is_some() && window.disk_gone_at.is_none());
-    }
-    rig.fake.control().list_fail_page = None;
-    rig.tick(t0 + TimeDelta::seconds(210)).await;
-    let window = rig.window(id).await;
-    assert_eq!(
-        (window.state.as_str(), window.final_cost_kopecks),
-        ("failed", Some(0))
-    );
-    Ok(())
+        assert_eq!(
+            (window.state.as_str(), window.final_cost_kopecks),
+            ("failed", Some(0))
+        );
+        Ok(())
     }
 }
 
@@ -1315,31 +1318,31 @@ async fn the_reservation_and_the_budget_use_the_most_expensive_profile_of_the_li
     // ── Цены нет: окно не создаётся, строки нет ──
     rig.clean().await;
     {
-    // В каталоге нет SKU диска: цена не угадывается, окно не создаётся.
-    rig.fake
-        .control()
-        .remove_sku(crate::support::fake_yandex::SKU_SSD);
-    let fresh = rig.restarted();
-    assert!(matches!(
-        fresh.pricing().await,
-        Err(CreateRefusal::Provider(_))
-    ));
-    let refused = fresh
-        .create(CreateRequest {
-            trigger: Trigger::Owner,
-            proposal_id: None,
-            replaces_window_id: None,
-            hard_cap_minutes: 60,
-            consent_over_budget_kopecks: Some(rig.reservation(60)),
-            prepare: None,
-        })
-        .await;
-    assert!(matches!(refused, Err(CreateRefusal::Provider(_))));
-    let rows: i64 = sqlx::query_scalar("select count(*) from cloud_windows")
-        .fetch_one(&rig.pool)
-        .await?;
-    assert_eq!(rows, 0, "no window without a price");
-    Ok(())
+        // В каталоге нет SKU диска: цена не угадывается, окно не создаётся.
+        rig.fake
+            .control()
+            .remove_sku(crate::support::fake_yandex::SKU_SSD);
+        let fresh = rig.restarted();
+        assert!(matches!(
+            fresh.pricing().await,
+            Err(CreateRefusal::Provider(_))
+        ));
+        let refused = fresh
+            .create(CreateRequest {
+                trigger: Trigger::Owner,
+                proposal_id: None,
+                replaces_window_id: None,
+                hard_cap_minutes: 60,
+                consent_over_budget_kopecks: Some(rig.reservation(60)),
+                prepare: None,
+            })
+            .await;
+        assert!(matches!(refused, Err(CreateRefusal::Provider(_))));
+        let rows: i64 = sqlx::query_scalar("select count(*) from cloud_windows")
+            .fetch_one(&rig.pool)
+            .await?;
+        assert_eq!(rows, 0, "no window without a price");
+        Ok(())
     }
 }
 
@@ -1415,45 +1418,45 @@ async fn a_definite_refusal_falls_back_and_the_ledger_uses_the_real_price() -> T
     // ── Квота или место: следующий профиль; прочий отказ закрывает окно ──
     rig.clean().await;
     {
-    let rig = rig_with(rig.pool.clone(), profiles(&[DEAR, CHEAP])).await;
-    let _carrier = rig.carrier_session();
-    let mut t = now_micros();
-    for mode in [CreateMode::quota(), CreateMode::not_enough_resources()] {
-        rig.fake
-            .control()
-            .create_by_cores
-            .insert("48".to_owned(), mode.clone());
+        let rig = rig_with(rig.pool.clone(), profiles(&[DEAR, CHEAP])).await;
+        let _carrier = rig.carrier_session();
+        let mut t = now_micros();
+        for mode in [CreateMode::quota(), CreateMode::not_enough_resources()] {
+            rig.fake
+                .control()
+                .create_by_cores
+                .insert("48".to_owned(), mode.clone());
+            let id = rig.create(60).await;
+            t += TimeDelta::minutes(1);
+            rig.tick(t).await;
+            assert_eq!(rig.state(id).await, "identified", "{mode:?}");
+            assert_eq!(rig.window(id).await.cores, Some(8));
+            windows::request_delete(&rig.pool, id, windows::REASON_OWNER, t).await?;
+            t += TimeDelta::seconds(1);
+            rig.tick(t).await;
+            assert_eq!(rig.state(id).await, "ended");
+        }
+        // Отказ не про квоту и не про место: следующий профиль не пробуется, окно закрыто с
+        // кодом.
+        let before = rig.posts();
+        rig.fake.control().create_by_cores.insert(
+            "48".to_owned(),
+            CreateMode::Error {
+                http: 403,
+                code: 7,
+                message: "Permission denied".into(),
+            },
+        );
         let id = rig.create(60).await;
         t += TimeDelta::minutes(1);
         rig.tick(t).await;
-        assert_eq!(rig.state(id).await, "identified", "{mode:?}");
-        assert_eq!(rig.window(id).await.cores, Some(8));
-        windows::request_delete(&rig.pool, id, windows::REASON_OWNER, t).await?;
-        t += TimeDelta::seconds(1);
-        rig.tick(t).await;
-        assert_eq!(rig.state(id).await, "ended");
-    }
-    // Отказ не про квоту и не про место: следующий профиль не пробуется, окно закрыто с
-    // кодом.
-    let before = rig.posts();
-    rig.fake.control().create_by_cores.insert(
-        "48".to_owned(),
-        CreateMode::Error {
-            http: 403,
-            code: 7,
-            message: "Permission denied".into(),
-        },
-    );
-    let id = rig.create(60).await;
-    t += TimeDelta::minutes(1);
-    rig.tick(t).await;
-    rig.tick(t + TimeDelta::seconds(1)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "failed");
-    assert_eq!(window.final_cost_kopecks, Some(0));
-    assert_eq!(window.last_error.as_deref(), Some("48x96:403/7"));
-    assert_eq!(rig.posts(), before + 1, "the cheap profile was not tried");
-    Ok(())
+        rig.tick(t + TimeDelta::seconds(1)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "failed");
+        assert_eq!(window.final_cost_kopecks, Some(0));
+        assert_eq!(window.last_error.as_deref(), Some("48x96:403/7"));
+        assert_eq!(rig.posts(), before + 1, "the cheap profile was not tried");
+        Ok(())
     }
 }
 
@@ -1566,93 +1569,91 @@ async fn attach_goes_to_the_public_address_with_the_prepare_and_only_when_ready(
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let id = rig.create(120).await;
-    rig.tick(t0).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "identified");
-    assert_eq!(
-        (window.public_ip.clone(), window.attach_sent_at),
-        (None, None)
-    );
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let id = rig.create(120).await;
+        rig.tick(t0).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "identified");
+        assert_eq!(
+            (window.public_ip.clone(), window.attach_sent_at),
+            (None, None)
+        );
 
-    rig.tick(t0 + TimeDelta::seconds(1)).await;
-    let window = rig.window(id).await;
-    let instance_id = window.instance_id.clone().unwrap();
-    let (address, disk_id) = {
-        let state = rig.fake.control();
-        let instance = &state.instances[&instance_id];
-        (instance.public_ip().unwrap(), instance.disk_id.clone())
-    };
-    assert_eq!(window.public_ip.as_deref(), Some(address.as_str()));
-    assert_eq!(window.boot_disk_id.as_deref(), Some(disk_id.as_str()));
-    assert_eq!(window.attach_sent_at, Some(t0 + TimeDelta::seconds(1)));
-    let attach = rig.attach_command().await;
-    assert_eq!(attach["host"], address);
-    assert_eq!(attach["ssh_port"], 22);
-    assert!(
-        attach.get("prepare_script").is_none(),
-        "a window without preparation carries no script"
-    );
-    let view = windows::view(&window, t0 + TimeDelta::seconds(1));
-    assert_eq!(view.public_ip.as_deref(), Some(address.as_str()));
-    assert_eq!(view.instance_id.as_deref(), Some(instance_id.as_str()));
+        rig.tick(t0 + TimeDelta::seconds(1)).await;
+        let window = rig.window(id).await;
+        let instance_id = window.instance_id.clone().unwrap();
+        let (address, disk_id) = {
+            let state = rig.fake.control();
+            let instance = &state.instances[&instance_id];
+            (instance.public_ip().unwrap(), instance.disk_id.clone())
+        };
+        assert_eq!(window.public_ip.as_deref(), Some(address.as_str()));
+        assert_eq!(window.boot_disk_id.as_deref(), Some(disk_id.as_str()));
+        assert_eq!(window.attach_sent_at, Some(t0 + TimeDelta::seconds(1)));
+        let attach = rig.attach_command().await;
+        assert_eq!(attach["host"], address);
+        assert_eq!(attach["ssh_port"], 22);
+        assert!(
+            attach.get("prepare_script").is_none(),
+            "a window without preparation carries no script"
+        );
+        let view = windows::view(&window, t0 + TimeDelta::seconds(1));
+        assert_eq!(view.public_ip.as_deref(), Some(address.as_str()));
+        assert_eq!(view.instance_id.as_deref(), Some(instance_id.as_str()));
 
-    // Сколько бы проходов ни было, команда подключения одна.
-    for seconds in [2, 3, 30] {
-        rig.tick(t0 + TimeDelta::seconds(seconds)).await;
-    }
-    let sent: i64 =
-        sqlx::query_scalar("select count(*) from commands where kind = 'attach_runner'")
-            .fetch_one(&rig.pool)
-            .await?;
-    assert_eq!(sent, 1);
-
+        // Сколько бы проходов ни было, команда подключения одна.
+        for seconds in [2, 3, 30] {
+            rig.tick(t0 + TimeDelta::seconds(seconds)).await;
+        }
+        let sent: i64 =
+            sqlx::query_scalar("select count(*) from commands where kind = 'attach_runner'")
+                .fetch_one(&rig.pool)
+                .await?;
+        assert_eq!(sent, 1);
     }
     // ── Подготовка едет в команде подключения ──
     rig.clean().await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let script = "apt-get install -y jq\njq --version\n";
-    let id = rig
-        .try_create_with(
-            120,
-            Some(Prepare {
-                packages: Vec::new(),
-                script: Some(script.to_owned()),
-            }),
-        )
-        .await
-        .expect("window created");
-    rig.tick(t0).await;
-    rig.tick(t0 + TimeDelta::seconds(1)).await;
-    assert_eq!(rig.state(id).await, "identified");
-    let attach = rig.attach_command().await;
-    assert_eq!(attach["prepare_script"], script);
-
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let script = "apt-get install -y jq\njq --version\n";
+        let id = rig
+            .try_create_with(
+                120,
+                Some(Prepare {
+                    packages: Vec::new(),
+                    script: Some(script.to_owned()),
+                }),
+            )
+            .await
+            .expect("window created");
+        rig.tick(t0).await;
+        rig.tick(t0 + TimeDelta::seconds(1)).await;
+        assert_eq!(rig.state(id).await, "identified");
+        let attach = rig.attach_command().await;
+        assert_eq!(attach["prepare_script"], script);
     }
     // ── Подключение ждёт и операцию создания, и работающую машину ──
     rig.clean().await;
     {
-    let _carrier = rig.carrier_session();
-    rig.fake.control().boot_polls = 3;
-    let t0 = now_micros();
-    let id = rig.create(120).await;
-    rig.tick(t0).await;
-    assert_eq!(rig.state(id).await, "identified");
-    for seconds in [1, 2] {
-        rig.tick(t0 + TimeDelta::seconds(seconds)).await;
+        let _carrier = rig.carrier_session();
+        rig.fake.control().boot_polls = 3;
+        let t0 = now_micros();
+        let id = rig.create(120).await;
+        rig.tick(t0).await;
+        assert_eq!(rig.state(id).await, "identified");
+        for seconds in [1, 2] {
+            rig.tick(t0 + TimeDelta::seconds(seconds)).await;
+            let window = rig.window(id).await;
+            assert!(window.attach_sent_at.is_none(), "still provisioning");
+            assert!(window.public_ip.is_none());
+        }
+        rig.tick(t0 + TimeDelta::seconds(3)).await;
         let window = rig.window(id).await;
-        assert!(window.attach_sent_at.is_none(), "still provisioning");
-        assert!(window.public_ip.is_none());
-    }
-    rig.tick(t0 + TimeDelta::seconds(3)).await;
-    let window = rig.window(id).await;
-    assert!(window.attach_sent_at.is_some());
-    assert!(window.public_ip.is_some());
-    Ok(())
+        assert!(window.attach_sent_at.is_some());
+        assert!(window.public_ip.is_some());
+        Ok(())
     }
 }
 
@@ -1701,87 +1702,87 @@ async fn a_failed_create_operation_cleans_up_or_confirms_the_rollback() -> TestR
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    enable_pushes(&rig.pool).await;
-    let _carrier = rig.carrier_session();
-    {
-        let mut state = rig.fake.control();
-        // Создание принято, а операция потом кончается ошибкой; отката не случилось, и
-        // Яндекс сначала два опроса «откатывает».
-        state.fail_next_create_operation = Some((8, "Quota limit exceeded".to_owned()));
-        state.failed_create_keeps_instance = true;
-        state.failed_create_rollback_polls = 2;
-    }
-    let t0 = now_micros();
-    let id = rig.create(60).await;
-    rig.tick(t0).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "identified");
-    let instance_id = window.instance_id.clone().unwrap();
-    // Диск переживёт машину: автоматическое удаление не сработает.
-    rig.fake.control().leave_disk(&instance_id);
+        enable_pushes(&rig.pool).await;
+        let _carrier = rig.carrier_session();
+        {
+            let mut state = rig.fake.control();
+            // Создание принято, а операция потом кончается ошибкой; отката не случилось, и
+            // Яндекс сначала два опроса «откатывает».
+            state.fail_next_create_operation = Some((8, "Quota limit exceeded".to_owned()));
+            state.failed_create_keeps_instance = true;
+            state.failed_create_rollback_polls = 2;
+        }
+        let t0 = now_micros();
+        let id = rig.create(60).await;
+        rig.tick(t0).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "identified");
+        let instance_id = window.instance_id.clone().unwrap();
+        // Диск переживёт машину: автоматическое удаление не сработает.
+        rig.fake.control().leave_disk(&instance_id);
 
-    // Пока `done: false`, ошибка в операции ещё не окончательна.
-    for seconds in [1, 2] {
-        rig.tick(t0 + TimeDelta::seconds(seconds)).await;
-        assert_eq!(rig.state(id).await, "identified", "the rollback is running");
-    }
-    rig.tick(t0 + TimeDelta::seconds(3)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "deleting");
-    assert_eq!(window.delete_reason.as_deref(), Some("create_failed"));
-    assert_eq!(window.last_error.as_deref(), Some("create_failed:8"));
-    assert!(window.attach_sent_at.is_none(), "nothing was attached");
-    assert_eq!(rig.deletes(), 0, "cleanup starts on the next step");
+        // Пока `done: false`, ошибка в операции ещё не окончательна.
+        for seconds in [1, 2] {
+            rig.tick(t0 + TimeDelta::seconds(seconds)).await;
+            assert_eq!(rig.state(id).await, "identified", "the rollback is running");
+        }
+        rig.tick(t0 + TimeDelta::seconds(3)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(window.delete_reason.as_deref(), Some("create_failed"));
+        assert_eq!(window.last_error.as_deref(), Some("create_failed:8"));
+        assert!(window.attach_sent_at.is_none(), "nothing was attached");
+        assert_eq!(rig.deletes(), 0, "cleanup starts on the next step");
 
-    // Снос: машина удалена и подтверждена списком, затем удалён оставшийся диск.
-    let end = t0 + TimeDelta::seconds(4);
-    rig.tick(end).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "failed");
-    assert_eq!((rig.deletes(), rig.disk_deletes()), (1, 1));
-    assert_eq!(rig.fake.instance_count(), 0);
-    assert!(rig.fake.control().disks.is_empty());
-    assert_eq!(
-        (window.server_gone_at, window.disk_gone_at),
-        (Some(end), Some(end))
-    );
-    assert!(window.boot_disk_id.is_some(), "the disk was found by name");
-    // Машина и диск существовали: их время посчитано, а не обнулено.
-    assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
-    assert_eq!(window.last_error.as_deref(), Some("create_failed:8"));
-    rig.try_create(60).await.expect("the slot is free again");
-
+        // Снос: машина удалена и подтверждена списком, затем удалён оставшийся диск.
+        let end = t0 + TimeDelta::seconds(4);
+        rig.tick(end).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "failed");
+        assert_eq!((rig.deletes(), rig.disk_deletes()), (1, 1));
+        assert_eq!(rig.fake.instance_count(), 0);
+        assert!(rig.fake.control().disks.is_empty());
+        assert_eq!(
+            (window.server_gone_at, window.disk_gone_at),
+            (Some(end), Some(end))
+        );
+        assert!(window.boot_disk_id.is_some(), "the disk was found by name");
+        // Машина и диск существовали: их время посчитано, а не обнулено.
+        assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
+        assert_eq!(window.last_error.as_deref(), Some("create_failed:8"));
+        rig.try_create(60).await.expect("the slot is free again");
     }
     // ── Откат провайдера: подтверждаются обе пустоты, без DELETE ──
     rig.clean().await;
     {
-    let _carrier = rig.carrier_session();
-    // Яндекс откатил создание сам: ни машины, ни диска.
-    rig.fake.control().fail_next_create_operation = Some((9, "Not enough resources".to_owned()));
-    let t0 = now_micros();
-    let id = rig.create(60).await;
-    rig.tick(t0).await;
-    assert_eq!(rig.state(id).await, "identified");
-    assert_eq!(rig.fake.instance_count(), 0);
-    rig.tick(t0 + TimeDelta::seconds(1)).await;
-    assert_eq!(rig.state(id).await, "deleting");
-    // Списки не читаются: окно не заканчивается на одном только «операция не удалась».
-    rig.fake.control().list_fail_page = Some(FailPage {
-        list: "instances",
-        page: 0,
-        status: 500,
-        times: None,
-    });
-    rig.tick(t0 + TimeDelta::seconds(2)).await;
-    assert_eq!(rig.state(id).await, "deleting");
-    rig.fake.control().list_fail_page = None;
-    rig.tick(t0 + TimeDelta::seconds(40)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "failed");
-    assert_eq!((rig.deletes(), rig.disk_deletes()), (0, 0));
-    assert!(window.server_gone_at.is_some() && window.disk_gone_at.is_some());
-    assert_eq!(window.last_error.as_deref(), Some("create_failed:9"));
-    Ok(())
+        let _carrier = rig.carrier_session();
+        // Яндекс откатил создание сам: ни машины, ни диска.
+        rig.fake.control().fail_next_create_operation =
+            Some((9, "Not enough resources".to_owned()));
+        let t0 = now_micros();
+        let id = rig.create(60).await;
+        rig.tick(t0).await;
+        assert_eq!(rig.state(id).await, "identified");
+        assert_eq!(rig.fake.instance_count(), 0);
+        rig.tick(t0 + TimeDelta::seconds(1)).await;
+        assert_eq!(rig.state(id).await, "deleting");
+        // Списки не читаются: окно не заканчивается на одном только «операция не удалась».
+        rig.fake.control().list_fail_page = Some(FailPage {
+            list: "instances",
+            page: 0,
+            status: 500,
+            times: None,
+        });
+        rig.tick(t0 + TimeDelta::seconds(2)).await;
+        assert_eq!(rig.state(id).await, "deleting");
+        rig.fake.control().list_fail_page = None;
+        rig.tick(t0 + TimeDelta::seconds(40)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "failed");
+        assert_eq!((rig.deletes(), rig.disk_deletes()), (0, 0));
+        assert!(window.server_gone_at.is_some() && window.disk_gone_at.is_some());
+        assert_eq!(window.last_error.as_deref(), Some("create_failed:9"));
+        Ok(())
     }
 }
 
@@ -1792,122 +1793,120 @@ async fn a_stopped_or_crashed_instance_is_classified_and_cleaned_up() -> TestRes
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    enable_pushes(&rig.pool).await;
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, session, at) = rig.drive_to_ready(120, t0).await;
-    let window = rig.window(id).await;
-    assert!(window.preemptible);
-    let instance_id = window.instance_id.clone().unwrap();
-    let machine = rig.cloud_machine().await;
-    let running = rig.seed_job(Some(machine), "running", &["cloud"]).await;
+        enable_pushes(&rig.pool).await;
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, session, at) = rig.drive_to_ready(120, t0).await;
+        let window = rig.window(id).await;
+        assert!(window.preemptible);
+        let instance_id = window.instance_id.clone().unwrap();
+        let machine = rig.cloud_machine().await;
+        let running = rig.seed_job(Some(machine), "running", &["cloud"]).await;
 
-    // Первый проход готового окна опрашивает машину: она работает.
-    let polls = || rig.fake.control().count("GET", "/compute/v1/instances/");
-    let polled = at + TimeDelta::seconds(1);
-    let before = polls();
-    rig.tick(polled).await;
-    assert_eq!(polls(), before + 1);
-    // Яндекс остановил машину. Опрос идёт не чаще раза в 30 секунд: проходы раньше этого
-    // ничего не спрашивают и не замечают.
-    rig.fake.control().preempt(&instance_id);
-    for seconds in [5, 15, 29] {
-        rig.tick(polled + TimeDelta::seconds(seconds)).await;
-        assert_eq!(rig.state(id).await, "ready", "after {seconds} s");
-    }
-    assert_eq!(polls(), before + 1, "no poll inside the 30 s interval");
+        // Первый проход готового окна опрашивает машину: она работает.
+        let polls = || rig.fake.control().count("GET", "/compute/v1/instances/");
+        let polled = at + TimeDelta::seconds(1);
+        let before = polls();
+        rig.tick(polled).await;
+        assert_eq!(polls(), before + 1);
+        // Яндекс остановил машину. Опрос идёт не чаще раза в 30 секунд: проходы раньше этого
+        // ничего не спрашивают и не замечают.
+        rig.fake.control().preempt(&instance_id);
+        for seconds in [5, 15, 29] {
+            rig.tick(polled + TimeDelta::seconds(seconds)).await;
+            assert_eq!(rig.state(id).await, "ready", "after {seconds} s");
+        }
+        assert_eq!(polls(), before + 1, "no poll inside the 30 s interval");
 
-    let seen = polled + TimeDelta::seconds(30);
-    rig.tick(seen).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "deleting");
-    assert_eq!(window.delete_reason.as_deref(), Some("preempted"));
-    assert_eq!(window.stopped_at, Some(seen));
-    assert_eq!(rig.alert_codes().await, vec!["preempted"]);
-    // Раннер отозван в той же транзакции: его задача потеряна.
-    assert_eq!(rig.job_state(running).await, "lost");
-    assert_eq!(
-        machines::request_runner_token(&rig.pool, rig.carrier, machine, true).await,
-        Err(RunnerRefusal::Revoked)
-    );
-    drop(session);
+        let seen = polled + TimeDelta::seconds(30);
+        rig.tick(seen).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(window.delete_reason.as_deref(), Some("preempted"));
+        assert_eq!(window.stopped_at, Some(seen));
+        assert_eq!(rig.alert_codes().await, vec!["preempted"]);
+        // Раннер отозван в той же транзакции: его задача потеряна.
+        assert_eq!(rig.job_state(running).await, "lost");
+        assert_eq!(
+            machines::request_runner_token(&rig.pool, rig.carrier, machine, true).await,
+            Err(RunnerRefusal::Revoked)
+        );
+        drop(session);
 
-    // Снос убирает остановленную машину и её диск; окно заканчивается обычным `ended`.
-    let end = seen + TimeDelta::seconds(10);
-    rig.tick(end).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "ended");
-    assert_eq!(window.delete_reason.as_deref(), Some("preempted"));
-    assert_eq!(window.stopped_at, Some(seen), "the stop mark is kept");
-    assert_eq!(rig.deletes(), 1);
-    assert_eq!(rig.fake.instance_count(), 0);
-    // Остановленная машина считается по полной ставке до подтверждённого исчезновения.
-    assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
-    let view = windows::view(&window, end);
-    assert_eq!(view.stopped_at, Some(seen));
-    assert!(view.preemptible);
-    // Второй пуш — отказ от замены: задач в очереди нет.
-    assert_eq!(
-        rig.alert_codes().await,
-        vec!["preempted", "replacement_skipped"]
-    );
-    assert_eq!(rig.last_skip_reason().await, "no_waiting_job");
-
+        // Снос убирает остановленную машину и её диск; окно заканчивается обычным `ended`.
+        let end = seen + TimeDelta::seconds(10);
+        rig.tick(end).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "ended");
+        assert_eq!(window.delete_reason.as_deref(), Some("preempted"));
+        assert_eq!(window.stopped_at, Some(seen), "the stop mark is kept");
+        assert_eq!(rig.deletes(), 1);
+        assert_eq!(rig.fake.instance_count(), 0);
+        // Остановленная машина считается по полной ставке до подтверждённого исчезновения.
+        assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
+        let view = windows::view(&window, end);
+        assert_eq!(view.stopped_at, Some(seen));
+        assert!(view.preemptible);
+        // Второй пуш — отказ от замены: задач в очереди нет.
+        assert_eq!(
+            rig.alert_codes().await,
+            vec!["preempted", "replacement_skipped"]
+        );
+        assert_eq!(rig.last_skip_reason().await, "no_waiting_job");
     }
     // ── Остановка обычной машины: это поломка, а не прерывание ──
     rig.clean().await;
     {
-    let rig = rig_with(rig.pool.clone(), |config| config.preemptible = false).await;
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, _session, at) = rig.drive_to_ready(120, t0).await;
-    let window = rig.window(id).await;
-    assert!(!window.preemptible);
-    let instance_id = window.instance_id.clone().unwrap();
-    assert!(!rig.fake.control().instances[&instance_id].preemptible);
-    rig.fake
-        .control()
-        .instances
-        .get_mut(&instance_id)
-        .unwrap()
-        .forced_status = Some("STOPPING".to_owned());
-    let seen = at + TimeDelta::seconds(30);
-    rig.tick(seen).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "deleting");
-    assert_eq!(window.delete_reason.as_deref(), Some("vm_broken"));
-    assert_eq!(window.stopped_at, Some(seen));
-    assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
-
+        let rig = rig_with(rig.pool.clone(), |config| config.preemptible = false).await;
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, _session, at) = rig.drive_to_ready(120, t0).await;
+        let window = rig.window(id).await;
+        assert!(!window.preemptible);
+        let instance_id = window.instance_id.clone().unwrap();
+        assert!(!rig.fake.control().instances[&instance_id].preemptible);
+        rig.fake
+            .control()
+            .instances
+            .get_mut(&instance_id)
+            .unwrap()
+            .forced_status = Some("STOPPING".to_owned());
+        let seen = at + TimeDelta::seconds(30);
+        rig.tick(seen).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(window.delete_reason.as_deref(), Some("vm_broken"));
+        assert_eq!(window.stopped_at, Some(seen));
+        assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
     }
     // ── Падение машины — поломка даже у прерываемой, и стоп не ставится ──
     {
-    let pool = rig.pool.clone();
-    rig.clean().await;
-    let rig = rig_with(pool, |_| {}).await;
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, _session, at) = rig.drive_to_ready(60, t0).await;
-    let instance_id = rig.window(id).await.instance_id.unwrap();
-    // Окно дошло до предела и дорабатывает: опрос машины идёт и в `draining`.
-    let machine = rig.cloud_machine().await;
-    rig.seed_job(Some(machine), "running", &["cloud"]).await;
-    rig.tick(t0 + TimeDelta::minutes(60)).await;
-    assert_eq!(rig.state(id).await, "draining");
-    assert!(at < t0 + TimeDelta::minutes(60));
-    rig.fake
-        .control()
-        .instances
-        .get_mut(&instance_id)
-        .unwrap()
-        .forced_status = Some("CRASHED".to_owned());
-    rig.tick(t0 + TimeDelta::minutes(61)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "deleting");
-    assert_eq!(window.delete_reason.as_deref(), Some("vm_broken"));
-    assert_eq!(window.stopped_at, None, "a crash is not a stop");
-    assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
-    Ok(())
+        let pool = rig.pool.clone();
+        rig.clean().await;
+        let rig = rig_with(pool, |_| {}).await;
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, _session, at) = rig.drive_to_ready(60, t0).await;
+        let instance_id = rig.window(id).await.instance_id.unwrap();
+        // Окно дошло до предела и дорабатывает: опрос машины идёт и в `draining`.
+        let machine = rig.cloud_machine().await;
+        rig.seed_job(Some(machine), "running", &["cloud"]).await;
+        rig.tick(t0 + TimeDelta::minutes(60)).await;
+        assert_eq!(rig.state(id).await, "draining");
+        assert!(at < t0 + TimeDelta::minutes(60));
+        rig.fake
+            .control()
+            .instances
+            .get_mut(&instance_id)
+            .unwrap()
+            .forced_status = Some("CRASHED".to_owned());
+        rig.tick(t0 + TimeDelta::minutes(61)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(window.delete_reason.as_deref(), Some("vm_broken"));
+        assert_eq!(window.stopped_at, None, "a crash is not a stop");
+        assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
+        Ok(())
     }
 }
 
@@ -1916,135 +1915,133 @@ async fn a_preempted_window_retries_its_job_and_gets_a_replacement() -> TestResu
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    enable_pushes(&rig.pool).await;
-    rig.set_budget(10_000_000).await;
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, session, at) = rig.drive_to_ready(120, t0).await;
-    let parent = rig.window(id).await;
-    let instance_id = parent.instance_id.clone().unwrap();
-    let machine = rig.cloud_machine().await;
-    let job = rig.seed_running_sourced(machine, 0).await;
+        enable_pushes(&rig.pool).await;
+        rig.set_budget(10_000_000).await;
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, session, at) = rig.drive_to_ready(120, t0).await;
+        let parent = rig.window(id).await;
+        let instance_id = parent.instance_id.clone().unwrap();
+        let machine = rig.cloud_machine().await;
+        let job = rig.seed_running_sourced(machine, 0).await;
 
-    // Яндекс остановил машину: отзыв держит задачу с исходником до подтверждённой остановки.
-    rig.fake.control().preempt(&instance_id);
-    let seen = at + TimeDelta::seconds(30);
-    rig.tick(seen).await;
-    let held = rig.job_triple(job).await;
-    assert_eq!(held, ("retry_pending".to_owned(), 1, 0));
-    drop(session);
-    // Ждущая повтора не размещается даже на том же раннере.
-    assert_eq!(
-        place::place_carrier(&rig.pool, &rig.registry, rig.carrier)
-            .await
-            .unwrap(),
-        0
-    );
-    assert_eq!(rig.job_triple(job).await.0, "retry_pending");
-    assert_eq!(rig.alert_codes().await, vec!["preempted"]);
+        // Яндекс остановил машину: отзыв держит задачу с исходником до подтверждённой остановки.
+        rig.fake.control().preempt(&instance_id);
+        let seen = at + TimeDelta::seconds(30);
+        rig.tick(seen).await;
+        let held = rig.job_triple(job).await;
+        assert_eq!(held, ("retry_pending".to_owned(), 1, 0));
+        drop(session);
+        // Ждущая повтора не размещается даже на том же раннере.
+        assert_eq!(
+            place::place_carrier(&rig.pool, &rig.registry, rig.carrier)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(rig.job_triple(job).await.0, "retry_pending");
+        assert_eq!(rig.alert_codes().await, vec!["preempted"]);
 
-    // Снос убирает машину и диск; их отсутствие доказывает, что прежний процесс не идёт.
-    let end = seen + TimeDelta::seconds(10);
-    rig.tick(end).await;
-    let parent = rig.window(id).await;
-    assert_eq!(parent.state, "ended");
-    assert_eq!(
-        rig.job_triple(job).await,
-        ("waiting_runner".to_owned(), 2, 1)
-    );
+        // Снос убирает машину и диск; их отсутствие доказывает, что прежний процесс не идёт.
+        let end = seen + TimeDelta::seconds(10);
+        rig.tick(end).await;
+        let parent = rig.window(id).await;
+        assert_eq!(parent.state, "ended");
+        assert_eq!(
+            rig.job_triple(job).await,
+            ("waiting_runner".to_owned(), 2, 1)
+        );
 
-    // Ровно одна замена: то же предложение и повод, предел родителя абсолютный.
-    let replacements = rig.replacements_of(id).await;
-    assert_eq!(replacements.len(), 1);
-    let replacement = &replacements[0];
-    assert_eq!(replacement.replaces_window_id, Some(id));
-    assert_eq!(replacement.state, "create_intent");
-    assert_eq!(replacement.proposal_id, parent.proposal_id);
-    assert_eq!(replacement.trigger, parent.trigger);
-    assert!(replacement.preemptible);
-    assert_eq!(replacement.hard_cap_at, parent.hard_cap_at);
-    assert_eq!(
-        rig.alert_codes().await,
-        vec!["preempted", "replacement_started"]
-    );
-
+        // Ровно одна замена: то же предложение и повод, предел родителя абсолютный.
+        let replacements = rig.replacements_of(id).await;
+        assert_eq!(replacements.len(), 1);
+        let replacement = &replacements[0];
+        assert_eq!(replacement.replaces_window_id, Some(id));
+        assert_eq!(replacement.state, "create_intent");
+        assert_eq!(replacement.proposal_id, parent.proposal_id);
+        assert_eq!(replacement.trigger, parent.trigger);
+        assert!(replacement.preemptible);
+        assert_eq!(replacement.hard_cap_at, parent.hard_cap_at);
+        assert_eq!(
+            rig.alert_codes().await,
+            vec!["preempted", "replacement_started"]
+        );
     }
     // ── Замена наследует подготовку родителя ──
     rig.clean().await;
     {
-    let _carrier = rig.carrier_session();
-    rig.set_budget(10_000_000).await;
-    let prepare = Prepare {
-        packages: vec!["jq".to_owned()],
-        script: Some("echo prepared\n".to_owned()),
-    };
-    let t0 = now_micros();
-    let id = rig
-        .try_create_with(120, Some(prepare.clone()))
-        .await
-        .expect("window created");
-    rig.tick(t0).await;
-    rig.tick(t0 + TimeDelta::seconds(1)).await;
-    let session = rig.attach().await;
-    let at = t0 + TimeDelta::seconds(2);
-    rig.tick(at).await;
-    assert_eq!(rig.state(id).await, "ready");
-    let machine = rig.cloud_machine().await;
-    rig.seed_running_sourced(machine, 0).await;
-    let stopped = rig.window(id).await.instance_id.unwrap();
-    rig.fake.control().preempt(&stopped);
-    let seen = at + TimeDelta::seconds(30);
-    rig.tick(seen).await;
-    drop(session);
-    rig.tick(seen + TimeDelta::seconds(10)).await;
-    assert_eq!(rig.state(id).await, "ended");
-    let replacements = rig.replacements_of(id).await;
-    assert_eq!(replacements.len(), 1);
-    assert_eq!(
-        replacements[0].prepare(),
-        Some(prepare),
-        "the replacement takes the parent's approved preparation as is"
-    );
-
+        let _carrier = rig.carrier_session();
+        rig.set_budget(10_000_000).await;
+        let prepare = Prepare {
+            packages: vec!["jq".to_owned()],
+            script: Some("echo prepared\n".to_owned()),
+        };
+        let t0 = now_micros();
+        let id = rig
+            .try_create_with(120, Some(prepare.clone()))
+            .await
+            .expect("window created");
+        rig.tick(t0).await;
+        rig.tick(t0 + TimeDelta::seconds(1)).await;
+        let session = rig.attach().await;
+        let at = t0 + TimeDelta::seconds(2);
+        rig.tick(at).await;
+        assert_eq!(rig.state(id).await, "ready");
+        let machine = rig.cloud_machine().await;
+        rig.seed_running_sourced(machine, 0).await;
+        let stopped = rig.window(id).await.instance_id.unwrap();
+        rig.fake.control().preempt(&stopped);
+        let seen = at + TimeDelta::seconds(30);
+        rig.tick(seen).await;
+        drop(session);
+        rig.tick(seen + TimeDelta::seconds(10)).await;
+        assert_eq!(rig.state(id).await, "ended");
+        let replacements = rig.replacements_of(id).await;
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(
+            replacements[0].prepare(),
+            Some(prepare),
+            "the replacement takes the parent's approved preparation as is"
+        );
     }
     // ── Перезапуск между отзывом и отсутствием выпускает задачу один раз ──
     rig.clean().await;
     {
-    let _carrier = rig.carrier_session();
-    rig.set_budget(10_000_000).await;
-    let t0 = now_micros();
-    let (id, session, at) = rig.drive_to_ready(120, t0).await;
-    let machine = rig.cloud_machine().await;
-    let job = rig.seed_running_sourced(machine, 0).await;
-    let stopped = rig.window(id).await.instance_id.unwrap();
-    rig.fake.control().preempt(&stopped);
-    let seen = at + TimeDelta::seconds(30);
-    rig.tick(seen).await;
-    drop(session);
-    assert_eq!(rig.job_triple(job).await.0, "retry_pending");
-    // Хаб перезапустился между отзывом и подтверждённым отсутствием: память пуста, база та же.
-    let restarted = rig.restarted();
-    let end = seen + TimeDelta::seconds(10);
-    restarted.tick(end).await;
-    assert_eq!(rig.window(id).await.state, "ended");
-    assert_eq!(
-        rig.job_triple(job).await,
-        ("waiting_runner".to_owned(), 2, 1)
-    );
-    let replacements = rig.replacements_of(id).await;
-    assert_eq!(replacements.len(), 1);
-    assert_eq!(
-        replacements[0].hard_cap_at,
-        rig.window(id).await.hard_cap_at
-    );
-    // Повторный проход ничего не выпускает второй раз.
-    restarted.tick(end + TimeDelta::seconds(10)).await;
-    assert_eq!(
-        rig.job_triple(job).await,
-        ("waiting_runner".to_owned(), 2, 1)
-    );
-    assert_eq!(rig.replacements_of(id).await.len(), 1);
-    Ok(())
+        let _carrier = rig.carrier_session();
+        rig.set_budget(10_000_000).await;
+        let t0 = now_micros();
+        let (id, session, at) = rig.drive_to_ready(120, t0).await;
+        let machine = rig.cloud_machine().await;
+        let job = rig.seed_running_sourced(machine, 0).await;
+        let stopped = rig.window(id).await.instance_id.unwrap();
+        rig.fake.control().preempt(&stopped);
+        let seen = at + TimeDelta::seconds(30);
+        rig.tick(seen).await;
+        drop(session);
+        assert_eq!(rig.job_triple(job).await.0, "retry_pending");
+        // Хаб перезапустился между отзывом и подтверждённым отсутствием: память пуста, база та же.
+        let restarted = rig.restarted();
+        let end = seen + TimeDelta::seconds(10);
+        restarted.tick(end).await;
+        assert_eq!(rig.window(id).await.state, "ended");
+        assert_eq!(
+            rig.job_triple(job).await,
+            ("waiting_runner".to_owned(), 2, 1)
+        );
+        let replacements = rig.replacements_of(id).await;
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(
+            replacements[0].hard_cap_at,
+            rig.window(id).await.hard_cap_at
+        );
+        // Повторный проход ничего не выпускает второй раз.
+        restarted.tick(end + TimeDelta::seconds(10)).await;
+        assert_eq!(
+            rig.job_triple(job).await,
+            ("waiting_runner".to_owned(), 2, 1)
+        );
+        assert_eq!(rig.replacements_of(id).await.len(), 1);
+        Ok(())
     }
 }
 
@@ -2112,65 +2109,63 @@ async fn a_replacement_is_skipped_for_no_job_map_or_time_reasons() -> TestResult
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    enable_pushes(&rig.pool).await;
-    rig.set_budget(10_000_000).await;
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, session, at) = rig.drive_to_ready(120, t0).await;
-    let machine = rig.cloud_machine().await;
-    let job = rig.seed_running_sourced(machine, 0).await;
-    // Отмену просили: повтору не бывать.
-    sqlx::query("update jobs set cancel_requested_at = clock_timestamp() where id = $1")
-        .bind(job)
-        .execute(&rig.pool)
-        .await?;
-    let stopped = rig.window(id).await.instance_id.unwrap();
-    rig.fake.control().preempt(&stopped);
-    let seen = at + TimeDelta::seconds(30);
-    rig.tick(seen).await;
-    drop(session);
-    assert_eq!(rig.job_triple(job).await, ("lost".to_owned(), 1, 0));
-    let end = seen + TimeDelta::seconds(10);
-    rig.tick(end).await;
-    assert_eq!(rig.window(id).await.state, "ended");
-    // Ждущих задач нет: замены тоже.
-    assert!(rig.replacements_of(id).await.is_empty());
-    assert_eq!(
-        rig.alert_codes().await,
-        vec!["preempted", "replacement_skipped"]
-    );
-    assert_eq!(rig.last_skip_reason().await, "no_waiting_job");
-
+        enable_pushes(&rig.pool).await;
+        rig.set_budget(10_000_000).await;
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, session, at) = rig.drive_to_ready(120, t0).await;
+        let machine = rig.cloud_machine().await;
+        let job = rig.seed_running_sourced(machine, 0).await;
+        // Отмену просили: повтору не бывать.
+        sqlx::query("update jobs set cancel_requested_at = clock_timestamp() where id = $1")
+            .bind(job)
+            .execute(&rig.pool)
+            .await?;
+        let stopped = rig.window(id).await.instance_id.unwrap();
+        rig.fake.control().preempt(&stopped);
+        let seen = at + TimeDelta::seconds(30);
+        rig.tick(seen).await;
+        drop(session);
+        assert_eq!(rig.job_triple(job).await, ("lost".to_owned(), 1, 0));
+        let end = seen + TimeDelta::seconds(10);
+        rig.tick(end).await;
+        assert_eq!(rig.window(id).await.state, "ended");
+        // Ждущих задач нет: замены тоже.
+        assert!(rig.replacements_of(id).await.is_empty());
+        assert_eq!(
+            rig.alert_codes().await,
+            vec!["preempted", "replacement_skipped"]
+        );
+        assert_eq!(rig.last_skip_reason().await, "no_waiting_job");
     }
     // ── Поломка: ни повтора, ни замены ──
     rig.clean().await;
     {
-    let rig = rig_with(rig.pool.clone(), |config| config.preemptible = false).await;
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, session, at) = rig.drive_to_ready(120, t0).await;
-    let machine = rig.cloud_machine().await;
-    let job = rig.seed_running_sourced(machine, 0).await;
-    // Обычная машина остановилась сама: это поломка, а не прерывание.
-    let instance_id = rig.window(id).await.instance_id.unwrap();
-    rig.fake
-        .control()
-        .instances
-        .get_mut(&instance_id)
-        .unwrap()
-        .forced_status = Some("STOPPING".to_owned());
-    let seen = at + TimeDelta::seconds(30);
-    rig.tick(seen).await;
-    drop(session);
-    let parent = rig.window(id).await;
-    assert_eq!(parent.delete_reason.as_deref(), Some("vm_broken"));
-    assert_eq!(rig.job_triple(job).await, ("lost".to_owned(), 1, 0));
-    assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
-    rig.tick(seen + TimeDelta::seconds(10)).await;
-    assert_eq!(rig.window(id).await.state, "ended");
-    assert!(rig.replacements_of(id).await.is_empty());
-    assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
-
+        let rig = rig_with(rig.pool.clone(), |config| config.preemptible = false).await;
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, session, at) = rig.drive_to_ready(120, t0).await;
+        let machine = rig.cloud_machine().await;
+        let job = rig.seed_running_sourced(machine, 0).await;
+        // Обычная машина остановилась сама: это поломка, а не прерывание.
+        let instance_id = rig.window(id).await.instance_id.unwrap();
+        rig.fake
+            .control()
+            .instances
+            .get_mut(&instance_id)
+            .unwrap()
+            .forced_status = Some("STOPPING".to_owned());
+        let seen = at + TimeDelta::seconds(30);
+        rig.tick(seen).await;
+        drop(session);
+        let parent = rig.window(id).await;
+        assert_eq!(parent.delete_reason.as_deref(), Some("vm_broken"));
+        assert_eq!(rig.job_triple(job).await, ("lost".to_owned(), 1, 0));
+        assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
+        rig.tick(seen + TimeDelta::seconds(10)).await;
+        assert_eq!(rig.window(id).await.state, "ended");
+        assert!(rig.replacements_of(id).await.is_empty());
+        assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
     }
     // ── Бюджет: замены без согласия на перерасход нет ──
     let pool = rig.pool.clone();
@@ -2210,34 +2205,34 @@ async fn a_replacement_is_skipped_for_no_job_map_or_time_reasons() -> TestResult
     // ── До предела родителя мало времени: замену не поднимаем ──
     rig.clean().await;
     {
-    let rig = rig_with(pool.clone(), |_| {}).await;
-    let _carrier = rig.carrier_session();
-    rig.set_budget(10_000_000).await;
-    let t0 = now_micros();
-    let (id, session, _at) = rig.drive_to_ready(60, t0).await;
-    let machine = rig.cloud_machine().await;
-    let job = rig.seed_running_sourced(machine, 0).await;
-    // Прерывание за десять минут до абсолютного предела: поднимать замену поздно.
-    let seen = t0 + TimeDelta::minutes(50);
-    let stopped = rig.window(id).await.instance_id.unwrap();
-    rig.fake.control().preempt(&stopped);
-    rig.tick(seen).await;
-    drop(session);
-    rig.tick(seen + TimeDelta::seconds(10)).await;
-    let parent = rig.window(id).await;
-    assert_eq!(parent.state, "ended");
-    // Задача всё равно выпущена: снос подтвердил отсутствие прежней машины.
-    assert_eq!(
-        rig.job_triple(job).await,
-        ("waiting_runner".to_owned(), 2, 1)
-    );
-    assert!(rig.replacements_of(id).await.is_empty());
-    assert_eq!(
-        rig.alert_codes().await,
-        vec!["preempted", "replacement_skipped"]
-    );
-    assert_eq!(rig.last_skip_reason().await, "no_time");
-    Ok(())
+        let rig = rig_with(pool.clone(), |_| {}).await;
+        let _carrier = rig.carrier_session();
+        rig.set_budget(10_000_000).await;
+        let t0 = now_micros();
+        let (id, session, _at) = rig.drive_to_ready(60, t0).await;
+        let machine = rig.cloud_machine().await;
+        let job = rig.seed_running_sourced(machine, 0).await;
+        // Прерывание за десять минут до абсолютного предела: поднимать замену поздно.
+        let seen = t0 + TimeDelta::minutes(50);
+        let stopped = rig.window(id).await.instance_id.unwrap();
+        rig.fake.control().preempt(&stopped);
+        rig.tick(seen).await;
+        drop(session);
+        rig.tick(seen + TimeDelta::seconds(10)).await;
+        let parent = rig.window(id).await;
+        assert_eq!(parent.state, "ended");
+        // Задача всё равно выпущена: снос подтвердил отсутствие прежней машины.
+        assert_eq!(
+            rig.job_triple(job).await,
+            ("waiting_runner".to_owned(), 2, 1)
+        );
+        assert!(rig.replacements_of(id).await.is_empty());
+        assert_eq!(
+            rig.alert_codes().await,
+            vec!["preempted", "replacement_skipped"]
+        );
+        assert_eq!(rig.last_skip_reason().await, "no_time");
+        Ok(())
     }
 }
 
@@ -2461,62 +2456,61 @@ async fn an_ambiguous_create_is_found_by_name_or_fails_after_the_window() -> Tes
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    rig.fake.control().create = CreateMode::AcceptThenDrop;
-    let t0 = now_micros();
-    let id = rig.create(60).await;
-    rig.tick(t0).await;
-    assert_eq!(rig.state(id).await, "create_unknown");
-    assert_eq!(rig.window(id).await.instance_id, None);
-    assert_eq!(rig.posts(), 1);
-    // Следующий полный список каталога машину ещё не показывает.
-    rig.fake.control().listing_hidden_polls = 1;
+        rig.fake.control().create = CreateMode::AcceptThenDrop;
+        let t0 = now_micros();
+        let id = rig.create(60).await;
+        rig.tick(t0).await;
+        assert_eq!(rig.state(id).await, "create_unknown");
+        assert_eq!(rig.window(id).await.instance_id, None);
+        assert_eq!(rig.posts(), 1);
+        // Следующий полный список каталога машину ещё не показывает.
+        rig.fake.control().listing_hidden_polls = 1;
 
-    // Проходы между сверками ничего не меняют и не звонят повторно.
-    for seconds in [10, 60, 120] {
-        rig.tick(t0 + TimeDelta::seconds(seconds)).await;
-    }
-    assert_eq!(rig.state(id).await, "create_unknown");
-    // Сверка видит пустой список (машина скрыта) раньше окна ожидания: окно не трогается.
-    rig.tick(t0 + TimeDelta::minutes(5)).await;
-    assert_eq!(rig.state(id).await, "create_unknown");
-    // Следующая сверка видит машину по имени.
-    rig.tick(t0 + TimeDelta::minutes(10)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "identified");
-    assert!(window.instance_id.is_some());
-    assert_eq!(rig.posts(), 1, "there is never a second POST");
-    assert_eq!(rig.fake.instance_count(), 1);
-
+        // Проходы между сверками ничего не меняют и не звонят повторно.
+        for seconds in [10, 60, 120] {
+            rig.tick(t0 + TimeDelta::seconds(seconds)).await;
+        }
+        assert_eq!(rig.state(id).await, "create_unknown");
+        // Сверка видит пустой список (машина скрыта) раньше окна ожидания: окно не трогается.
+        rig.tick(t0 + TimeDelta::minutes(5)).await;
+        assert_eq!(rig.state(id).await, "create_unknown");
+        // Следующая сверка видит машину по имени.
+        rig.tick(t0 + TimeDelta::minutes(10)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "identified");
+        assert!(window.instance_id.is_some());
+        assert_eq!(rig.posts(), 1, "there is never a second POST");
+        assert_eq!(rig.fake.instance_count(), 1);
     }
     // ── Машины нет ни в одном полном списке: окно закрывается нулём ──
     rig.clean().await;
     {
-    rig.fake.control().create = CreateMode::unavailable();
-    let t0 = now_micros();
-    let id = rig.create(60).await;
-    rig.tick(t0).await;
-    assert_eq!(rig.state(id).await, "create_unknown");
-    rig.tick(t0 + TimeDelta::minutes(5)).await;
-    assert_eq!(
-        rig.state(id).await,
-        "create_unknown",
-        "a full listing without the instance is not enough before the window"
-    );
-    rig.tick(t0 + TimeDelta::minutes(10)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "failed");
-    assert_eq!(window.delete_reason.as_deref(), Some("create_failed"));
-    assert_eq!(window.last_error.as_deref(), Some("not_found_in_listing"));
-    assert!(window.server_gone_at.is_some() && window.disk_gone_at.is_some());
-    assert_eq!(
-        window.final_cost_kopecks,
-        Some(0),
-        "the reservation is released"
-    );
-    assert_eq!(rig.posts(), 1, "there is never a second POST");
-    // После закрытия можно создать новое окно.
-    rig.try_create(60).await.expect("the slot is free");
-    Ok(())
+        rig.fake.control().create = CreateMode::unavailable();
+        let t0 = now_micros();
+        let id = rig.create(60).await;
+        rig.tick(t0).await;
+        assert_eq!(rig.state(id).await, "create_unknown");
+        rig.tick(t0 + TimeDelta::minutes(5)).await;
+        assert_eq!(
+            rig.state(id).await,
+            "create_unknown",
+            "a full listing without the instance is not enough before the window"
+        );
+        rig.tick(t0 + TimeDelta::minutes(10)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "failed");
+        assert_eq!(window.delete_reason.as_deref(), Some("create_failed"));
+        assert_eq!(window.last_error.as_deref(), Some("not_found_in_listing"));
+        assert!(window.server_gone_at.is_some() && window.disk_gone_at.is_some());
+        assert_eq!(
+            window.final_cost_kopecks,
+            Some(0),
+            "the reservation is released"
+        );
+        assert_eq!(rig.posts(), 1, "there is never a second POST");
+        // После закрытия можно создать новое окно.
+        rig.try_create(60).await.expect("the slot is free");
+        Ok(())
     }
 }
 
@@ -2525,79 +2519,78 @@ async fn an_absence_timestamp_is_taken_after_the_listing_that_confirmed_it() -> 
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    // Провайдер отвечает только после того, как тест отпустит запрос: проход уже давно начался.
-    let t0 = now_micros();
-    let id = raw_window(
-        &rig.pool,
-        "deleting",
-        None,
-        Some(t0 - TimeDelta::minutes(20)),
-    )
-    .await;
-    let gate = ResponseGate::new();
-    rig.fake.control().gate = Some(gate.clone());
-    let waiting = gate.waiting.notified();
-    let service = Arc::clone(&rig.service);
-    let tick = tokio::spawn(async move { service.tick(t0).await });
-    waiting.await;
-    let _ = rig.window(id).await;
-    let released = now_micros();
-    assert!(released > t0, "the tick began before the provider answered");
-    gate.release.notify_one();
-    tick.await.unwrap();
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "ended");
-    assert!(
-        window.server_gone_at.is_some_and(|at| at >= released),
-        "the machine end is not backdated to the tick start: {:?}",
-        window.server_gone_at
-    );
-    assert!(
-        window.disk_gone_at.is_some_and(|at| at >= released),
-        "the disk end is not backdated to the tick start: {:?}",
-        window.disk_gone_at
-    );
-
+        // Провайдер отвечает только после того, как тест отпустит запрос: проход уже давно начался.
+        let t0 = now_micros();
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            None,
+            Some(t0 - TimeDelta::minutes(20)),
+        )
+        .await;
+        let gate = ResponseGate::new();
+        rig.fake.control().gate = Some(gate.clone());
+        let waiting = gate.waiting.notified();
+        let service = Arc::clone(&rig.service);
+        let tick = tokio::spawn(async move { service.tick(t0).await });
+        waiting.await;
+        let _ = rig.window(id).await;
+        let released = now_micros();
+        assert!(released > t0, "the tick began before the provider answered");
+        gate.release.notify_one();
+        tick.await.unwrap();
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "ended");
+        assert!(
+            window.server_gone_at.is_some_and(|at| at >= released),
+            "the machine end is not backdated to the tick start: {:?}",
+            window.server_gone_at
+        );
+        assert!(
+            window.disk_gone_at.is_some_and(|at| at >= released),
+            "the disk end is not backdated to the tick start: {:?}",
+            window.disk_gone_at
+        );
     }
     // ── Пропажа машины подтверждается списком, и метка не откатывается к началу прохода ──
     rig.clean().await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let instance = rig.add_instance("placeholder");
-    let id = raw_window(
-        &rig.pool,
-        "ready",
-        Some(&instance),
-        Some(t0 - TimeDelta::minutes(20)),
-    )
-    .await;
-    {
-        let mut state = rig.fake.control();
-        state.instances.get_mut(&instance).unwrap().name = windows::server_name(id);
-        let disk = state.instances[&instance].disk_id.clone();
-        state.disks.get_mut(&disk).unwrap().name = windows::server_name(id);
-        // Машина пропала, пока хаба не было: полный список подтверждает это только сейчас.
-        state.remove_instance(&instance);
-    }
-    let gate = ResponseGate::new();
-    rig.fake.control().gate = Some(gate.clone());
-    let waiting = gate.waiting.notified();
-    let service = Arc::clone(&rig.service);
-    let tick = tokio::spawn(async move { service.tick(t0).await });
-    waiting.await;
-    let _ = rig.window(id).await;
-    let released = now_micros();
-    assert!(released > t0, "the tick began before the provider answered");
-    gate.release.notify_one();
-    tick.await.unwrap();
-    let window = rig.window(id).await;
-    assert!(
-        window.server_gone_at.is_some_and(|at| at >= released),
-        "the machine end is not backdated to the tick start: {:?}",
-        window.server_gone_at
-    );
-    Ok(())
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let instance = rig.add_instance("placeholder");
+        let id = raw_window(
+            &rig.pool,
+            "ready",
+            Some(&instance),
+            Some(t0 - TimeDelta::minutes(20)),
+        )
+        .await;
+        {
+            let mut state = rig.fake.control();
+            state.instances.get_mut(&instance).unwrap().name = windows::server_name(id);
+            let disk = state.instances[&instance].disk_id.clone();
+            state.disks.get_mut(&disk).unwrap().name = windows::server_name(id);
+            // Машина пропала, пока хаба не было: полный список подтверждает это только сейчас.
+            state.remove_instance(&instance);
+        }
+        let gate = ResponseGate::new();
+        rig.fake.control().gate = Some(gate.clone());
+        let waiting = gate.waiting.notified();
+        let service = Arc::clone(&rig.service);
+        let tick = tokio::spawn(async move { service.tick(t0).await });
+        waiting.await;
+        let _ = rig.window(id).await;
+        let released = now_micros();
+        assert!(released > t0, "the tick began before the provider answered");
+        gate.release.notify_one();
+        tick.await.unwrap();
+        let window = rig.window(id).await;
+        assert!(
+            window.server_gone_at.is_some_and(|at| at >= released),
+            "the machine end is not backdated to the tick start: {:?}",
+            window.server_gone_at
+        );
+        Ok(())
     }
 }
 
@@ -2760,95 +2753,94 @@ async fn the_hard_cap_drains_cancels_bounds_teardown_and_deletes() -> TestResult
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, _session, at) = rig.drive_to_ready(60, t0).await;
-    let machine = rig.cloud_machine().await;
-    let running = rig.seed_job(Some(machine), "running", &["cloud"]).await;
-    let queued = rig.seed_job(Some(machine), "queued", &["cloud"]).await;
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, _session, at) = rig.drive_to_ready(60, t0).await;
+        let machine = rig.cloud_machine().await;
+        let running = rig.seed_job(Some(machine), "running", &["cloud"]).await;
+        let queued = rig.seed_job(Some(machine), "queued", &["cloud"]).await;
 
-    let window = rig.window(id).await;
-    // Предел считается от вызова создания, а не от готовности.
-    assert_eq!(window.create_called_at, Some(t0));
-    assert!(window.ready_at.unwrap() > t0);
-    assert_eq!(window.hard_cap_at, Some(t0 + TimeDelta::minutes(60)));
-    assert_eq!(window.drain_until, Some(t0 + TimeDelta::minutes(90)));
-    assert_eq!(window.teardown_until, Some(t0 + TimeDelta::minutes(120)));
+        let window = rig.window(id).await;
+        // Предел считается от вызова создания, а не от готовности.
+        assert_eq!(window.create_called_at, Some(t0));
+        assert!(window.ready_at.unwrap() > t0);
+        assert_eq!(window.hard_cap_at, Some(t0 + TimeDelta::minutes(60)));
+        assert_eq!(window.drain_until, Some(t0 + TimeDelta::minutes(90)));
+        assert_eq!(window.teardown_until, Some(t0 + TimeDelta::minutes(120)));
 
-    // До предела окно живёт, а работа есть: простоя нет.
-    rig.tick(at + TimeDelta::minutes(30)).await;
-    assert_eq!(rig.state(id).await, "ready");
+        // До предела окно живёт, а работа есть: простоя нет.
+        rig.tick(at + TimeDelta::minutes(30)).await;
+        assert_eq!(rig.state(id).await, "ready");
 
-    // Предел: раннер перестаёт брать работу, идущая дорабатывает.
-    rig.tick(t0 + TimeDelta::minutes(60)).await;
-    assert_eq!(rig.state(id).await, "draining");
-    let accepts: bool =
-        sqlx::query_scalar("select accepts_remote_work from machines where id = $1")
-            .bind(machine)
-            .fetch_one(&rig.pool)
-            .await?;
-    assert!(!accepts, "draining stops new binds");
-    rig.tick(t0 + TimeDelta::minutes(89)).await;
-    assert!(rig.window(id).await.cancel_sent_at.is_none());
-    assert_eq!(rig.job_state(running).await, "running");
+        // Предел: раннер перестаёт брать работу, идущая дорабатывает.
+        rig.tick(t0 + TimeDelta::minutes(60)).await;
+        assert_eq!(rig.state(id).await, "draining");
+        let accepts: bool =
+            sqlx::query_scalar("select accepts_remote_work from machines where id = $1")
+                .bind(machine)
+                .fetch_one(&rig.pool)
+                .await?;
+        assert!(!accepts, "draining stops new binds");
+        rig.tick(t0 + TimeDelta::minutes(89)).await;
+        assert!(rig.window(id).await.cancel_sent_at.is_none());
+        assert_eq!(rig.job_state(running).await, "running");
 
-    // После срока на доработку идущая задача получает отмену через общий путь отмены.
-    rig.tick(t0 + TimeDelta::minutes(90)).await;
-    assert!(rig.window(id).await.cancel_sent_at.is_some());
-    let cancel_requested: bool =
-        sqlx::query_scalar("select cancel_requested_at is not null from jobs where id = $1")
-            .bind(running)
-            .fetch_one(&rig.pool)
-            .await?;
-    assert!(cancel_requested);
-    assert_eq!(
-        rig.job_state(queued).await,
-        "canceled",
-        "the queue closes at once"
-    );
-    let sent: i64 = sqlx::query_scalar(
-        "select count(*) from commands where kind = 'cancel_inplace_job' and machine_id = $1",
-    )
-    .bind(machine)
-    .fetch_one(&rig.pool)
-    .await?;
-    assert_eq!(sent, 1);
-    // Подтверждения нет; до границы сноса окно ждёт.
-    rig.tick(t0 + TimeDelta::minutes(119)).await;
-    assert_eq!(rig.state(id).await, "draining");
-    assert_eq!(rig.job_state(running).await, "running");
+        // После срока на доработку идущая задача получает отмену через общий путь отмены.
+        rig.tick(t0 + TimeDelta::minutes(90)).await;
+        assert!(rig.window(id).await.cancel_sent_at.is_some());
+        let cancel_requested: bool =
+            sqlx::query_scalar("select cancel_requested_at is not null from jobs where id = $1")
+                .bind(running)
+                .fetch_one(&rig.pool)
+                .await?;
+        assert!(cancel_requested);
+        assert_eq!(
+            rig.job_state(queued).await,
+            "canceled",
+            "the queue closes at once"
+        );
+        let sent: i64 = sqlx::query_scalar(
+            "select count(*) from commands where kind = 'cancel_inplace_job' and machine_id = $1",
+        )
+        .bind(machine)
+        .fetch_one(&rig.pool)
+        .await?;
+        assert_eq!(sent, 1);
+        // Подтверждения нет; до границы сноса окно ждёт.
+        rig.tick(t0 + TimeDelta::minutes(119)).await;
+        assert_eq!(rig.state(id).await, "draining");
+        assert_eq!(rig.job_state(running).await, "running");
 
-    // Граница сноса: неподтверждённое становится `lost`, раннер отозван, машина удаляется.
-    rig.tick(t0 + TimeDelta::minutes(120)).await;
-    assert_eq!(rig.state(id).await, "deleting");
-    assert_eq!(rig.job_state(running).await, "lost");
-    let end = t0 + TimeDelta::minutes(120) + TimeDelta::seconds(1);
-    rig.tick(end).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "ended");
-    // 120 минут и секунда от вызова создания, по секундам: чуть больше двух часов из трёх
-    // зарезервированных.
-    assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
-    assert!(window.final_cost_kopecks.unwrap() > 2 * HOURLY);
-    assert!(window.final_cost_kopecks.unwrap() <= window.reservation_kopecks);
-
+        // Граница сноса: неподтверждённое становится `lost`, раннер отозван, машина удаляется.
+        rig.tick(t0 + TimeDelta::minutes(120)).await;
+        assert_eq!(rig.state(id).await, "deleting");
+        assert_eq!(rig.job_state(running).await, "lost");
+        let end = t0 + TimeDelta::minutes(120) + TimeDelta::seconds(1);
+        rig.tick(end).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "ended");
+        // 120 минут и секунда от вызова создания, по секундам: чуть больше двух часов из трёх
+        // зарезервированных.
+        assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
+        assert!(window.final_cost_kopecks.unwrap() > 2 * HOURLY);
+        assert!(window.final_cost_kopecks.unwrap() <= window.reservation_kopecks);
     }
     // ── К концу доработки работы не осталось: окно уходит на снос сразу ──
     rig.clean().await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, _session, _) = rig.drive_to_ready(60, t0).await;
-    rig.tick(t0 + TimeDelta::minutes(60)).await;
-    assert_eq!(rig.state(id).await, "draining");
-    rig.tick(t0 + TimeDelta::minutes(60) + TimeDelta::seconds(1))
-        .await;
-    assert_eq!(rig.state(id).await, "deleting");
-    assert_eq!(
-        rig.window(id).await.delete_reason.as_deref(),
-        Some("drained")
-    );
-    Ok(())
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, _session, _) = rig.drive_to_ready(60, t0).await;
+        rig.tick(t0 + TimeDelta::minutes(60)).await;
+        assert_eq!(rig.state(id).await, "draining");
+        rig.tick(t0 + TimeDelta::minutes(60) + TimeDelta::seconds(1))
+            .await;
+        assert_eq!(rig.state(id).await, "deleting");
+        assert_eq!(
+            rig.window(id).await.delete_reason.as_deref(),
+            Some("drained")
+        );
+        Ok(())
     }
 }
 
@@ -2991,134 +2983,132 @@ async fn a_delete_is_confirmed_only_by_a_full_listing_and_retries_failures() -> 
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    let now = now_micros();
-    let instance = rig.add_instance("placeholder");
-    let id = raw_window(
-        &rig.pool,
-        "deleting",
-        Some(&instance),
-        Some(now - TimeDelta::minutes(20)),
-    )
-    .await;
-    rig.fake
-        .control()
-        .instances
-        .get_mut(&instance)
-        .unwrap()
-        .name = windows::server_name(id);
-    // Тёплый проход: сверка проходит, а первая попытка удаления ещё не наступила.
-    sqlx::query(
-        "update cloud_windows set delete_accepted_at = null, next_delete_at = $2 where id = $1",
-    )
-    .bind(id)
-    .bind(now + TimeDelta::seconds(30))
-    .execute(&rig.pool)
-    .await?;
-    rig.tick(now).await;
-    assert_eq!(rig.fake.instance_count(), 1);
-    // Точечный ответ 404, но полный список каталога всё ещё показывает машину: отсутствие
-    // не подтверждено, оплата машины не закончена.
-    rig.fake.control().fail_next.push_back(404);
-    rig.tick(now + TimeDelta::seconds(40)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "deleting");
-    assert!(window.server_gone_at.is_none());
-    assert_eq!(rig.fake.instance_count(), 1);
-    assert_eq!(rig.deletes(), 0);
-
+        let now = now_micros();
+        let instance = rig.add_instance("placeholder");
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            Some(&instance),
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        rig.fake
+            .control()
+            .instances
+            .get_mut(&instance)
+            .unwrap()
+            .name = windows::server_name(id);
+        // Тёплый проход: сверка проходит, а первая попытка удаления ещё не наступила.
+        sqlx::query(
+            "update cloud_windows set delete_accepted_at = null, next_delete_at = $2 where id = $1",
+        )
+        .bind(id)
+        .bind(now + TimeDelta::seconds(30))
+        .execute(&rig.pool)
+        .await?;
+        rig.tick(now).await;
+        assert_eq!(rig.fake.instance_count(), 1);
+        // Точечный ответ 404, но полный список каталога всё ещё показывает машину: отсутствие
+        // не подтверждено, оплата машины не закончена.
+        rig.fake.control().fail_next.push_back(404);
+        rig.tick(now + TimeDelta::seconds(40)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert!(window.server_gone_at.is_none());
+        assert_eq!(rig.fake.instance_count(), 1);
+        assert_eq!(rig.deletes(), 0);
     }
     // ── Три неудачи точечного ответа: откат и пуш ──
     rig.clean().await;
     {
-    let now = now_micros();
-    let instance = rig.add_instance("placeholder");
-    let id = raw_window(
-        &rig.pool,
-        "deleting",
-        Some(&instance),
-        Some(now - TimeDelta::minutes(20)),
-    )
-    .await;
-    rig.fake
-        .control()
-        .instances
-        .get_mut(&instance)
-        .unwrap()
-        .name = windows::server_name(id);
-    // Тёплый проход: сверка проходит, первая попытка удаления ещё не наступила.
-    sqlx::query(
-        "update cloud_windows set delete_accepted_at = null, next_delete_at = $2 where id = $1",
-    )
-    .bind(id)
-    .bind(now + TimeDelta::seconds(30))
-    .execute(&rig.pool)
-    .await?;
-    rig.tick(now).await;
-    assert_eq!(rig.window(id).await.delete_attempts, 0);
-    assert!(rig.alert_codes().await.is_empty());
+        let now = now_micros();
+        let instance = rig.add_instance("placeholder");
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            Some(&instance),
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        rig.fake
+            .control()
+            .instances
+            .get_mut(&instance)
+            .unwrap()
+            .name = windows::server_name(id);
+        // Тёплый проход: сверка проходит, первая попытка удаления ещё не наступила.
+        sqlx::query(
+            "update cloud_windows set delete_accepted_at = null, next_delete_at = $2 where id = $1",
+        )
+        .bind(id)
+        .bind(now + TimeDelta::seconds(30))
+        .execute(&rig.pool)
+        .await?;
+        rig.tick(now).await;
+        assert_eq!(rig.window(id).await.delete_attempts, 0);
+        assert!(rig.alert_codes().await.is_empty());
 
-    // Точечный ответ не приходит: это неудача удаления, с откатом.
-    for (attempt, at, next) in [
-        (1, now + TimeDelta::seconds(40), TimeDelta::seconds(30)),
-        (2, now + TimeDelta::seconds(130), TimeDelta::seconds(60)),
-    ] {
+        // Точечный ответ не приходит: это неудача удаления, с откатом.
+        for (attempt, at, next) in [
+            (1, now + TimeDelta::seconds(40), TimeDelta::seconds(30)),
+            (2, now + TimeDelta::seconds(130), TimeDelta::seconds(60)),
+        ] {
+            rig.fake.control().fail_next.push_back(500);
+            rig.tick(at).await;
+            let window = rig.window(id).await;
+            assert_eq!(window.delete_attempts, attempt);
+            assert_eq!(window.next_delete_at, Some(at + next));
+            assert_eq!(rig.fake.instance_count(), 1, "nothing is deleted blindly");
+            assert!(rig.alert_codes().await.is_empty(), "fewer than three");
+        }
+        // Раньше паузы после второй неудачи прохода нет.
+        rig.tick(now + TimeDelta::seconds(160)).await;
+        assert_eq!(rig.window(id).await.delete_attempts, 2);
+        assert_eq!(rig.fake.instance_count(), 1);
+        // Третья неудача: пуш о неудаляемой машине.
         rig.fake.control().fail_next.push_back(500);
-        rig.tick(at).await;
+        rig.tick(now + TimeDelta::seconds(260)).await;
         let window = rig.window(id).await;
-        assert_eq!(window.delete_attempts, attempt);
-        assert_eq!(window.next_delete_at, Some(at + next));
-        assert_eq!(rig.fake.instance_count(), 1, "nothing is deleted blindly");
-        assert!(rig.alert_codes().await.is_empty(), "fewer than three");
-    }
-    // Раньше паузы после второй неудачи прохода нет.
-    rig.tick(now + TimeDelta::seconds(160)).await;
-    assert_eq!(rig.window(id).await.delete_attempts, 2);
-    assert_eq!(rig.fake.instance_count(), 1);
-    // Третья неудача: пуш о неудаляемой машине.
-    rig.fake.control().fail_next.push_back(500);
-    rig.tick(now + TimeDelta::seconds(260)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.delete_attempts, 3);
-    assert_eq!(window.last_error.as_deref(), Some("delete_lookup_failed"));
-    assert_eq!(rig.alert_codes().await, vec!["delete_failing"]);
-    assert_eq!(rig.state(id).await, "deleting");
+        assert_eq!(window.delete_attempts, 3);
+        assert_eq!(window.last_error.as_deref(), Some("delete_lookup_failed"));
+        assert_eq!(rig.alert_codes().await, vec!["delete_failing"]);
+        assert_eq!(rig.state(id).await, "deleting");
 
-    // Провайдер отвечает: обычное удаление и конец окна.
-    rig.tick(now + TimeDelta::minutes(10)).await;
-    assert_eq!(rig.state(id).await, "ended");
-
+        // Провайдер отвечает: обычное удаление и конец окна.
+        rig.tick(now + TimeDelta::minutes(10)).await;
+        assert_eq!(rig.state(id).await, "ended");
     }
     // ── Подтверждённое отсутствие: DELETE не нужен вовсе ──
     rig.clean().await;
     {
-    let now = now_micros();
-    let id = raw_window(
-        &rig.pool,
-        "deleting",
-        Some("fhmfakeinstance9999"),
-        Some(now - TimeDelta::minutes(20)),
-    )
-    .await;
-    sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
-        .bind(id)
-        .bind(now)
-        .execute(&rig.pool)
-        .await?;
-    rig.tick(now).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "ended");
-    assert!(
-        window.disk_gone_at.is_some_and(|at| at >= now),
-        "the disk is confirmed too: {:?}",
-        window.disk_gone_at
-    );
-    assert_eq!(rig.deletes(), 0, "no DELETE once absence is confirmed");
-    assert_eq!(
-        rig.fake.control().count("GET", "/compute/v1/instances/"),
-        0,
-        "the instance is not even looked up"
-    );
-    Ok(())
+        let now = now_micros();
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            Some("fhmfakeinstance9999"),
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
+            .bind(id)
+            .bind(now)
+            .execute(&rig.pool)
+            .await?;
+        rig.tick(now).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "ended");
+        assert!(
+            window.disk_gone_at.is_some_and(|at| at >= now),
+            "the disk is confirmed too: {:?}",
+            window.disk_gone_at
+        );
+        assert_eq!(rig.deletes(), 0, "no DELETE once absence is confirmed");
+        assert_eq!(
+            rig.fake.control().count("GET", "/compute/v1/instances/"),
+            0,
+            "the instance is not even looked up"
+        );
+        Ok(())
     }
 }
 
@@ -3127,57 +3117,56 @@ async fn a_failing_delete_retries_and_a_hand_deleted_instance_ends_the_window() 
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, when) = drive_to_deleting(&rig, t0).await;
-    rig.fake.control().delete_status = Some(500);
-    rig.tick(when + TimeDelta::seconds(1)).await;
-    assert_eq!(rig.state(id).await, "deleting");
-    assert_eq!(
-        rig.window(id).await.last_error.as_deref(),
-        Some("delete_failed")
-    );
-    // Владелец удалил машину в консоли: её нет ни по номеру, ни в полном списке.
-    rig.vanish_instances();
-    rig.tick(when + TimeDelta::minutes(6)).await;
-    assert_eq!(rig.state(id).await, "ended");
-    assert_eq!(rig.deletes(), 1, "no second DELETE for an absent instance");
-
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, when) = drive_to_deleting(&rig, t0).await;
+        rig.fake.control().delete_status = Some(500);
+        rig.tick(when + TimeDelta::seconds(1)).await;
+        assert_eq!(rig.state(id).await, "deleting");
+        assert_eq!(
+            rig.window(id).await.last_error.as_deref(),
+            Some("delete_failed")
+        );
+        // Владелец удалил машину в консоли: её нет ни по номеру, ни в полном списке.
+        rig.vanish_instances();
+        rig.tick(when + TimeDelta::minutes(6)).await;
+        assert_eq!(rig.state(id).await, "ended");
+        assert_eq!(rig.deletes(), 1, "no second DELETE for an absent instance");
     }
     // ── Повторы с откатом и пуш после третьей неудачи ──
     rig.clean().await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, when) = drive_to_deleting(&rig, t0).await;
-    rig.fake.control().delete_status = Some(500);
-    rig.tick(when + TimeDelta::seconds(1)).await;
-    assert_eq!(rig.deletes(), 1);
-    // Повтор не раньше паузы.
-    rig.tick(when + TimeDelta::seconds(10)).await;
-    assert_eq!(rig.deletes(), 1);
-    rig.tick(when + TimeDelta::seconds(40)).await;
-    assert_eq!(rig.deletes(), 2);
-    assert!(
-        rig.alert_codes().await.is_empty(),
-        "two failures are not alerted"
-    );
-    rig.tick(when + TimeDelta::minutes(3)).await;
-    assert_eq!(rig.deletes(), 3);
-    assert_eq!(rig.window(id).await.delete_attempts, 3);
-    assert_eq!(rig.alert_codes().await, vec!["delete_failing"]);
-    assert_eq!(rig.state(id).await, "deleting");
-    // Дальше ретраи идут, а пуш раз в 30 минут.
-    rig.tick(when + TimeDelta::minutes(12)).await;
-    assert!(rig.deletes() >= 4);
-    assert_eq!(rig.alerts().await.len(), 1, "same half hour, same alert");
-    rig.tick(when + TimeDelta::minutes(35)).await;
-    assert_eq!(rig.alerts().await.len(), 2);
-    // Провайдер ожил: удаление проходит.
-    rig.fake.control().delete_status = None;
-    rig.tick(when + TimeDelta::minutes(50)).await;
-    assert_eq!(rig.state(id).await, "ended");
-    Ok(())
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, when) = drive_to_deleting(&rig, t0).await;
+        rig.fake.control().delete_status = Some(500);
+        rig.tick(when + TimeDelta::seconds(1)).await;
+        assert_eq!(rig.deletes(), 1);
+        // Повтор не раньше паузы.
+        rig.tick(when + TimeDelta::seconds(10)).await;
+        assert_eq!(rig.deletes(), 1);
+        rig.tick(when + TimeDelta::seconds(40)).await;
+        assert_eq!(rig.deletes(), 2);
+        assert!(
+            rig.alert_codes().await.is_empty(),
+            "two failures are not alerted"
+        );
+        rig.tick(when + TimeDelta::minutes(3)).await;
+        assert_eq!(rig.deletes(), 3);
+        assert_eq!(rig.window(id).await.delete_attempts, 3);
+        assert_eq!(rig.alert_codes().await, vec!["delete_failing"]);
+        assert_eq!(rig.state(id).await, "deleting");
+        // Дальше ретраи идут, а пуш раз в 30 минут.
+        rig.tick(when + TimeDelta::minutes(12)).await;
+        assert!(rig.deletes() >= 4);
+        assert_eq!(rig.alerts().await.len(), 1, "same half hour, same alert");
+        rig.tick(when + TimeDelta::minutes(35)).await;
+        assert_eq!(rig.alerts().await.len(), 2);
+        // Провайдер ожил: удаление проходит.
+        rig.fake.control().delete_status = None;
+        rig.tick(when + TimeDelta::minutes(50)).await;
+        assert_eq!(rig.state(id).await, "ended");
+        Ok(())
     }
 }
 
@@ -3186,82 +3175,81 @@ async fn an_accepted_delete_is_confirmed_only_by_absence_and_retried() -> TestRe
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    enable_pushes(&rig.pool).await;
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, when) = drive_to_deleting(&rig, t0).await;
-    // Удаление принято, но машина ещё долго видна в каталоге как `DELETING`.
-    let instance_id = rig.window(id).await.instance_id.unwrap();
-    rig.fake.control().delete_polls = 1_000_000;
-    rig.tick(when + TimeDelta::seconds(1)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "deleting");
-    assert!(window.delete_accepted_at.is_some());
-    assert!(window.delete_confirmed_at.is_none());
-    assert!(window.server_gone_at.is_none());
-    rig.tick(when + TimeDelta::seconds(20)).await;
-    assert_eq!(
-        rig.state(id).await,
-        "deleting",
-        "still listed: still billing"
-    );
-    assert_eq!(
-        rig.deletes(),
-        1,
-        "no second DELETE before the confirmation deadline"
-    );
-    // Машина всё ещё в списке через срок подтверждения: DELETE повторяется, владельцу пуш.
-    rig.tick(when + TimeDelta::minutes(11)).await;
-    assert_eq!(rig.state(id).await, "deleting");
-    assert_eq!(rig.deletes(), 2, "the accepted delete is retried");
-    assert!(
-        rig.alert_codes()
-            .await
-            .contains(&"delete_failing".to_owned()),
-        "{:?}",
-        rig.alert_codes().await
-    );
-    // Дальше повторы идут с откатом, а окно остаётся живым.
-    rig.tick(when + TimeDelta::minutes(23)).await;
-    assert!(rig.deletes() >= 3, "the delete keeps retrying");
-    rig.fake.control().remove_instance(&instance_id);
-    let end = when + TimeDelta::minutes(40);
-    rig.tick(end).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "ended");
-    // Оплата идёт до подтверждённого исчезновения, а не до принятого удаления.
-    assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
-
+        enable_pushes(&rig.pool).await;
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, when) = drive_to_deleting(&rig, t0).await;
+        // Удаление принято, но машина ещё долго видна в каталоге как `DELETING`.
+        let instance_id = rig.window(id).await.instance_id.unwrap();
+        rig.fake.control().delete_polls = 1_000_000;
+        rig.tick(when + TimeDelta::seconds(1)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert!(window.delete_accepted_at.is_some());
+        assert!(window.delete_confirmed_at.is_none());
+        assert!(window.server_gone_at.is_none());
+        rig.tick(when + TimeDelta::seconds(20)).await;
+        assert_eq!(
+            rig.state(id).await,
+            "deleting",
+            "still listed: still billing"
+        );
+        assert_eq!(
+            rig.deletes(),
+            1,
+            "no second DELETE before the confirmation deadline"
+        );
+        // Машина всё ещё в списке через срок подтверждения: DELETE повторяется, владельцу пуш.
+        rig.tick(when + TimeDelta::minutes(11)).await;
+        assert_eq!(rig.state(id).await, "deleting");
+        assert_eq!(rig.deletes(), 2, "the accepted delete is retried");
+        assert!(
+            rig.alert_codes()
+                .await
+                .contains(&"delete_failing".to_owned()),
+            "{:?}",
+            rig.alert_codes().await
+        );
+        // Дальше повторы идут с откатом, а окно остаётся живым.
+        rig.tick(when + TimeDelta::minutes(23)).await;
+        assert!(rig.deletes() >= 3, "the delete keeps retrying");
+        rig.fake.control().remove_instance(&instance_id);
+        let end = when + TimeDelta::minutes(40);
+        rig.tick(end).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "ended");
+        // Оплата идёт до подтверждённого исчезновения, а не до принятого удаления.
+        assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
     }
     // ── Неудачная операция удаления: откат и новая проверка принадлежности ──
     rig.clean().await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, when) = drive_to_deleting(&rig, t0).await;
-    // Удаление принято, а его операция кончается ошибкой: машина осталась.
-    rig.fake.control().fail_next_delete_operation = Some((13, "Internal error".to_owned()));
-    rig.tick(when + TimeDelta::seconds(1)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "deleting");
-    assert_eq!(window.delete_accepted_at, None, "the acceptance is void");
-    assert_eq!(window.delete_operation_id, None);
-    assert_eq!(window.last_error.as_deref(), Some("delete_failed"));
-    assert_eq!(
-        window.delete_attempts, 2,
-        "the call and its failed operation"
-    );
-    assert_eq!(rig.fake.instance_count(), 1);
-    // Раньше паузы повтора нет.
-    rig.tick(when + TimeDelta::seconds(20)).await;
-    assert_eq!(rig.deletes(), 1);
-    // Повтор снова проверяет принадлежность прямым ответом и удаляет.
-    let lookups = rig.fake.control().count("GET", "/compute/v1/instances/");
-    rig.tick(when + TimeDelta::minutes(2)).await;
-    assert_eq!(rig.deletes(), 2);
-    assert!(rig.fake.control().count("GET", "/compute/v1/instances/") > lookups);
-    assert_eq!(rig.state(id).await, "ended");
-    Ok(())
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, when) = drive_to_deleting(&rig, t0).await;
+        // Удаление принято, а его операция кончается ошибкой: машина осталась.
+        rig.fake.control().fail_next_delete_operation = Some((13, "Internal error".to_owned()));
+        rig.tick(when + TimeDelta::seconds(1)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(window.delete_accepted_at, None, "the acceptance is void");
+        assert_eq!(window.delete_operation_id, None);
+        assert_eq!(window.last_error.as_deref(), Some("delete_failed"));
+        assert_eq!(
+            window.delete_attempts, 2,
+            "the call and its failed operation"
+        );
+        assert_eq!(rig.fake.instance_count(), 1);
+        // Раньше паузы повтора нет.
+        rig.tick(when + TimeDelta::seconds(20)).await;
+        assert_eq!(rig.deletes(), 1);
+        // Повтор снова проверяет принадлежность прямым ответом и удаляет.
+        let lookups = rig.fake.control().count("GET", "/compute/v1/instances/");
+        rig.tick(when + TimeDelta::minutes(2)).await;
+        assert_eq!(rig.deletes(), 2);
+        assert!(rig.fake.control().count("GET", "/compute/v1/instances/") > lookups);
+        assert_eq!(rig.state(id).await, "ended");
+        Ok(())
     }
 }
 
@@ -3330,103 +3318,10 @@ async fn a_disk_is_deleted_only_under_the_window_name_when_detached_and_unique()
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    enable_pushes(&rig.pool).await;
-    let now = now_micros();
-    // Машины окна уже нет, а диск с номером из строки окна носит чужое имя.
-    let disk = rig.fake.control().add_stray_disk("someone-elses-data");
-    let id = raw_window(
-        &rig.pool,
-        "deleting",
-        Some("fhmfakeinstance9999"),
-        Some(now - TimeDelta::minutes(20)),
-    )
-    .await;
-    sqlx::query("update cloud_windows set server_gone_at = $2, boot_disk_id = $3 where id = $1")
-        .bind(id)
-        .bind(now)
-        .bind(&disk)
-        .execute(&rig.pool)
-        .await?;
-    rig.tick(now).await;
-    assert_eq!(
-        rig.disk_deletes(),
-        0,
-        "a disk under another name is not ours"
-    );
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "deleting");
-    assert_eq!(window.last_error.as_deref(), Some("ownership_mismatch"));
-    let alerts = rig.alerts().await;
-    assert_eq!(alerts[0]["code"], "ownership_mismatch");
-    assert_eq!(alerts[0]["disk_id"], disk);
-
-    // Имя верное, но диск ещё подключён к машине: ждём, не удаляя.
-    {
-        let mut state = rig.fake.control();
-        let entry = state.disks.get_mut(&disk).unwrap();
-        entry.name = windows::server_name(id);
-        entry.instance_ids = vec!["fhmfakeinstance7777".to_owned()];
-    }
-    rig.tick(now + TimeDelta::minutes(31)).await;
-    assert_eq!(rig.disk_deletes(), 0, "an attached disk is left alone");
-    assert_eq!(rig.state(id).await, "deleting");
-    // Диск отключился: теперь он удаляется.
-    rig.fake
-        .control()
-        .disks
-        .get_mut(&disk)
-        .unwrap()
-        .instance_ids
-        .clear();
-    rig.tick(now + TimeDelta::minutes(32)).await;
-    assert_eq!(rig.disk_deletes(), 1);
-    assert_eq!(rig.state(id).await, "ended");
-
-    }
-    // ── Диск без номера ищется по имени и только при единственном совпадении ──
-    rig.clean().await;
-    {
-    let pool = rig.pool.clone();
-    // Без сохранённого номера диск ищется по имени, а имя не доказывает принадлежность: два
-    // диска с именем окна — неоднозначность, и удалять первый из них нельзя.
-    {
-        let rig = rig_with(pool.clone(), |_| {}).await;
+        enable_pushes(&rig.pool).await;
         let now = now_micros();
-        let id = raw_window(
-            &rig.pool,
-            "deleting",
-            Some("fhmfakeinstance9999"),
-            Some(now - TimeDelta::minutes(20)),
-        )
-        .await;
-        sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
-            .bind(id)
-            .bind(now)
-            .execute(&rig.pool)
-            .await?;
-        let first = rig.fake.control().add_stray_disk(&windows::server_name(id));
-        let second = rig.fake.control().add_stray_disk(&windows::server_name(id));
-        rig.tick(now).await;
-        assert_eq!(rig.disk_deletes(), 0, "two same-name disks are not a match");
-        let window = rig.window(id).await;
-        assert_eq!(window.state, "deleting");
-        assert_eq!(window.boot_disk_id, None);
-        assert_eq!(window.last_error.as_deref(), Some("ambiguous_disk"));
-        assert!(rig.fake.control().disks.contains_key(&first));
-        assert!(rig.fake.control().disks.contains_key(&second));
-        // Один из дисков пропал: оставшийся единственный, его номер и запоминается.
-        rig.fake.control().disks.remove(&second);
-        rig.tick(now + TimeDelta::seconds(10)).await;
-        assert_eq!(rig.disk_deletes(), 1);
-        assert!(!rig.fake.control().disks.contains_key(&first));
-        assert_eq!(rig.state(id).await, "ended");
-    }
-
-    // Сохранённый номер главнее имени: диск с другим номером под тем же именем не наш.
-    {
-        let rig = rig_with(pool.clone(), |_| {}).await;
-        let now = now_micros();
-        let other = rig.fake.control().add_stray_disk("placeholder");
+        // Машины окна уже нет, а диск с номером из строки окна носит чужое имя.
+        let disk = rig.fake.control().add_stray_disk("someone-elses-data");
         let id = raw_window(
             &rig.pool,
             "deleting",
@@ -3435,26 +3330,120 @@ async fn a_disk_is_deleted_only_under_the_window_name_when_detached_and_unique()
         )
         .await;
         sqlx::query(
+            "update cloud_windows set server_gone_at = $2, boot_disk_id = $3 where id = $1",
+        )
+        .bind(id)
+        .bind(now)
+        .bind(&disk)
+        .execute(&rig.pool)
+        .await?;
+        rig.tick(now).await;
+        assert_eq!(
+            rig.disk_deletes(),
+            0,
+            "a disk under another name is not ours"
+        );
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(window.last_error.as_deref(), Some("ownership_mismatch"));
+        let alerts = rig.alerts().await;
+        assert_eq!(alerts[0]["code"], "ownership_mismatch");
+        assert_eq!(alerts[0]["disk_id"], disk);
+
+        // Имя верное, но диск ещё подключён к машине: ждём, не удаляя.
+        {
+            let mut state = rig.fake.control();
+            let entry = state.disks.get_mut(&disk).unwrap();
+            entry.name = windows::server_name(id);
+            entry.instance_ids = vec!["fhmfakeinstance7777".to_owned()];
+        }
+        rig.tick(now + TimeDelta::minutes(31)).await;
+        assert_eq!(rig.disk_deletes(), 0, "an attached disk is left alone");
+        assert_eq!(rig.state(id).await, "deleting");
+        // Диск отключился: теперь он удаляется.
+        rig.fake
+            .control()
+            .disks
+            .get_mut(&disk)
+            .unwrap()
+            .instance_ids
+            .clear();
+        rig.tick(now + TimeDelta::minutes(32)).await;
+        assert_eq!(rig.disk_deletes(), 1);
+        assert_eq!(rig.state(id).await, "ended");
+    }
+    // ── Диск без номера ищется по имени и только при единственном совпадении ──
+    rig.clean().await;
+    {
+        let pool = rig.pool.clone();
+        // Без сохранённого номера диск ищется по имени, а имя не доказывает принадлежность: два
+        // диска с именем окна — неоднозначность, и удалять первый из них нельзя.
+        {
+            let rig = rig_with(pool.clone(), |_| {}).await;
+            let now = now_micros();
+            let id = raw_window(
+                &rig.pool,
+                "deleting",
+                Some("fhmfakeinstance9999"),
+                Some(now - TimeDelta::minutes(20)),
+            )
+            .await;
+            sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
+                .bind(id)
+                .bind(now)
+                .execute(&rig.pool)
+                .await?;
+            let first = rig.fake.control().add_stray_disk(&windows::server_name(id));
+            let second = rig.fake.control().add_stray_disk(&windows::server_name(id));
+            rig.tick(now).await;
+            assert_eq!(rig.disk_deletes(), 0, "two same-name disks are not a match");
+            let window = rig.window(id).await;
+            assert_eq!(window.state, "deleting");
+            assert_eq!(window.boot_disk_id, None);
+            assert_eq!(window.last_error.as_deref(), Some("ambiguous_disk"));
+            assert!(rig.fake.control().disks.contains_key(&first));
+            assert!(rig.fake.control().disks.contains_key(&second));
+            // Один из дисков пропал: оставшийся единственный, его номер и запоминается.
+            rig.fake.control().disks.remove(&second);
+            rig.tick(now + TimeDelta::seconds(10)).await;
+            assert_eq!(rig.disk_deletes(), 1);
+            assert!(!rig.fake.control().disks.contains_key(&first));
+            assert_eq!(rig.state(id).await, "ended");
+        }
+
+        // Сохранённый номер главнее имени: диск с другим номером под тем же именем не наш.
+        {
+            let rig = rig_with(pool.clone(), |_| {}).await;
+            let now = now_micros();
+            let other = rig.fake.control().add_stray_disk("placeholder");
+            let id = raw_window(
+                &rig.pool,
+                "deleting",
+                Some("fhmfakeinstance9999"),
+                Some(now - TimeDelta::minutes(20)),
+            )
+            .await;
+            sqlx::query(
             "update cloud_windows set server_gone_at = $2, boot_disk_id = 'fhmfakedisknotours' where id = $1",
         )
         .bind(id)
         .bind(now)
         .execute(&rig.pool)
         .await?;
-        rig.fake.control().disks.get_mut(&other).unwrap().name = windows::server_name(id);
-        rig.tick(now).await;
-        assert_eq!(
-            rig.disk_deletes(),
-            0,
-            "a name-only disk is not deleted under a stored different id"
-        );
-        assert!(rig.fake.control().disks.contains_key(&other));
-        let window = rig.window(id).await;
-        assert_eq!(window.state, "ended");
-        assert!(window.disk_gone_at.is_some(), "the stored disk is gone");
-        assert_eq!(window.boot_disk_id.as_deref(), Some("fhmfakedisknotours"));
-    }
-    Ok(())
+            rig.fake.control().disks.get_mut(&other).unwrap().name = windows::server_name(id);
+            rig.tick(now).await;
+            assert_eq!(
+                rig.disk_deletes(),
+                0,
+                "a name-only disk is not deleted under a stored different id"
+            );
+            assert!(rig.fake.control().disks.contains_key(&other));
+            let window = rig.window(id).await;
+            assert_eq!(window.state, "ended");
+            assert!(window.disk_gone_at.is_some(), "the stored disk is gone");
+            assert_eq!(window.boot_disk_id.as_deref(), Some("fhmfakedisknotours"));
+        }
+        Ok(())
     }
 }
 
@@ -3547,98 +3536,96 @@ fn stray_name() -> String {
 }
 
 #[tokio::test]
-async fn reconcile_deletes_only_its_strays_and_reports_stuck_disks() -> TestResult
-{
+async fn reconcile_deletes_only_its_strays_and_reports_stuck_disks() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    enable_pushes(&rig.pool).await;
-    let stray = stray_name();
-    let stray_disk_name = stray_name();
-    let (ours, other_name, malformed, upper, other_folder) = (
-        rig.add_instance(&stray),
-        rig.add_instance("web-frontend"),
-        rig.add_instance("canterlot-runner-not-a-uuid"),
-        rig.add_instance(&format!("canterlot-runner-{}", Uuid::now_v7()).to_uppercase()),
-        rig.add_instance(&stray_name()),
-    );
-    let (lone_disk, data_disk, odd_disk) = {
-        let mut state = rig.fake.control();
-        state.instances.get_mut(&other_folder).unwrap().folder_id = OTHER_FOLDER.to_owned();
-        (
-            // Диск с именем окна, которого нет, и без машины: брошенный.
-            state.add_stray_disk(&stray_disk_name),
-            state.add_stray_disk("data-volume"),
-            state.add_stray_disk("canterlot-runner-not-a-uuid"),
-        )
-    };
-    let stray_boot_disk = rig.fake.control().instances[&ours].disk_id.clone();
-    rig.tick(now_micros()).await;
-    {
-        let state = rig.fake.control();
-        assert!(!state.instances.contains_key(&ours), "the stray is deleted");
-        for kept in [&other_name, &malformed, &upper, &other_folder] {
+        enable_pushes(&rig.pool).await;
+        let stray = stray_name();
+        let stray_disk_name = stray_name();
+        let (ours, other_name, malformed, upper, other_folder) = (
+            rig.add_instance(&stray),
+            rig.add_instance("web-frontend"),
+            rig.add_instance("canterlot-runner-not-a-uuid"),
+            rig.add_instance(&format!("canterlot-runner-{}", Uuid::now_v7()).to_uppercase()),
+            rig.add_instance(&stray_name()),
+        );
+        let (lone_disk, data_disk, odd_disk) = {
+            let mut state = rig.fake.control();
+            state.instances.get_mut(&other_folder).unwrap().folder_id = OTHER_FOLDER.to_owned();
+            (
+                // Диск с именем окна, которого нет, и без машины: брошенный.
+                state.add_stray_disk(&stray_disk_name),
+                state.add_stray_disk("data-volume"),
+                state.add_stray_disk("canterlot-runner-not-a-uuid"),
+            )
+        };
+        let stray_boot_disk = rig.fake.control().instances[&ours].disk_id.clone();
+        rig.tick(now_micros()).await;
+        {
+            let state = rig.fake.control();
+            assert!(!state.instances.contains_key(&ours), "the stray is deleted");
+            for kept in [&other_name, &malformed, &upper, &other_folder] {
+                assert!(
+                    state.instances.contains_key(kept),
+                    "instance {kept} is not ours to touch"
+                );
+            }
             assert!(
-                state.instances.contains_key(kept),
-                "instance {kept} is not ours to touch"
+                !state.disks.contains_key(&lone_disk),
+                "the stray disk is deleted"
             );
+            assert!(
+                !state.disks.contains_key(&stray_boot_disk),
+                "the boot disk went with its instance"
+            );
+            for kept in [&data_disk, &odd_disk] {
+                assert!(state.disks.contains_key(kept), "disk {kept} is not ours");
+            }
+            assert_eq!(state.count("DELETE", "/compute/v1/instances"), 1);
+            // Диск при машине не удаляется отдельно: подключённый диск не наш к удалению.
+            assert_eq!(state.count("DELETE", "/compute/v1/disks"), 1);
         }
-        assert!(
-            !state.disks.contains_key(&lone_disk),
-            "the stray disk is deleted"
-        );
-        assert!(
-            !state.disks.contains_key(&stray_boot_disk),
-            "the boot disk went with its instance"
-        );
-        for kept in [&data_disk, &odd_disk] {
-            assert!(state.disks.contains_key(kept), "disk {kept} is not ours");
-        }
-        assert_eq!(state.count("DELETE", "/compute/v1/instances"), 1);
-        // Диск при машине не удаляется отдельно: подключённый диск не наш к удалению.
-        assert_eq!(state.count("DELETE", "/compute/v1/disks"), 1);
-    }
-    // Владельцу сообщается то, чьё отсутствие подтвердил свежий полный список.
-    let mut codes = rig.alert_codes().await;
-    codes.sort();
-    assert_eq!(codes, vec!["stray_disk_deleted", "stray_server_deleted"]);
-    let alerts = rig.alerts().await;
-    let disk_alert = alerts
-        .iter()
-        .find(|alert| alert["code"] == "stray_disk_deleted")
-        .unwrap();
-    assert_eq!(disk_alert["name"], stray_disk_name);
-    assert_eq!(disk_alert["disk_id"], lone_disk);
-
+        // Владельцу сообщается то, чьё отсутствие подтвердил свежий полный список.
+        let mut codes = rig.alert_codes().await;
+        codes.sort();
+        assert_eq!(codes, vec!["stray_disk_deleted", "stray_server_deleted"]);
+        let alerts = rig.alerts().await;
+        let disk_alert = alerts
+            .iter()
+            .find(|alert| alert["code"] == "stray_disk_deleted")
+            .unwrap();
+        assert_eq!(disk_alert["name"], stray_disk_name);
+        assert_eq!(disk_alert["disk_id"], lone_disk);
     }
     // ── Брошенный диск: неудача — пуш, подключённый ждёт ──
     rig.clean().await;
     {
-    let lone = rig.fake.control().add_stray_disk(&stray_name());
-    // Диск с именем окна, которого нет, но подключённый к чужой машине: неоднозначно.
-    let attached = rig.fake.control().add_stray_disk(&stray_name());
-    rig.fake
-        .control()
-        .disks
-        .get_mut(&attached)
-        .unwrap()
-        .instance_ids = vec!["fhmfakeinstance7777".to_owned()];
-    rig.fake.control().disk_delete_status = Some(500);
-    let t0 = now_micros();
-    rig.tick(t0).await;
-    assert_eq!(rig.alert_codes().await, vec!["stray_disk_stuck"]);
-    assert_eq!(rig.alerts().await[0]["disk_id"], lone);
-    assert_eq!(rig.disk_deletes(), 1, "only the detached one was tried");
-    // Провайдер ожил: следующая сверка удаляет диск и сообщает об этом.
-    rig.fake.control().disk_delete_status = None;
-    rig.tick(t0 + TimeDelta::minutes(5)).await;
-    assert!(!rig.fake.control().disks.contains_key(&lone));
-    assert!(rig.fake.control().disks.contains_key(&attached));
-    assert_eq!(
-        rig.alert_codes().await,
-        vec!["stray_disk_stuck", "stray_disk_deleted"]
-    );
-    Ok(())
+        let lone = rig.fake.control().add_stray_disk(&stray_name());
+        // Диск с именем окна, которого нет, но подключённый к чужой машине: неоднозначно.
+        let attached = rig.fake.control().add_stray_disk(&stray_name());
+        rig.fake
+            .control()
+            .disks
+            .get_mut(&attached)
+            .unwrap()
+            .instance_ids = vec!["fhmfakeinstance7777".to_owned()];
+        rig.fake.control().disk_delete_status = Some(500);
+        let t0 = now_micros();
+        rig.tick(t0).await;
+        assert_eq!(rig.alert_codes().await, vec!["stray_disk_stuck"]);
+        assert_eq!(rig.alerts().await[0]["disk_id"], lone);
+        assert_eq!(rig.disk_deletes(), 1, "only the detached one was tried");
+        // Провайдер ожил: следующая сверка удаляет диск и сообщает об этом.
+        rig.fake.control().disk_delete_status = None;
+        rig.tick(t0 + TimeDelta::minutes(5)).await;
+        assert!(!rig.fake.control().disks.contains_key(&lone));
+        assert!(rig.fake.control().disks.contains_key(&attached));
+        assert_eq!(
+            rig.alert_codes().await,
+            vec!["stray_disk_stuck", "stray_disk_deleted"]
+        );
+        Ok(())
     }
 }
 
@@ -3694,105 +3681,104 @@ async fn a_late_disk_reopens_its_window_and_is_billed_to_it() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    enable_pushes(&rig.pool).await;
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    // Обычное окно от начала до конца.
-    let (id, session, at) = rig.drive_to_ready(60, t0).await;
-    windows::request_delete(&rig.pool, id, windows::REASON_OWNER, at).await?;
-    drop(session);
-    let ended = at + TimeDelta::seconds(1);
-    rig.tick(ended).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "ended");
-    let first_cost = window.final_cost_kopecks.unwrap();
-    assert_eq!(first_cost, cost(t0, ended));
+        enable_pushes(&rig.pool).await;
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        // Обычное окно от начала до конца.
+        let (id, session, at) = rig.drive_to_ready(60, t0).await;
+        windows::request_delete(&rig.pool, id, windows::REASON_OWNER, at).await?;
+        drop(session);
+        let ended = at + TimeDelta::seconds(1);
+        rig.tick(ended).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "ended");
+        let first_cost = window.final_cost_kopecks.unwrap();
+        assert_eq!(first_cost, cost(t0, ended));
 
-    // Позже в каталоге находится диск с именем этого окна и без машины: он тарифицируется.
-    let disk = rig.fake.control().add_stray_disk(&windows::server_name(id));
-    rig.fake.control().disk_delete_status = Some(500);
-    let found = t0 + TimeDelta::minutes(10);
-    rig.tick(found).await;
-    let window = rig.window(id).await;
-    assert_eq!(
-        window.state, "late_cleanup",
-        "the window is reopened, the disk is not a stray"
-    );
-    assert_eq!(window.delete_reason.as_deref(), Some("late_disk"));
-    assert_eq!(window.boot_disk_id.as_deref(), Some(disk.as_str()));
-    assert_eq!(window.final_cost_kopecks, None);
-    assert_eq!(
-        (window.server_gone_at, window.disk_gone_at),
-        (Some(ended), None),
-        "the instance end is kept, the disk end is open again"
-    );
-    assert_eq!(rig.alert_codes().await, vec!["late_disk"]);
-    assert_eq!(rig.disk_deletes(), 1, "deleted by the normal cleanup step");
-    assert_eq!(rig.deletes(), 1, "the instance is not deleted again");
-    // Открытый поздний снос считается в расходе по резерву и закрывает новые создания.
-    assert!(matches!(
-        rig.try_create(60).await,
-        Err(CreateRefusal::LateCleanup)
-    ));
-    let mut conn = rig.pool.acquire().await?;
-    assert_eq!(
-        windows::spent_in_month(&mut conn, &window.month, Utc::now()).await?,
-        window.reservation_kopecks
-    );
-    drop(conn);
+        // Позже в каталоге находится диск с именем этого окна и без машины: он тарифицируется.
+        let disk = rig.fake.control().add_stray_disk(&windows::server_name(id));
+        rig.fake.control().disk_delete_status = Some(500);
+        let found = t0 + TimeDelta::minutes(10);
+        rig.tick(found).await;
+        let window = rig.window(id).await;
+        assert_eq!(
+            window.state, "late_cleanup",
+            "the window is reopened, the disk is not a stray"
+        );
+        assert_eq!(window.delete_reason.as_deref(), Some("late_disk"));
+        assert_eq!(window.boot_disk_id.as_deref(), Some(disk.as_str()));
+        assert_eq!(window.final_cost_kopecks, None);
+        assert_eq!(
+            (window.server_gone_at, window.disk_gone_at),
+            (Some(ended), None),
+            "the instance end is kept, the disk end is open again"
+        );
+        assert_eq!(rig.alert_codes().await, vec!["late_disk"]);
+        assert_eq!(rig.disk_deletes(), 1, "deleted by the normal cleanup step");
+        assert_eq!(rig.deletes(), 1, "the instance is not deleted again");
+        // Открытый поздний снос считается в расходе по резерву и закрывает новые создания.
+        assert!(matches!(
+            rig.try_create(60).await,
+            Err(CreateRefusal::LateCleanup)
+        ));
+        let mut conn = rig.pool.acquire().await?;
+        assert_eq!(
+            windows::spent_in_month(&mut conn, &window.month, Utc::now()).await?,
+            window.reservation_kopecks
+        );
+        drop(conn);
 
-    // Диск удалён: окно снова закончено, а итог вырос на время диска.
-    rig.fake.control().disk_delete_status = None;
-    let end = found + TimeDelta::minutes(5);
-    rig.tick(end).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "ended");
-    assert!(rig.fake.control().disks.is_empty());
-    assert_eq!(window.disk_gone_at, Some(end));
-    assert_eq!(
-        window.final_cost_kopecks,
-        Some(price::ledger_kopecks(COMPUTE, DISK, t0, ended, end)?),
-        "the same ledger: the instance until its end, the disk until the new one"
-    );
-    assert!(window.final_cost_kopecks.unwrap() > first_cost);
-    assert!(
-        !rig.alert_codes()
-            .await
-            .iter()
-            .any(|code| code.starts_with("stray_")),
-        "{:?}",
-        rig.alert_codes().await
-    );
-    rig.try_create(60).await.expect("the slot is free again");
-
+        // Диск удалён: окно снова закончено, а итог вырос на время диска.
+        rig.fake.control().disk_delete_status = None;
+        let end = found + TimeDelta::minutes(5);
+        rig.tick(end).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "ended");
+        assert!(rig.fake.control().disks.is_empty());
+        assert_eq!(window.disk_gone_at, Some(end));
+        assert_eq!(
+            window.final_cost_kopecks,
+            Some(price::ledger_kopecks(COMPUTE, DISK, t0, ended, end)?),
+            "the same ledger: the instance until its end, the disk until the new one"
+        );
+        assert!(window.final_cost_kopecks.unwrap() > first_cost);
+        assert!(
+            !rig.alert_codes()
+                .await
+                .iter()
+                .any(|code| code.starts_with("stray_")),
+            "{:?}",
+            rig.alert_codes().await
+        );
+        rig.try_create(60).await.expect("the slot is free again");
     }
     // ── Поздний диск неудавшегося окна убирается и делает окно платным ──
     rig.clean().await;
     {
-    let t0 = now_micros();
-    rig.fake.control().create = CreateMode::unavailable();
-    let id = rig.create(60).await;
-    rig.tick(t0).await;
-    let failed_at = t0 + TimeDelta::minutes(10);
-    rig.tick(failed_at).await;
-    let window = rig.window(id).await;
-    assert_eq!(
-        (window.state.as_str(), window.final_cost_kopecks),
-        ("failed", Some(0))
-    );
-    // Создание всё же оставило диск.
-    rig.fake.control().add_stray_disk(&windows::server_name(id));
-    let end = t0 + TimeDelta::minutes(15);
-    rig.tick(end).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "ended", "reopened and cleaned in one pass");
-    assert_eq!(window.delete_reason.as_deref(), Some("late_disk"));
-    assert!(rig.fake.control().disks.is_empty());
-    assert_eq!(
-        window.final_cost_kopecks,
-        Some(price::ledger_kopecks(COMPUTE, DISK, t0, failed_at, end)?)
-    );
-    Ok(())
+        let t0 = now_micros();
+        rig.fake.control().create = CreateMode::unavailable();
+        let id = rig.create(60).await;
+        rig.tick(t0).await;
+        let failed_at = t0 + TimeDelta::minutes(10);
+        rig.tick(failed_at).await;
+        let window = rig.window(id).await;
+        assert_eq!(
+            (window.state.as_str(), window.final_cost_kopecks),
+            ("failed", Some(0))
+        );
+        // Создание всё же оставило диск.
+        rig.fake.control().add_stray_disk(&windows::server_name(id));
+        let end = t0 + TimeDelta::minutes(15);
+        rig.tick(end).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "ended", "reopened and cleaned in one pass");
+        assert_eq!(window.delete_reason.as_deref(), Some("late_disk"));
+        assert!(rig.fake.control().disks.is_empty());
+        assert_eq!(
+            window.final_cost_kopecks,
+            Some(price::ledger_kopecks(COMPUTE, DISK, t0, failed_at, end)?)
+        );
+        Ok(())
     }
 }
 
@@ -3801,101 +3787,100 @@ async fn a_folder_change_keeps_cleaning_the_old_folder_and_finds_its_late_disks(
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    enable_pushes(&rig.pool).await;
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, session, at) = rig.drive_to_ready(120, t0).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.folder_id, FOLDER);
-    let instance_id = window.instance_id.clone().unwrap();
-    rig.fake.control().leave_disk(&instance_id);
-    // В прежнем каталоге есть и чужое с именем окна: после смены каталога оно не наше.
-    let foreign = rig.add_instance(&stray_name());
+        enable_pushes(&rig.pool).await;
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, session, at) = rig.drive_to_ready(120, t0).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.folder_id, FOLDER);
+        let instance_id = window.instance_id.clone().unwrap();
+        rig.fake.control().leave_disk(&instance_id);
+        // В прежнем каталоге есть и чужое с именем окна: после смены каталога оно не наше.
+        let foreign = rig.add_instance(&stray_name());
 
-    // Владелец сменил каталог в конфигурации и перезапустил хаб.
-    let mut changed = rig.config.clone();
-    changed.folder_id = OTHER_FOLDER.to_owned();
-    let moved = rig.restarted_with(changed);
-    let before = rig.fake.requests().len();
-    windows::request_delete(&rig.pool, id, windows::REASON_OWNER, at).await?;
-    drop(session);
-    let end = at + TimeDelta::seconds(1);
-    moved.tick(end).await;
+        // Владелец сменил каталог в конфигурации и перезапустил хаб.
+        let mut changed = rig.config.clone();
+        changed.folder_id = OTHER_FOLDER.to_owned();
+        let moved = rig.restarted_with(changed);
+        let before = rig.fake.requests().len();
+        windows::request_delete(&rig.pool, id, windows::REASON_OWNER, at).await?;
+        drop(session);
+        let end = at + TimeDelta::seconds(1);
+        moved.tick(end).await;
 
-    // Машина и её диск убраны в каталоге окна, а не в новом.
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "ended");
-    assert_eq!(window.folder_id, FOLDER);
-    assert!(!rig.fake.control().instances.contains_key(&instance_id));
-    assert_eq!((rig.deletes(), rig.disk_deletes()), (1, 1));
-    assert_eq!(
-        rig.fake.control().disks.len(),
-        1,
-        "only the foreign boot disk"
-    );
-    assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
-    let listed: Vec<(String, String)> = rig.fake.requests()[before..]
-        .iter()
-        .filter(|r| r.method == "GET" && r.query.contains_key("folderId"))
-        .map(|r| (r.path.clone(), r.query["folderId"].clone()))
-        .collect();
-    for path in ["/compute/v1/instances", "/compute/v1/disks"] {
-        for folder in [FOLDER, OTHER_FOLDER] {
-            assert!(
-                listed.contains(&(path.to_owned(), folder.to_owned())),
-                "{path} of {folder} is listed: {listed:?}"
-            );
+        // Машина и её диск убраны в каталоге окна, а не в новом.
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "ended");
+        assert_eq!(window.folder_id, FOLDER);
+        assert!(!rig.fake.control().instances.contains_key(&instance_id));
+        assert_eq!((rig.deletes(), rig.disk_deletes()), (1, 1));
+        assert_eq!(
+            rig.fake.control().disks.len(),
+            1,
+            "only the foreign boot disk"
+        );
+        assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
+        let listed: Vec<(String, String)> = rig.fake.requests()[before..]
+            .iter()
+            .filter(|r| r.method == "GET" && r.query.contains_key("folderId"))
+            .map(|r| (r.path.clone(), r.query["folderId"].clone()))
+            .collect();
+        for path in ["/compute/v1/instances", "/compute/v1/disks"] {
+            for folder in [FOLDER, OTHER_FOLDER] {
+                assert!(
+                    listed.contains(&(path.to_owned(), folder.to_owned())),
+                    "{path} of {folder} is listed: {listed:?}"
+                );
+            }
         }
-    }
-    // Лишнее ищется только в каталоге из конфигурации: прежний каталог не вычищается.
-    assert!(rig.fake.control().instances.contains_key(&foreign));
-    assert!(rig.alert_codes().await.is_empty());
+        // Лишнее ищется только в каталоге из конфигурации: прежний каталог не вычищается.
+        assert!(rig.fake.control().instances.contains_key(&foreign));
+        assert!(rig.alert_codes().await.is_empty());
 
-    // Незаконченное окно прежнего каталога находит следующая сверка: он остаётся в списке
-    // каталогов, пока есть такие окна.
-    let orphan = raw_window(
-        &rig.pool,
-        "create_unknown",
-        None,
-        Some(end - TimeDelta::minutes(1)),
-    )
-    .await;
-    let late = rig.add_instance(&windows::server_name(orphan));
-    moved.tick(end + TimeDelta::minutes(5)).await;
-    let window = rig.window(orphan).await;
-    assert_eq!(window.state, "identified");
-    assert_eq!(window.instance_id.as_deref(), Some(late.as_str()));
-
+        // Незаконченное окно прежнего каталога находит следующая сверка: он остаётся в списке
+        // каталогов, пока есть такие окна.
+        let orphan = raw_window(
+            &rig.pool,
+            "create_unknown",
+            None,
+            Some(end - TimeDelta::minutes(1)),
+        )
+        .await;
+        let late = rig.add_instance(&windows::server_name(orphan));
+        moved.tick(end + TimeDelta::minutes(5)).await;
+        let window = rig.window(orphan).await;
+        assert_eq!(window.state, "identified");
+        assert_eq!(window.instance_id.as_deref(), Some(late.as_str()));
     }
     // ── Поздний диск прежнего каталога находится после смены конфигурации ──
     rig.clean().await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    // Обычное окно прежнего каталога, законченное до смены конфигурации.
-    let (id, session, at) = rig.drive_to_ready(60, t0).await;
-    windows::request_delete(&rig.pool, id, windows::REASON_OWNER, at).await?;
-    drop(session);
-    let ended = at + TimeDelta::seconds(1);
-    rig.tick(ended).await;
-    assert_eq!(rig.state(id).await, "ended");
-    // Каталог в конфигурации сменился, хаб перезапущен, а в прежнем каталоге появился диск
-    // с именем законченного окна. Его окно уже `ended`, но вызов создания был.
-    let mut changed = rig.config.clone();
-    changed.folder_id = OTHER_FOLDER.to_owned();
-    let moved = rig.restarted_with(changed);
-    let disk = rig.fake.control().add_stray_disk(&windows::server_name(id));
-    let found = ended + TimeDelta::minutes(5);
-    moved.tick(found).await;
-    let window = rig.window(id).await;
-    assert_eq!(
-        window.state, "ended",
-        "the historical folder is visited and the disk is cleaned in the same pass"
-    );
-    assert_eq!(window.delete_reason.as_deref(), Some("late_disk"));
-    assert!(!rig.fake.control().disks.contains_key(&disk));
-    assert_eq!(rig.alert_codes().await, vec!["late_disk"]);
-    Ok(())
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        // Обычное окно прежнего каталога, законченное до смены конфигурации.
+        let (id, session, at) = rig.drive_to_ready(60, t0).await;
+        windows::request_delete(&rig.pool, id, windows::REASON_OWNER, at).await?;
+        drop(session);
+        let ended = at + TimeDelta::seconds(1);
+        rig.tick(ended).await;
+        assert_eq!(rig.state(id).await, "ended");
+        // Каталог в конфигурации сменился, хаб перезапущен, а в прежнем каталоге появился диск
+        // с именем законченного окна. Его окно уже `ended`, но вызов создания был.
+        let mut changed = rig.config.clone();
+        changed.folder_id = OTHER_FOLDER.to_owned();
+        let moved = rig.restarted_with(changed);
+        let disk = rig.fake.control().add_stray_disk(&windows::server_name(id));
+        let found = ended + TimeDelta::minutes(5);
+        moved.tick(found).await;
+        let window = rig.window(id).await;
+        assert_eq!(
+            window.state, "ended",
+            "the historical folder is visited and the disk is cleaned in the same pass"
+        );
+        assert_eq!(window.delete_reason.as_deref(), Some("late_disk"));
+        assert!(!rig.fake.control().disks.contains_key(&disk));
+        assert_eq!(rig.alert_codes().await, vec!["late_disk"]);
+        Ok(())
     }
 }
 
@@ -3976,45 +3961,44 @@ async fn a_stuck_stray_alerts_every_half_hour_and_only_a_matching_name_is_delete
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    enable_pushes(&rig.pool).await;
-    rig.add_instance(&stray_name());
-    rig.fake.control().delete_status = Some(500);
-    let t0 = now_micros();
-    rig.tick(t0).await;
-    assert_eq!(rig.alert_codes().await, vec!["stray_server_stuck"]);
-    // Новая сверка в тот же момент (слот тот же): второго пуша нет.
-    let again = rig.restarted();
-    again.tick(t0).await;
-    assert_eq!(rig.alerts().await.len(), 1);
-    assert_eq!(rig.deletes(), 2, "the stray is retried by every reconcile");
-    // Через 40 минут слот другой: пуш повторяется.
-    again.tick(t0 + TimeDelta::minutes(40)).await;
-    assert_eq!(rig.alerts().await.len(), 2);
-
+        enable_pushes(&rig.pool).await;
+        rig.add_instance(&stray_name());
+        rig.fake.control().delete_status = Some(500);
+        let t0 = now_micros();
+        rig.tick(t0).await;
+        assert_eq!(rig.alert_codes().await, vec!["stray_server_stuck"]);
+        // Новая сверка в тот же момент (слот тот же): второго пуша нет.
+        let again = rig.restarted();
+        again.tick(t0).await;
+        assert_eq!(rig.alerts().await.len(), 1);
+        assert_eq!(rig.deletes(), 2, "the stray is retried by every reconcile");
+        // Через 40 минут слот другой: пуш повторяется.
+        again.tick(t0 + TimeDelta::minutes(40)).await;
+        assert_eq!(rig.alerts().await.len(), 2);
     }
     // ── Прямой ответ называет чужое имя: не удаляем ──
     rig.clean().await;
     {
-    rig.add_instance(&stray_name());
-    // Номер в списке, но прямой ответ называет другую машину: номер мог достаться чужой.
-    rig.fake.control().get_name_override = Some("someone-else".to_owned());
-    let t0 = now_micros();
-    rig.tick(t0).await;
-    assert_eq!(rig.deletes(), 0, "a mismatched name is never deleted");
-    assert_eq!(rig.fake.instance_count(), 1);
-    assert!(
-        rig.alert_codes()
-            .await
-            .contains(&"stray_server_stuck".to_owned()),
-        "{:?}",
-        rig.alert_codes().await
-    );
-    // Провайдер отдаёт настоящее имя: лишняя машина удаляется.
-    rig.fake.control().get_name_override = None;
-    rig.tick(t0 + TimeDelta::minutes(40)).await;
-    assert_eq!(rig.fake.instance_count(), 0);
-    assert_eq!(rig.deletes(), 1);
-    Ok(())
+        rig.add_instance(&stray_name());
+        // Номер в списке, но прямой ответ называет другую машину: номер мог достаться чужой.
+        rig.fake.control().get_name_override = Some("someone-else".to_owned());
+        let t0 = now_micros();
+        rig.tick(t0).await;
+        assert_eq!(rig.deletes(), 0, "a mismatched name is never deleted");
+        assert_eq!(rig.fake.instance_count(), 1);
+        assert!(
+            rig.alert_codes()
+                .await
+                .contains(&"stray_server_stuck".to_owned()),
+            "{:?}",
+            rig.alert_codes().await
+        );
+        // Провайдер отдаёт настоящее имя: лишняя машина удаляется.
+        rig.fake.control().get_name_override = None;
+        rig.tick(t0 + TimeDelta::minutes(40)).await;
+        assert_eq!(rig.fake.instance_count(), 0);
+        assert_eq!(rig.deletes(), 1);
+        Ok(())
     }
 }
 
@@ -4068,54 +4052,53 @@ async fn reconcile_runs_before_any_create_and_gates_the_create() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    rig.add_instance(&stray_name());
-    let id = rig.create(60).await;
-    rig.tick(now_micros()).await;
-    assert_eq!(rig.state(id).await, "identified");
-    let requests = rig.fake.requests();
-    let first = |method: &str, path: &str| {
-        requests
+        rig.add_instance(&stray_name());
+        let id = rig.create(60).await;
+        rig.tick(now_micros()).await;
+        assert_eq!(rig.state(id).await, "identified");
+        let requests = rig.fake.requests();
+        let first = |method: &str, path: &str| {
+            requests
+                .iter()
+                .position(|r| r.method == method && r.path == path)
+        };
+        let first_listing = first("GET", "/compute/v1/instances").expect("an instance listing");
+        let first_disks = first("GET", "/compute/v1/disks").expect("a disk listing");
+        let first_post = first("POST", "/compute/v1/instances").expect("a create");
+        let first_delete = requests
             .iter()
-            .position(|r| r.method == method && r.path == path)
-    };
-    let first_listing = first("GET", "/compute/v1/instances").expect("an instance listing");
-    let first_disks = first("GET", "/compute/v1/disks").expect("a disk listing");
-    let first_post = first("POST", "/compute/v1/instances").expect("a create");
-    let first_delete = requests
-        .iter()
-        .position(|r| r.method == "DELETE")
-        .expect("the stray delete");
-    assert!(
-        first_listing < first_post && first_disks < first_post,
-        "both listings come before any create"
-    );
-    assert!(
-        first_delete < first_post,
-        "the stray goes before any create"
-    );
-
+            .position(|r| r.method == "DELETE")
+            .expect("the stray delete");
+        assert!(
+            first_listing < first_post && first_disks < first_post,
+            "both listings come before any create"
+        );
+        assert!(
+            first_delete < first_post,
+            "the stray goes before any create"
+        );
     }
     // ── Без удачной сверки создание не начинается ──
     rig.clean().await;
     {
-    rig.fake.control().list_fail_page = Some(FailPage {
-        list: "disks",
-        page: 0,
-        status: 500,
-        times: None,
-    });
-    let t0 = now_micros();
-    let id = rig.create(60).await;
-    for seconds in [0, 10, 20] {
-        rig.tick(t0 + TimeDelta::seconds(seconds)).await;
-    }
-    assert_eq!(rig.state(id).await, "create_intent");
-    assert_eq!(rig.posts(), 0, "no create before a reconcile succeeded");
-    rig.fake.control().list_fail_page = None;
-    rig.tick(t0 + TimeDelta::seconds(30)).await;
-    assert_eq!(rig.state(id).await, "identified");
-    assert_eq!(rig.posts(), 1);
-    Ok(())
+        rig.fake.control().list_fail_page = Some(FailPage {
+            list: "disks",
+            page: 0,
+            status: 500,
+            times: None,
+        });
+        let t0 = now_micros();
+        let id = rig.create(60).await;
+        for seconds in [0, 10, 20] {
+            rig.tick(t0 + TimeDelta::seconds(seconds)).await;
+        }
+        assert_eq!(rig.state(id).await, "create_intent");
+        assert_eq!(rig.posts(), 0, "no create before a reconcile succeeded");
+        rig.fake.control().list_fail_page = None;
+        rig.tick(t0 + TimeDelta::seconds(30)).await;
+        assert_eq!(rig.state(id).await, "identified");
+        assert_eq!(rig.posts(), 1);
+        Ok(())
     }
 }
 
@@ -4432,12 +4415,12 @@ async fn the_cloud_row_is_reused_reactivated_on_attach_and_revoked_at_the_end() 
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let id = rig.create(120).await;
-    rig.tick(t0).await;
-    let machine = rig.cloud_machine().await;
-    let row: (
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let id = rig.create(120).await;
+        rig.tick(t0).await;
+        let machine = rig.cloud_machine().await;
+        let row: (
         String,
         String,
         Option<Uuid>,
@@ -4450,112 +4433,111 @@ async fn the_cloud_row_is_reused_reactivated_on_attach_and_revoked_at_the_end() 
     .bind(machine)
     .fetch_one(&rig.pool)
     .await?;
-    assert_eq!(
-        row,
-        (
-            "cloud".into(),
-            "runner".into(),
-            Some(rig.carrier),
-            Some("/srv/canterlot-runner".into()),
-            0,
-            vec!["cloud".into(), "kernel-6.12".into()]
-        )
-    );
-    // Строки ещё нет токена, но несущей она уже в списке: окно `identified`.
-    let listed = |pool: PgPool, carrier: Uuid| async move {
-        machines::runners_of(&pool, carrier)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|runner| runner.name)
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(listed(rig.pool.clone(), rig.carrier).await, vec!["cloud"]);
+        assert_eq!(
+            row,
+            (
+                "cloud".into(),
+                "runner".into(),
+                Some(rig.carrier),
+                Some("/srv/canterlot-runner".into()),
+                0,
+                vec!["cloud".into(), "kernel-6.12".into()]
+            )
+        );
+        // Строки ещё нет токена, но несущей она уже в списке: окно `identified`.
+        let listed = |pool: PgPool, carrier: Uuid| async move {
+            machines::runners_of(&pool, carrier)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|runner| runner.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(listed(rig.pool.clone(), rig.carrier).await, vec!["cloud"]);
 
-    // Токен выдаётся ротацией с оживлением, состояние воркера сбрасывается.
-    sqlx::query("update machines set cj_journal_id = gen_random_uuid() where id = $1")
-        .bind(machine)
-        .execute(&rig.pool)
-        .await?;
-    let token = machines::request_runner_token(&rig.pool, rig.carrier, machine, false).await?;
-    assert_eq!(machines::verify(&rig.pool, &token).await?, Some(machine));
-    let journal: Option<Uuid> =
-        sqlx::query_scalar("select cj_journal_id from machines where id = $1")
+        // Токен выдаётся ротацией с оживлением, состояние воркера сбрасывается.
+        sqlx::query("update machines set cj_journal_id = gen_random_uuid() where id = $1")
             .bind(machine)
+            .execute(&rig.pool)
+            .await?;
+        let token = machines::request_runner_token(&rig.pool, rig.carrier, machine, false).await?;
+        assert_eq!(machines::verify(&rig.pool, &token).await?, Some(machine));
+        let journal: Option<Uuid> =
+            sqlx::query_scalar("select cj_journal_id from machines where id = $1")
+                .bind(machine)
+                .fetch_one(&rig.pool)
+                .await?;
+        assert_eq!(journal, None, "attach resets the local state");
+        // Повторный запрос (сообщение потерялось) снова выдаёт токен и гасит прежний.
+        let second = machines::request_runner_token(&rig.pool, rig.carrier, machine, false).await?;
+        assert_eq!(machines::verify(&rig.pool, &token).await?, None);
+        assert_eq!(machines::verify(&rig.pool, &second).await?, Some(machine));
+
+        // Конец окна: раннер отозван, его задачи `lost`, из списка несущей он ушёл.
+        let session = rig.attach().await;
+        rig.tick(t0 + TimeDelta::seconds(5)).await;
+        rig.tick(t0 + TimeDelta::seconds(6)).await;
+        rig.tick(t0 + TimeDelta::seconds(7)).await;
+        assert_eq!(rig.state(id).await, "ready");
+        let running = rig.seed_job(Some(machine), "running", &["cloud"]).await;
+        let queued = rig.seed_job(Some(machine), "queued", &["cloud"]).await;
+        let finished = rig.seed_job(Some(machine), "succeeded", &["cloud"]).await;
+        let requested = windows::request_delete(
+            &rig.pool,
+            id,
+            windows::REASON_OWNER,
+            t0 + TimeDelta::minutes(1),
+        )
+        .await?;
+        assert_eq!(requested, windows::DeleteRequested::Deleting);
+        assert_eq!(rig.job_state(running).await, "lost");
+        assert_eq!(rig.job_state(queued).await, "lost");
+        assert_eq!(rig.job_state(finished).await, "succeeded");
+        assert_eq!(machines::verify(&rig.pool, &second).await?, None);
+        assert!(listed(rig.pool.clone(), rig.carrier).await.is_empty());
+        drop(session);
+        rig.tick(t0 + TimeDelta::minutes(1) + TimeDelta::seconds(1))
+            .await;
+        assert_eq!(rig.state(id).await, "ended");
+        // Окно кончилось: оживать нечему, токен не выдаётся.
+        let refused = machines::request_runner_token(&rig.pool, rig.carrier, machine, true).await;
+        assert_eq!(refused, Err(RunnerRefusal::Revoked));
+
+        // Следующее окно переиспользует ту же строку и оживляет её при подключении.
+        let next = rig.create_at(60, t0 + TimeDelta::minutes(20)).await;
+        rig.tick(t0 + TimeDelta::minutes(20)).await;
+        assert_eq!(rig.state(next).await, "identified");
+        assert_eq!(
+            rig.cloud_machine().await,
+            machine,
+            "one row for every window"
+        );
+        assert_eq!(listed(rig.pool.clone(), rig.carrier).await, vec!["cloud"]);
+        let fresh = machines::request_runner_token(&rig.pool, rig.carrier, machine, false).await?;
+        assert_eq!(machines::verify(&rig.pool, &fresh).await?, Some(machine));
+        let rows: i64 = sqlx::query_scalar("select count(*) from machines where name = 'cloud'")
             .fetch_one(&rig.pool)
             .await?;
-    assert_eq!(journal, None, "attach resets the local state");
-    // Повторный запрос (сообщение потерялось) снова выдаёт токен и гасит прежний.
-    let second = machines::request_runner_token(&rig.pool, rig.carrier, machine, false).await?;
-    assert_eq!(machines::verify(&rig.pool, &token).await?, None);
-    assert_eq!(machines::verify(&rig.pool, &second).await?, Some(machine));
-
-    // Конец окна: раннер отозван, его задачи `lost`, из списка несущей он ушёл.
-    let session = rig.attach().await;
-    rig.tick(t0 + TimeDelta::seconds(5)).await;
-    rig.tick(t0 + TimeDelta::seconds(6)).await;
-    rig.tick(t0 + TimeDelta::seconds(7)).await;
-    assert_eq!(rig.state(id).await, "ready");
-    let running = rig.seed_job(Some(machine), "running", &["cloud"]).await;
-    let queued = rig.seed_job(Some(machine), "queued", &["cloud"]).await;
-    let finished = rig.seed_job(Some(machine), "succeeded", &["cloud"]).await;
-    let requested = windows::request_delete(
-        &rig.pool,
-        id,
-        windows::REASON_OWNER,
-        t0 + TimeDelta::minutes(1),
-    )
-    .await?;
-    assert_eq!(requested, windows::DeleteRequested::Deleting);
-    assert_eq!(rig.job_state(running).await, "lost");
-    assert_eq!(rig.job_state(queued).await, "lost");
-    assert_eq!(rig.job_state(finished).await, "succeeded");
-    assert_eq!(machines::verify(&rig.pool, &second).await?, None);
-    assert!(listed(rig.pool.clone(), rig.carrier).await.is_empty());
-    drop(session);
-    rig.tick(t0 + TimeDelta::minutes(1) + TimeDelta::seconds(1))
-        .await;
-    assert_eq!(rig.state(id).await, "ended");
-    // Окно кончилось: оживать нечему, токен не выдаётся.
-    let refused = machines::request_runner_token(&rig.pool, rig.carrier, machine, true).await;
-    assert_eq!(refused, Err(RunnerRefusal::Revoked));
-
-    // Следующее окно переиспользует ту же строку и оживляет её при подключении.
-    let next = rig.create_at(60, t0 + TimeDelta::minutes(20)).await;
-    rig.tick(t0 + TimeDelta::minutes(20)).await;
-    assert_eq!(rig.state(next).await, "identified");
-    assert_eq!(
-        rig.cloud_machine().await,
-        machine,
-        "one row for every window"
-    );
-    assert_eq!(listed(rig.pool.clone(), rig.carrier).await, vec!["cloud"]);
-    let fresh = machines::request_runner_token(&rig.pool, rig.carrier, machine, false).await?;
-    assert_eq!(machines::verify(&rig.pool, &fresh).await?, Some(machine));
-    let rows: i64 = sqlx::query_scalar("select count(*) from machines where name = 'cloud'")
-        .fetch_one(&rig.pool)
-        .await?;
-    assert_eq!(rows, 1);
-
+        assert_eq!(rows, 1);
     }
     // ── Отозванный статический раннер не оживает запросом токена ──
     rig.clean().await;
     {
-    let spec = machines::RunnerSpec {
-        parent: rig.carrier,
-        root_dir: "/srv/runner".into(),
-        rank: 20,
-        labels: vec!["build-host".into()],
-    };
-    let runner = machines::add_runner(&rig.pool, rig.owner, "runner-a", &spec).await?;
-    machines::request_runner_token(&rig.pool, rig.carrier, runner.machine_id, false).await?;
-    machines::revoke(&rig.pool, runner.machine_id).await?;
-    // Отозванный статический раннер не оживает запросом, окон у него нет.
-    assert_eq!(
-        machines::request_runner_token(&rig.pool, rig.carrier, runner.machine_id, true).await,
-        Err(RunnerRefusal::Revoked)
-    );
-    Ok(())
+        let spec = machines::RunnerSpec {
+            parent: rig.carrier,
+            root_dir: "/srv/runner".into(),
+            rank: 20,
+            labels: vec!["build-host".into()],
+        };
+        let runner = machines::add_runner(&rig.pool, rig.owner, "runner-a", &spec).await?;
+        machines::request_runner_token(&rig.pool, rig.carrier, runner.machine_id, false).await?;
+        machines::revoke(&rig.pool, runner.machine_id).await?;
+        // Отозванный статический раннер не оживает запросом, окон у него нет.
+        assert_eq!(
+            machines::request_runner_token(&rig.pool, rig.carrier, runner.machine_id, true).await,
+            Err(RunnerRefusal::Revoked)
+        );
+        Ok(())
     }
 }
 
@@ -4621,111 +4603,111 @@ async fn idle_counts_only_takeable_work_and_the_cloud_row_is_a_cloud_placement()
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, _session, at) = rig.drive_to_ready(240, t0).await;
-    let machine = rig.cloud_machine().await;
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, _session, at) = rig.drive_to_ready(240, t0).await;
+        let machine = rig.cloud_machine().await;
 
-    // Идущая задача: простоя нет, окно живёт сколько угодно.
-    let running = rig.seed_job(Some(machine), "running", &["cloud"]).await;
-    rig.tick(at + TimeDelta::minutes(1)).await;
-    rig.tick(at + TimeDelta::minutes(40)).await;
-    assert_eq!(rig.state(id).await, "ready");
-    assert!(rig.window(id).await.idle_since.is_none());
-    sqlx::query("update jobs set state = 'succeeded' where id = $1")
-        .bind(running)
-        .execute(&rig.pool)
-        .await?;
+        // Идущая задача: простоя нет, окно живёт сколько угодно.
+        let running = rig.seed_job(Some(machine), "running", &["cloud"]).await;
+        rig.tick(at + TimeDelta::minutes(1)).await;
+        rig.tick(at + TimeDelta::minutes(40)).await;
+        assert_eq!(rig.state(id).await, "ready");
+        assert!(rig.window(id).await.idle_since.is_none());
+        sqlx::query("update jobs set state = 'succeeded' where id = $1")
+            .bind(running)
+            .execute(&rig.pool)
+            .await?;
 
-    // Ждущая задача с метками, которых у облака нет: окно её не возьмёт, это простой.
-    let foreign = rig.seed_job(None, "waiting_runner", &["build-host"]).await;
-    rig.tick(at + TimeDelta::minutes(41)).await;
-    assert!(rig.window(id).await.idle_since.is_some());
-    // Ждущая задача, которую облако взяло бы: простой сбрасывается.
-    let takeable = rig
-        .seed_job(None, "waiting_runner", &["cloud", "kernel-6.12"])
-        .await;
-    rig.tick(at + TimeDelta::minutes(50)).await;
-    assert!(rig.window(id).await.idle_since.is_none());
-    assert_eq!(rig.state(id).await, "ready");
-    // Задача ушла: отсчёт простоя начинается заново и доводит до удаления.
-    sqlx::query("update jobs set state = 'canceled' where id in ($1, $2)")
-        .bind(foreign)
-        .bind(takeable)
-        .execute(&rig.pool)
-        .await?;
-    rig.tick(at + TimeDelta::minutes(60)).await;
-    rig.tick(at + TimeDelta::minutes(74)).await;
-    assert_eq!(rig.state(id).await, "ready");
-    rig.tick(at + TimeDelta::minutes(75)).await;
-    assert_eq!(rig.state(id).await, "deleting");
-
+        // Ждущая задача с метками, которых у облака нет: окно её не возьмёт, это простой.
+        let foreign = rig.seed_job(None, "waiting_runner", &["build-host"]).await;
+        rig.tick(at + TimeDelta::minutes(41)).await;
+        assert!(rig.window(id).await.idle_since.is_some());
+        // Ждущая задача, которую облако взяло бы: простой сбрасывается.
+        let takeable = rig
+            .seed_job(None, "waiting_runner", &["cloud", "kernel-6.12"])
+            .await;
+        rig.tick(at + TimeDelta::minutes(50)).await;
+        assert!(rig.window(id).await.idle_since.is_none());
+        assert_eq!(rig.state(id).await, "ready");
+        // Задача ушла: отсчёт простоя начинается заново и доводит до удаления.
+        sqlx::query("update jobs set state = 'canceled' where id in ($1, $2)")
+            .bind(foreign)
+            .bind(takeable)
+            .execute(&rig.pool)
+            .await?;
+        rig.tick(at + TimeDelta::minutes(60)).await;
+        rig.tick(at + TimeDelta::minutes(74)).await;
+        assert_eq!(rig.state(id).await, "ready");
+        rig.tick(at + TimeDelta::minutes(75)).await;
+        assert_eq!(rig.state(id).await, "deleting");
     }
     // ── Работа, которую облако не возьмёт, простоем не считается ──
     rig.clean().await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, _session, at) = rig.drive_to_ready(240, t0).await;
-    let waiting = rig
-        .seed_waiting_job(&["cloud", "kernel-6.12"], &["runner"], None)
-        .await;
-    // Только `runner`: облачный раннер такой заказ не возьмёт, это простой.
-    rig.tick(at + TimeDelta::minutes(1)).await;
-    assert!(
-        rig.window(id).await.idle_since.is_some(),
-        "runner-only work does not keep the cloud window alive"
-    );
-    // Заказ, названный другой машине, тоже не удерживает окно.
-    rig.tick(at + TimeDelta::minutes(2)).await;
-    sqlx::query(
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, _session, at) = rig.drive_to_ready(240, t0).await;
+        let waiting = rig
+            .seed_waiting_job(&["cloud", "kernel-6.12"], &["runner"], None)
+            .await;
+        // Только `runner`: облачный раннер такой заказ не возьмёт, это простой.
+        rig.tick(at + TimeDelta::minutes(1)).await;
+        assert!(
+            rig.window(id).await.idle_since.is_some(),
+            "runner-only work does not keep the cloud window alive"
+        );
+        // Заказ, названный другой машине, тоже не удерживает окно.
+        rig.tick(at + TimeDelta::minutes(2)).await;
+        sqlx::query(
         "update jobs set placement = '{local,runner,cloud}', requested_machine_id = $2 where id = $1",
     )
     .bind(waiting)
     .bind(rig.carrier)
     .execute(&rig.pool)
     .await?;
-    rig.tick(at + TimeDelta::minutes(3)).await;
-    assert!(rig.window(id).await.idle_since.is_some());
-    // Облачный заказ простой сбрасывает.
-    sqlx::query("update jobs set placement = '{cloud}', requested_machine_id = null where id = $1")
+        rig.tick(at + TimeDelta::minutes(3)).await;
+        assert!(rig.window(id).await.idle_since.is_some());
+        // Облачный заказ простой сбрасывает.
+        sqlx::query(
+            "update jobs set placement = '{cloud}', requested_machine_id = null where id = $1",
+        )
         .bind(waiting)
         .execute(&rig.pool)
         .await?;
-    rig.tick(at + TimeDelta::minutes(4)).await;
-    assert!(rig.window(id).await.idle_since.is_none());
-
+        rig.tick(at + TimeDelta::minutes(4)).await;
+        assert!(rig.window(id).await.idle_since.is_none());
     }
     // ── Облачная машина — вид места `cloud`, а не `runner` ──
     rig.clean().await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (_id, _session, _at) = rig.drive_to_ready(240, t0).await;
-    let machine = rig.cloud_machine().await;
-    sqlx::query(
-        "update machines set capabilities = array['jobs_inplace_v1'], jobs_max_running = 2
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (_id, _session, _at) = rig.drive_to_ready(240, t0).await;
+        let machine = rig.cloud_machine().await;
+        sqlx::query(
+            "update machines set capabilities = array['jobs_inplace_v1'], jobs_max_running = 2
           where id = $1",
-    )
-    .bind(machine)
-    .execute(&rig.pool)
-    .await?;
-    let cloud_job = rig.seed_sourced_waiting(&["cloud"], &["cloud"]).await;
-    let runner_job = rig.seed_sourced_waiting(&["cloud"], &["runner"]).await;
-    let placed = place::place_carrier(&rig.pool, &rig.registry, rig.carrier).await?;
-    assert_eq!(placed, 1);
-    assert_eq!(rig.job_state(cloud_job).await, "staging");
-    assert_eq!(
-        rig.job_state(runner_job).await,
-        "waiting_runner",
-        "a runner-only job must not be bound to the cloud machine"
-    );
-    let bound: Option<Uuid> = sqlx::query_scalar("select machine_id from jobs where id = $1")
-        .bind(cloud_job)
-        .fetch_one(&rig.pool)
+        )
+        .bind(machine)
+        .execute(&rig.pool)
         .await?;
-    assert_eq!(bound, Some(machine));
-    Ok(())
+        let cloud_job = rig.seed_sourced_waiting(&["cloud"], &["cloud"]).await;
+        let runner_job = rig.seed_sourced_waiting(&["cloud"], &["runner"]).await;
+        let placed = place::place_carrier(&rig.pool, &rig.registry, rig.carrier).await?;
+        assert_eq!(placed, 1);
+        assert_eq!(rig.job_state(cloud_job).await, "staging");
+        assert_eq!(
+            rig.job_state(runner_job).await,
+            "waiting_runner",
+            "a runner-only job must not be bound to the cloud machine"
+        );
+        let bound: Option<Uuid> = sqlx::query_scalar("select machine_id from jobs where id = $1")
+            .bind(cloud_job)
+            .fetch_one(&rig.pool)
+            .await?;
+        assert_eq!(bound, Some(machine));
+        Ok(())
     }
 }
 
@@ -4735,55 +4717,54 @@ async fn a_disconnected_runner_is_deleted_after_ten_minutes_only_while_the_carri
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    let carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, session, at) = rig.drive_to_ready(240, t0).await;
-    let machine = rig.cloud_machine().await;
-    // Работа есть: к простою удаление не относится.
-    rig.seed_job(Some(machine), "running", &["cloud"]).await;
+        let carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, session, at) = rig.drive_to_ready(240, t0).await;
+        let machine = rig.cloud_machine().await;
+        // Работа есть: к простою удаление не относится.
+        rig.seed_job(Some(machine), "running", &["cloud"]).await;
 
-    // Раннер отключился, несущая на связи.
-    drop(session);
-    rig.tick(at + TimeDelta::minutes(1)).await;
-    assert!(rig.window(id).await.disconnected_since.is_some());
-    rig.tick(at + TimeDelta::minutes(10)).await;
-    assert_eq!(rig.state(id).await, "ready");
-    rig.tick(at + TimeDelta::minutes(11)).await;
-    assert_eq!(rig.state(id).await, "deleting");
-    assert_eq!(
-        rig.window(id).await.delete_reason.as_deref(),
-        Some("disconnected")
-    );
-    drop(carrier);
+        // Раннер отключился, несущая на связи.
+        drop(session);
+        rig.tick(at + TimeDelta::minutes(1)).await;
+        assert!(rig.window(id).await.disconnected_since.is_some());
+        rig.tick(at + TimeDelta::minutes(10)).await;
+        assert_eq!(rig.state(id).await, "ready");
+        rig.tick(at + TimeDelta::minutes(11)).await;
+        assert_eq!(rig.state(id).await, "deleting");
+        assert_eq!(
+            rig.window(id).await.delete_reason.as_deref(),
+            Some("disconnected")
+        );
+        drop(carrier);
 
-    // Несущая не на связи: отключённость раннера ничего не доказывает, окно живёт.
-    rig.tick(at + TimeDelta::minutes(12)).await;
-    let second = rig.create(240).await;
-    assert_eq!(rig.state(second).await, "create_intent");
-
+        // Несущая не на связи: отключённость раннера ничего не доказывает, окно живёт.
+        rig.tick(at + TimeDelta::minutes(12)).await;
+        let second = rig.create(240).await;
+        assert_eq!(rig.state(second).await, "create_intent");
     }
     // ── Несущая без связи: отключённость раннера ничего не доказывает ──
     rig.clean().await;
     {
-    let carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let (id, session, at) = rig.drive_to_ready(240, t0).await;
-    rig.seed_job(Some(rig.cloud_machine().await), "running", &["cloud"])
-        .await;
-    drop(session);
-    drop(carrier);
-    for minutes in [1, 15, 40] {
-        rig.tick(at + TimeDelta::minutes(minutes)).await;
-        assert_eq!(rig.state(id).await, "ready", "after {minutes} min");
-    }
-    // Несущая вернулась: отсчёт идёт с этого момента.
-    let _carrier = rig.carrier_session();
-    rig.tick(at + TimeDelta::minutes(41)).await;
-    rig.tick(at + TimeDelta::minutes(50)).await;
-    assert_eq!(rig.state(id).await, "ready");
-    rig.tick(at + TimeDelta::minutes(52)).await;
-    assert_eq!(rig.state(id).await, "deleting");
-    Ok(())
+        let carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let (id, session, at) = rig.drive_to_ready(240, t0).await;
+        rig.seed_job(Some(rig.cloud_machine().await), "running", &["cloud"])
+            .await;
+        drop(session);
+        drop(carrier);
+        for minutes in [1, 15, 40] {
+            rig.tick(at + TimeDelta::minutes(minutes)).await;
+            assert_eq!(rig.state(id).await, "ready", "after {minutes} min");
+        }
+        // Несущая вернулась: отсчёт идёт с этого момента.
+        let _carrier = rig.carrier_session();
+        rig.tick(at + TimeDelta::minutes(41)).await;
+        rig.tick(at + TimeDelta::minutes(50)).await;
+        assert_eq!(rig.state(id).await, "ready");
+        rig.tick(at + TimeDelta::minutes(52)).await;
+        assert_eq!(rig.state(id).await, "deleting");
+        Ok(())
     }
 }
 
@@ -4792,45 +4773,44 @@ async fn a_runner_that_never_connects_or_loses_its_carrier_gets_no_attach() -> T
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let id = rig.create(120).await;
-    rig.tick(t0).await;
-    rig.tick(t0 + TimeDelta::seconds(1)).await;
-    rig.tick(t0 + TimeDelta::minutes(14)).await;
-    assert_eq!(rig.state(id).await, "identified");
-    rig.tick(t0 + TimeDelta::minutes(15)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "deleting");
-    assert_eq!(window.delete_reason.as_deref(), Some("ready_timeout"));
-    // Команда подключения, которую несущая так и не выполнила, больше не нужна.
-    let pending: i64 = sqlx::query_scalar(
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let id = rig.create(120).await;
+        rig.tick(t0).await;
+        rig.tick(t0 + TimeDelta::seconds(1)).await;
+        rig.tick(t0 + TimeDelta::minutes(14)).await;
+        assert_eq!(rig.state(id).await, "identified");
+        rig.tick(t0 + TimeDelta::minutes(15)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(window.delete_reason.as_deref(), Some("ready_timeout"));
+        // Команда подключения, которую несущая так и не выполнила, больше не нужна.
+        let pending: i64 = sqlx::query_scalar(
         "select count(*) from commands where kind = 'attach_runner' and delivery_state <> 'completed'",
     )
     .fetch_one(&rig.pool)
     .await?;
-    assert_eq!(pending, 0);
-
+        assert_eq!(pending, 0);
     }
     // ── Машина потеряла роль несущей до подключения: команды нет ──
     rig.clean().await;
     {
-    let t0 = now_micros();
-    // Окно создаётся при живой несущей, а теряет её до подключения.
-    let id = rig.create(120).await;
-    rig.tick(t0).await;
-    machines::set_carrier(&rig.pool, rig.carrier, false).await?;
-    rig.tick(t0 + TimeDelta::seconds(1)).await;
-    rig.tick(t0 + TimeDelta::seconds(2)).await;
-    let window = rig.window(id).await;
-    assert!(window.attach_sent_at.is_none());
-    assert_eq!(window.last_error.as_deref(), Some("carrier_unavailable"));
-    let sent: i64 =
-        sqlx::query_scalar("select count(*) from commands where kind = 'attach_runner'")
-            .fetch_one(&rig.pool)
-            .await?;
-    assert_eq!(sent, 0);
-    Ok(())
+        let t0 = now_micros();
+        // Окно создаётся при живой несущей, а теряет её до подключения.
+        let id = rig.create(120).await;
+        rig.tick(t0).await;
+        machines::set_carrier(&rig.pool, rig.carrier, false).await?;
+        rig.tick(t0 + TimeDelta::seconds(1)).await;
+        rig.tick(t0 + TimeDelta::seconds(2)).await;
+        let window = rig.window(id).await;
+        assert!(window.attach_sent_at.is_none());
+        assert_eq!(window.last_error.as_deref(), Some("carrier_unavailable"));
+        let sent: i64 =
+            sqlx::query_scalar("select count(*) from commands where kind = 'attach_runner'")
+                .fetch_one(&rig.pool)
+                .await?;
+        assert_eq!(sent, 0);
+        Ok(())
     }
 }
 
@@ -5056,57 +5036,56 @@ async fn a_stale_quote_is_rechecked_and_repriced_before_the_create() -> TestResu
     let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     {
-    enable_pushes(&rig.pool).await;
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let id = rig.create(60).await;
-    let approved = rig.window(id).await.reservation_kopecks;
-    // Через срок годности цены провайдер подорожал: тратить больше одобренного нельзя.
-    set_vcpu_price(&rig, "0.9");
-    rig.restarted().tick(t0 + TimeDelta::minutes(11)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "failed");
-    assert_eq!(window.final_cost_kopecks, Some(0));
-    assert_eq!(window.reservation_kopecks, approved);
-    assert_eq!(window.create_called_at, None, "failed before any call");
-    assert_eq!(rig.posts(), 0, "no POST over the approved amount");
-    assert!(
-        rig.alert_codes()
-            .await
-            .contains(&"reprice_growth".to_owned()),
-        "{:?}",
-        rig.alert_codes().await
-    );
-
+        enable_pushes(&rig.pool).await;
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let id = rig.create(60).await;
+        let approved = rig.window(id).await.reservation_kopecks;
+        // Через срок годности цены провайдер подорожал: тратить больше одобренного нельзя.
+        set_vcpu_price(&rig, "0.9");
+        rig.restarted().tick(t0 + TimeDelta::minutes(11)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "failed");
+        assert_eq!(window.final_cost_kopecks, Some(0));
+        assert_eq!(window.reservation_kopecks, approved);
+        assert_eq!(window.create_called_at, None, "failed before any call");
+        assert_eq!(rig.posts(), 0, "no POST over the approved amount");
+        assert!(
+            rig.alert_codes()
+                .await
+                .contains(&"reprice_growth".to_owned()),
+            "{:?}",
+            rig.alert_codes().await
+        );
     }
     // ── Цена упала: одобренный потолок снижается, вызов идёт по новой цене ──
     rig.clean().await;
     {
-    let _carrier = rig.carrier_session();
-    let t0 = now_micros();
-    let id = rig.create(60).await;
-    let approved = rig.window(id).await.reservation_kopecks;
-    set_vcpu_price(&rig, "0.1");
-    rig.restarted().tick(t0 + TimeDelta::minutes(11)).await;
-    let window = rig.window(id).await;
-    assert_eq!(window.state, "identified");
-    assert_eq!(rig.posts(), 1);
-    assert!(
-        window.reservation_kopecks < approved,
-        "the approved ceiling falls with the price"
-    );
-    // 32×0.1 + 64×0.083 + 0.26352 = 8.77552 ₽ → 878.
-    assert_eq!(window.profiles()[0].compute_kopecks_per_hour, 878);
-    assert_eq!(
-        (
-            window.compute_kopecks_per_hour,
-            window.disk_kopecks_per_hour
-        ),
-        (878, DISK),
-        "the ledger uses the price of the call"
-    );
-    assert_eq!(window.reservation_kopecks, 3 * (878 + DISK));
-    Ok(())
+        let _carrier = rig.carrier_session();
+        let t0 = now_micros();
+        let id = rig.create(60).await;
+        let approved = rig.window(id).await.reservation_kopecks;
+        set_vcpu_price(&rig, "0.1");
+        rig.restarted().tick(t0 + TimeDelta::minutes(11)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "identified");
+        assert_eq!(rig.posts(), 1);
+        assert!(
+            window.reservation_kopecks < approved,
+            "the approved ceiling falls with the price"
+        );
+        // 32×0.1 + 64×0.083 + 0.26352 = 8.77552 ₽ → 878.
+        assert_eq!(window.profiles()[0].compute_kopecks_per_hour, 878);
+        assert_eq!(
+            (
+                window.compute_kopecks_per_hour,
+                window.disk_kopecks_per_hour
+            ),
+            (878, DISK),
+            "the ledger uses the price of the call"
+        );
+        assert_eq!(window.reservation_kopecks, 3 * (878 + DISK));
+        Ok(())
     }
 }
 
