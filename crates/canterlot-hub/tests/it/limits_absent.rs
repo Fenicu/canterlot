@@ -10,6 +10,8 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn at(offset_minutes: i64) -> DateTime<Utc> {
@@ -86,9 +88,9 @@ async fn changes(pool: &PgPool) -> i64 {
         .unwrap()
 }
 
-#[tokio::test]
-async fn a_future_observation_is_clamped_and_does_not_block_a_newer_one() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_future_observation_is_clamped_and_does_not_block_a_newer_one(
+    pool: PgPool,
+) -> TestResult {
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe(
@@ -114,9 +116,7 @@ async fn a_future_observation_is_clamped_and_does_not_block_a_newer_one() -> Tes
     Ok(())
 }
 
-#[tokio::test]
-async fn a_future_absence_is_clamped_and_does_not_hide_a_later_window() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_future_absence_is_clamped_and_does_not_hide_a_later_window(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     absent(&pool, &s, Utc::now() + Duration::hours(1)).await;
@@ -127,9 +127,7 @@ async fn a_future_absence_is_clamped_and_does_not_hide_a_later_window() -> TestR
     Ok(())
 }
 
-#[tokio::test]
-async fn a_stored_future_observation_does_not_block_a_new_reading() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_stored_future_observation_does_not_block_a_new_reading(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let future = at(24 * 60);
@@ -153,9 +151,7 @@ async fn a_stored_future_observation_does_not_block_a_new_reading() -> TestResul
     Ok(())
 }
 
-#[tokio::test]
-async fn a_stored_future_absence_does_not_block_a_new_reading() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_stored_future_absence_does_not_block_a_new_reading(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let future = at(24 * 60);
@@ -182,9 +178,7 @@ async fn a_stored_future_absence_does_not_block_a_new_reading() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn a_stored_timestamp_inside_the_future_tolerance_still_wins() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_stored_timestamp_inside_the_future_tolerance_still_wins(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let ahead = at(1);
@@ -206,9 +200,7 @@ async fn a_stored_timestamp_inside_the_future_tolerance_still_wins() -> TestResu
     Ok(())
 }
 
-#[tokio::test]
-async fn absence_hides_the_window_keeps_history_and_tells_clients() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn absence_hides_the_window_keeps_history_and_tells_clients(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe(&pool, &s, Window::FiveHour, 440, at(-30)).await;
@@ -237,9 +229,9 @@ async fn absence_hides_the_window_keeps_history_and_tells_clients() -> TestResul
     Ok(())
 }
 
-#[tokio::test]
-async fn a_late_reading_from_before_the_absence_does_not_bring_the_window_back() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_late_reading_from_before_the_absence_does_not_bring_the_window_back(
+    pool: PgPool,
+) -> TestResult {
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe(&pool, &s, Window::Weekly, 530, at(-30)).await;
@@ -257,9 +249,7 @@ async fn a_late_reading_from_before_the_absence_does_not_bring_the_window_back()
     Ok(())
 }
 
-#[tokio::test]
-async fn absence_of_a_window_that_was_never_seen_is_still_recorded() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn absence_of_a_window_that_was_never_seen_is_still_recorded(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     assert!(absent(&pool, &s, at(-1)).await);
     let state = claude(&pool).await;
@@ -267,9 +257,7 @@ async fn absence_of_a_window_that_was_never_seen_is_still_recorded() -> TestResu
     Ok(())
 }
 
-#[tokio::test]
-async fn monthly_readings_are_stored_and_emitted() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn monthly_readings_are_stored_and_emitted(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe(&pool, &s, Window::Monthly, 93, at(-30)).await;
@@ -287,9 +275,7 @@ async fn monthly_readings_are_stored_and_emitted() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn only_the_five_hour_window_can_be_absent() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn only_the_five_hour_window_can_be_absent(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     let mut tx = pool.begin().await?;
     let error = limits::record_absence_in_tx(
@@ -306,9 +292,7 @@ async fn only_the_five_hour_window_can_be_absent() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn opencode_readings_store_and_its_absence_leaves_claude_alone() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn opencode_readings_store_and_its_absence_leaves_claude_alone(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     async fn observe_as(
         pool: &PgPool,
@@ -388,4 +372,26 @@ async fn opencode_readings_store_and_its_absence_leaves_claude_alone() -> TestRe
     assert!(!claude.five_hour_absent);
     assert_eq!(claude.five_hour.unwrap().used_permille, 440);
     Ok(())
+}
+
+/// Отсутствующие и будущие наблюдения лимитов: обрезка будущих отметок, отсутствие
+/// не скрывает поздний отчёт.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn limits_absent_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        a_future_observation_is_clamped_and_does_not_block_a_newer_one,
+        a_future_absence_is_clamped_and_does_not_hide_a_later_window,
+        a_stored_future_observation_does_not_block_a_new_reading,
+        a_stored_future_absence_does_not_block_a_new_reading,
+        a_stored_timestamp_inside_the_future_tolerance_still_wins,
+        absence_hides_the_window_keeps_history_and_tells_clients,
+        a_late_reading_from_before_the_absence_does_not_bring_the_window_back,
+        absence_of_a_window_that_was_never_seen_is_still_recorded,
+        monthly_readings_are_stored_and_emitted,
+        only_the_five_hour_window_can_be_absent,
+        opencode_readings_store_and_its_absence_leaves_claude_alone,
+    );
 }
