@@ -9,6 +9,7 @@ pub mod process;
 pub mod replay;
 pub mod requests;
 pub mod rpc;
+pub mod seen;
 pub mod thread;
 pub mod version;
 
@@ -20,6 +21,7 @@ use self::{
     process::{AppServerProcess, LaunchSpec, StdoutLine},
     requests::{Intake, Requests, Resolved},
     rpc::{Incoming, RpcClient, RpcError, RpcId},
+    seen::{Seen, SeenStore},
     thread::{Effective, OwnerDefaults, PermissionMode},
 };
 use crate::adapter::RunEnd;
@@ -171,6 +173,10 @@ pub struct CodexAdapter {
     /// Блок новых инструкций, ждущий следующего turn/start: на 0.172.0
     /// `thread/resume` поле `developerInstructions` не применяет.
     pending_instructions: Option<PendingInstructions>,
+    /// Записи «что видел тред»: нет — дом canterlot не определить, адаптер без записей.
+    seen: Option<SeenStore>,
+    /// Эфемерный форк бокового чата: свой id на каждый запуск, записей не оставляет.
+    ephemeral_thread: bool,
     codex_home: Option<CodexHome>,
     /// Делегированная сессия: дом без конфига MCP владельца, без приложений и плагинов.
     isolate_mcp: bool,
@@ -285,6 +291,8 @@ impl CodexAdapter {
             },
             codex_home: None,
             pending_instructions: None,
+            seen: None,
+            ephemeral_thread: false,
             isolate_mcp: false,
             delegate_mcp: Vec::new(),
             delegate_mcp_kept: Vec::new(),
@@ -1145,6 +1153,10 @@ impl CodexAdapter {
         self.models = self.list_models().await?;
         self.workdir = spec.workdir.clone();
         self.instructions = spec.instructions.clone();
+        self.seen = CodexHome::resolve(&self.cfg, &self.exec_dir, &owner_env(&self.cfg))
+            .ok()
+            .and_then(|home| SeenStore::beside_home(&home.path));
+        self.ephemeral_thread = spec.fork.is_some();
         let instructions = thread::compose_developer_instructions(
             &spec.instructions,
             &self.owner,
@@ -1157,6 +1169,8 @@ impl CodexAdapter {
         // мёртвый эфемерный id никогда не resume'ится. Родительский тред этим
         // вызовом не трогается: вопросы и ответы бокового чата его не видят.
         let (effective, fresh_fork) = if let Some(fork) = spec.fork.as_ref() {
+            // Форк наследует историю родителя: сверяется запись родителя.
+            self.queue_unseen_instructions(&fork.parent_native_id);
             let result = self
                 .rpc_round(
                     "thread/fork",
@@ -1175,6 +1189,7 @@ impl CodexAdapter {
                 .map_err(|_| AdapterError::StartFailed("fork_failed"))?;
             (effective, true)
         } else if let Some(native) = spec.native_conversation_id.as_deref() {
+            self.queue_unseen_instructions(native);
             let launch = ResumeLaunch {
                 mode: self.mode,
                 launch_mode: spec.instructions.mode,
@@ -1205,6 +1220,8 @@ impl CodexAdapter {
                 self.owner
                     .observe_thread(&effective.approval_policy, &effective.sandbox);
             }
+            // thread/start применил developerInstructions: тред видел их с начала.
+            self.record_seen(&effective.thread_id, Seen::of(&spec.instructions));
             (effective, false)
         };
         let mut translator = Translator::new(&effective.thread_id, &effective.model);
@@ -1336,19 +1353,11 @@ impl CodexAdapter {
         } else {
             None
         };
-        let note = match next.mode {
-            InstructionMode::Preset => thread::ChangeNote::To {
-                title: next.title.as_str(),
-                revision: next.revision,
-            },
-            InstructionMode::Clean => thread::ChangeNote::ToClean,
-            InstructionMode::Owner => thread::ChangeNote::ToOwner,
-        };
         let dev = thread::compose_developer_instructions(
             &next,
             &self.owner,
             mcp::SERVER_INSTRUCTIONS,
-            note,
+            thread::change_note(&next),
         );
         self.discard_server().await;
         let launch = ResumeLaunch {
@@ -1370,10 +1379,11 @@ impl CodexAdapter {
                 self.effective = Some(effective);
                 self.mode = mode;
                 self.effort = effort;
-                self.instructions = next;
                 // 0.172.0 применяет developerInstructions только на thread/start:
                 // новые инструкции доедут блоком в следующем ходе.
-                self.pending_instructions = Some(PendingInstructions::new(&dev));
+                self.pending_instructions =
+                    Some(PendingInstructions::new(&dev).with_seen(Seen::of(&next)));
+                self.instructions = next;
                 self.codex_home = new_home;
                 self.events.push_back(AdapterEvent::CliRestarted {
                     cli_pid: started.0,
@@ -1611,8 +1621,60 @@ impl CodexAdapter {
             .pending_instructions
             .as_ref()
             .is_some_and(|pending| pending.is_carried_by(command_id))
+            && let Some(pending) = self.pending_instructions.take()
+            && let Some(seen) = pending.seen()
         {
-            self.pending_instructions = None;
+            let thread_id = self.thread_id();
+            self.record_seen(&thread_id, seen);
+        }
+    }
+
+    /// Тред возобновляется или форкается, а `developerInstructions` на этих путях не
+    /// применяются: если по записи тред видел другие инструкции, они доедут блоком в
+    /// первом ходе. Нет записи (тред старше записей или создан вне canterlot) — блок
+    /// нужен только пресету: «Без инструкций» и «Как у владельца» тред и так видит.
+    fn queue_unseen_instructions(&mut self, thread_id: &str) {
+        let seen = self.seen.as_ref().and_then(|store| store.read(thread_id));
+        let stale = match seen {
+            Some(seen) => !seen.matches(&self.instructions),
+            None => self.instructions.mode == InstructionMode::Preset,
+        };
+        if !stale {
+            return;
+        }
+        tracing::info!(
+            kind = "codex_instructions_unseen",
+            seen_mode = ?seen.map(|seen| seen.mode),
+            seen_revision = seen.map(|seen| seen.revision),
+            mode = ?self.instructions.mode,
+            revision = self.instructions.revision,
+            "thread has not seen the current instructions; sending them with the next turn"
+        );
+        let dev = thread::compose_developer_instructions(
+            &self.instructions,
+            &self.owner,
+            mcp::SERVER_INSTRUCTIONS,
+            thread::change_note(&self.instructions),
+        );
+        self.pending_instructions =
+            Some(PendingInstructions::new(&dev).with_seen(Seen::of(&self.instructions)));
+    }
+
+    /// Запомнить, что тред видел эти инструкции. Эфемерный форк записей не оставляет;
+    /// неудача записи не мешает ходу: следующее исполнение лишь повторит блок.
+    fn record_seen(&self, thread_id: &str, seen: Seen) {
+        if self.ephemeral_thread {
+            return;
+        }
+        let Some(store) = self.seen.as_ref() else {
+            return;
+        };
+        if let Err(error) = store.write(thread_id, &seen) {
+            tracing::warn!(
+                kind = "codex_seen_write_failed",
+                error_kind = ?error.kind(),
+                "failed to record the instructions a Codex thread has seen"
+            );
         }
     }
 

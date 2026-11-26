@@ -179,6 +179,18 @@ pub enum ChangeNote<'a> {
     ToOwner,
 }
 
+/// Примечание о переходе треда на эти инструкции.
+pub fn change_note(spec: &InstructionSpec) -> ChangeNote<'_> {
+    match spec.mode {
+        InstructionMode::Preset => ChangeNote::To {
+            title: spec.title.as_str(),
+            revision: spec.revision,
+        },
+        InstructionMode::Clean => ChangeNote::ToClean,
+        InstructionMode::Owner => ChangeNote::ToOwner,
+    }
+}
+
 /// Текст инструкций по режиму пресета: владелец хранит свой текст и блок сервера,
 /// «Без инструкций» — пусто (перекрывает owner developer_instructions из конфига),
 /// пресет — его текст. Примечание о смене идёт первой строкой.

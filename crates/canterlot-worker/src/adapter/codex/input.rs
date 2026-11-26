@@ -183,6 +183,8 @@ pub fn instructions_block(composed: &str) -> String {
 pub struct PendingInstructions {
     block: String,
     command_id: Option<Uuid>,
+    /// Что тред увидит, когда блок доедет: так обновится запись треда.
+    seen: Option<super::seen::Seen>,
 }
 
 impl PendingInstructions {
@@ -190,7 +192,17 @@ impl PendingInstructions {
         Self {
             block: instructions_block(composed),
             command_id: None,
+            seen: None,
         }
+    }
+
+    pub fn with_seen(mut self, seen: super::seen::Seen) -> Self {
+        self.seen = Some(seen);
+        self
+    }
+
+    pub fn seen(&self) -> Option<super::seen::Seen> {
+        self.seen
     }
 
     pub fn block(&self) -> &str {

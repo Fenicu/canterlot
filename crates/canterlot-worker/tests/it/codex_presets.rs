@@ -4,8 +4,8 @@
 #![forbid(unsafe_code)]
 
 use canterlot_worker::adapter::{
-    Adapter, AdapterContext, AdapterError, AdapterEvent, InstructionMode, InstructionSpec,
-    SettingsChange, StartSpec, Transmission, TransmitOutcome,
+    Adapter, AdapterContext, AdapterError, AdapterEvent, ForkSpec, InstructionMode,
+    InstructionSpec, SettingsChange, StartSpec, Transmission, TransmitOutcome,
     codex::home::{CodexHome, HomeKind, TempDirPolicy},
 };
 use canterlot_worker::config::CodexConfig;
@@ -119,7 +119,7 @@ for line in sys.stdin:
         emit({'id': i, 'result': models})
     elif m == 'thread/turns/list':
         emit({'id': i, 'result': {'data': []}})
-    elif m in ('thread/start', 'thread/resume'):
+    elif m in ('thread/start', 'thread/resume', 'thread/fork'):
         if m == 'thread/resume' and (d / 'resume-hang-once').exists() and not (d / 'hung').exists():
             # Сервер отвечает ошибкой и виснет, не реагируя на EOF stdin.
             (d / 'hung').write_text(str(pid))
@@ -139,6 +139,9 @@ for line in sys.stdin:
                 t = dict(thread)
             t['thread'] = dict(t.get('thread', {}))
             t['thread']['cliVersion'] = '0.164.0'
+            if m == 'thread/fork':
+                # Эфемерный форк: свой id на каждый запуск.
+                t['thread']['id'] = f'fork-{pid}'
             emit({'id': i, 'result': t})
     elif m == 'turn/start':
         if (d / 'fail-turn-once').exists() and not (d / 'turn-failed').exists():
@@ -196,8 +199,21 @@ impl PresetHarness {
     ) -> Self {
         let dir = TempDir::new().unwrap();
         setup(dir.path());
+        Self::start_in(dir, instructions, native, permission, None).await
+    }
+
+    /// Запуск в готовом каталоге: второе исполнение видит дом и записи первого.
+    async fn start_in(
+        dir: TempDir,
+        instructions: InstructionSpec,
+        native: Option<&str>,
+        permission: &str,
+        fork: Option<ForkSpec>,
+    ) -> Self {
         let exe = dir.path().join("fake-codex");
-        fake_exec::write_executable(&exe, PRESET_FAKE, 0o700);
+        if !exe.exists() {
+            fake_exec::write_executable(&exe, PRESET_FAKE, 0o700);
+        }
         let owner = dir.path().join("owner-home");
         std::fs::create_dir_all(&owner).unwrap();
         std::fs::write(owner.join("config.toml"), "model = \"x\"\n").unwrap();
@@ -232,7 +248,7 @@ impl PresetHarness {
             isolate_mcp: false,
             prompt_suggestions: false,
             disable_claude_auto_memory: false,
-            fork: None,
+            fork,
         };
         let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
             .await
@@ -1182,4 +1198,189 @@ async fn oversized_joined_text_defers_the_block_to_a_later_turn() {
     assert!(short.starts_with(BLOCK_OPEN), "{short}");
     assert!(short.contains("SMALL-PRESET"), "{short}");
     assert!(short.ends_with("\n\nshort"), "{short}");
+}
+
+// --- Запись «что видел тред»: блок доходит и через новое исполнение ---
+
+const THREAD: &str = "thread-1";
+
+fn record_path(dir: &std::path::Path, thread: &str) -> std::path::PathBuf {
+    dir.join("codex-home-threads")
+        .join(format!("{thread}.json"))
+}
+
+fn read_record(dir: &std::path::Path, thread: &str) -> Option<Value> {
+    let text = std::fs::read_to_string(record_path(dir, thread)).ok()?;
+    Some(serde_json::from_str(&text).expect("record is json"))
+}
+
+fn write_record(dir: &std::path::Path, thread: &str, spec: &InstructionSpec) {
+    let path = record_path(dir, thread);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        json!({"mode": spec.mode, "preset_id": spec.preset_id, "revision": spec.revision})
+            .to_string(),
+    )
+    .unwrap();
+}
+
+fn assert_record(dir: &std::path::Path, thread: &str, spec: &InstructionSpec) {
+    let record = read_record(dir, thread).unwrap_or_else(|| panic!("no record for {thread}"));
+    assert_eq!(
+        record,
+        json!({"mode": spec.mode, "preset_id": spec.preset_id, "revision": spec.revision})
+    );
+}
+
+impl PresetHarness {
+    async fn close(self) -> TempDir {
+        let Self {
+            dir,
+            group,
+            mut adapter,
+            ..
+        } = self;
+        tokio::time::timeout(
+            WAIT,
+            adapter.close(canterlot_worker::adapter::CloseMode::Graceful, &group),
+        )
+        .await
+        .expect("close deadline")
+        .expect("close ok");
+        dir
+    }
+
+    async fn one_turn(&mut self, settings: Option<SettingsChange>, text: &str) -> String {
+        let out = self.transmit_text(settings, text).await;
+        assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+        self.until_finished().await;
+        turn_with(&self.turn_texts(), text).to_owned()
+    }
+}
+
+#[tokio::test]
+async fn fresh_thread_records_the_start_instructions_without_text() {
+    let spec = preset_spec("SECRET-PRESET-TEXT");
+    let h = PresetHarness::start_with(spec.clone(), None, |_| {}).await;
+    assert_record(h.dir.path(), THREAD, &spec);
+    let raw = std::fs::read_to_string(record_path(h.dir.path(), THREAD)).unwrap();
+    assert!(!raw.contains("SECRET-PRESET-TEXT"), "{raw}");
+    assert!(!raw.contains("тест"), "title stays out: {raw}");
+}
+
+#[tokio::test]
+async fn resume_with_a_stale_record_carries_the_block_in_the_first_turn() {
+    // Тред видел «Без инструкций», а хаб уже считает действующим пресет.
+    let spec = preset_spec("CANARY-STALE");
+    let mut h = PresetHarness::start_with(spec.clone(), Some(THREAD), |dir| {
+        write_record(dir, THREAD, &clean_spec());
+    })
+    .await;
+    let first = h.one_turn(None, "owner-words").await;
+    assert_block_before_owner(
+        &first,
+        concat!(
+            "[canterlot] The instructions preset of this conversation changed to «тест» ",
+            "(revision 7); it replaces any earlier canterlot preset instructions in this thread.\n",
+            "CANARY-STALE"
+        ),
+        "owner-words",
+    );
+    assert_record(h.dir.path(), THREAD, &spec);
+    assert_eq!(h.one_turn(None, "next-words").await, "next-words");
+}
+
+#[tokio::test]
+async fn resume_with_a_matching_record_sends_no_block() {
+    let spec = preset_spec("CANARY-SAME");
+    let mut h = PresetHarness::start_with(spec.clone(), Some(THREAD), |dir| {
+        write_record(dir, THREAD, &spec);
+    })
+    .await;
+    assert_eq!(h.one_turn(None, "owner-words").await, "owner-words");
+}
+
+#[tokio::test]
+async fn resume_without_a_record_resends_only_a_preset() {
+    // Тред без записи (до обновления воркера): пресет повторяется, «Без инструкций» нет.
+    let mut h =
+        PresetHarness::start_with(preset_spec("CANARY-UNKNOWN"), Some(THREAD), |_| {}).await;
+    let first = h.one_turn(None, "owner-words").await;
+    assert!(first.starts_with(BLOCK_OPEN), "{first}");
+    assert!(first.contains("CANARY-UNKNOWN"), "{first}");
+
+    let mut h = PresetHarness::start_with(clean_spec(), Some(THREAD), |_| {}).await;
+    assert_eq!(h.one_turn(None, "owner-words").await, "owner-words");
+    assert!(read_record(h.dir.path(), THREAD).is_none());
+}
+
+#[tokio::test]
+async fn corrupt_record_counts_as_missing_and_is_overwritten() {
+    let spec = preset_spec("CANARY-CORRUPT");
+    let mut h = PresetHarness::start_with(spec.clone(), Some(THREAD), |dir| {
+        let path = record_path(dir, THREAD);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "{not json").unwrap();
+    })
+    .await;
+    let first = h.one_turn(None, "owner-words").await;
+    assert!(first.starts_with(BLOCK_OPEN), "{first}");
+    assert_record(h.dir.path(), THREAD, &spec);
+}
+
+#[tokio::test]
+async fn deferred_block_reaches_the_thread_in_the_next_execution() {
+    use canterlot_proto::limits::MAX_INPUT_TEXT_BYTES;
+    let mut h = PresetHarness::start_with(clean_spec(), None, |_| {}).await;
+    assert_record(h.dir.path(), THREAD, &clean_spec());
+    // Ввод принят без блока: хаб уже считает пресет действующим, тред его не видел.
+    let spec = preset_spec("CANARY-DEFERRED");
+    let big = "x".repeat(MAX_INPUT_TEXT_BYTES - 16);
+    let out = h.transmit_text(Some(change(spec.clone())), &big).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    assert!(!turn_with(&h.turn_texts(), "xxxx").contains(BLOCK_OPEN));
+    assert_record(h.dir.path(), THREAD, &clean_spec());
+
+    // Исполнение кончилось раньше следующего хода; новое стартует с пресетом хаба.
+    let dir = h.close().await;
+    let mut h = PresetHarness::start_in(dir, spec.clone(), Some(THREAD), "ask", None).await;
+    let first = h.one_turn(None, "after-restart").await;
+    assert!(first.starts_with(BLOCK_OPEN), "{first}");
+    assert!(first.contains("CANARY-DEFERRED"), "{first}");
+    assert!(first.ends_with("\n\nafter-restart"), "{first}");
+    assert_record(h.dir.path(), THREAD, &spec);
+}
+
+#[tokio::test]
+async fn side_chat_fork_compares_with_the_parent_record_and_writes_none() {
+    let spec = preset_spec("CANARY-FORK");
+    let dir = TempDir::new().unwrap();
+    write_record(dir.path(), THREAD, &clean_spec());
+    let fork = ForkSpec {
+        parent_native_id: THREAD.into(),
+        side_mcp: true,
+    };
+    let mut h = PresetHarness::start_in(dir, spec.clone(), None, "ask", Some(fork)).await;
+    let first = h.one_turn(None, "side-words").await;
+    assert!(first.starts_with(BLOCK_OPEN), "{first}");
+    assert!(first.contains("CANARY-FORK"), "{first}");
+    // Эфемерный форк записей не оставляет, запись родителя не меняется.
+    let names: Vec<_> = std::fs::read_dir(h.dir.path().join("codex-home-threads"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec![format!("{THREAD}.json")]);
+    assert_record(h.dir.path(), THREAD, &clean_spec());
+
+    // Совпадающая запись родителя: блок не нужен.
+    let dir = h.close().await;
+    write_record(dir.path(), THREAD, &spec);
+    let fork = ForkSpec {
+        parent_native_id: THREAD.into(),
+        side_mcp: true,
+    };
+    let mut h = PresetHarness::start_in(dir, spec, None, "ask", Some(fork)).await;
+    assert_eq!(h.one_turn(None, "side-again").await, "side-again");
 }
