@@ -11,6 +11,8 @@ use sqlx::PgPool;
 
 use crate::support::auth::AuthHub;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 async fn hub(pool: PgPool, check: Duration) -> AuthHub {
     AuthHub::with(pool, |c| c.ws.session_check_interval = check, false)
         .await
@@ -28,9 +30,7 @@ async fn closed_as_revoked(ws: &mut TestWs, within: Duration) {
     assert_eq!(ws.close_code, Some(4401));
 }
 
-#[tokio::test]
-async fn auth_ws_revocation_closes_the_socket_within_two_seconds() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_ws_revocation_closes_the_socket_within_two_seconds(pool: PgPool) {
     let hub = hub(pool, Duration::from_secs(60)).await;
     let addr = hub.addr.unwrap();
     let (id, token) = hub.session(SignInMethod::Password, None).await;
@@ -61,9 +61,7 @@ async fn auth_ws_revocation_closes_the_socket_within_two_seconds() {
 }
 
 #[cfg(feature = "fault-injection")]
-#[tokio::test]
-async fn auth_ws_lost_notice_is_caught_by_the_periodic_check() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_ws_lost_notice_is_caught_by_the_periodic_check(pool: PgPool) {
     let hub = hub(pool, Duration::from_millis(500)).await;
     let (id, token) = hub.session(SignInMethod::Password, None).await;
     let mut ws = TestWs::connect(hub.addr.unwrap(), TEST_ORIGIN, Some(&token))
@@ -76,9 +74,7 @@ async fn auth_ws_lost_notice_is_caught_by_the_periodic_check() {
     closed_as_revoked(&mut ws, Duration::from_secs(3)).await;
 }
 
-#[tokio::test]
-async fn auth_ws_idle_expiry_closes_the_socket_on_the_periodic_check() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_ws_idle_expiry_closes_the_socket_on_the_periodic_check(pool: PgPool) {
     let hub = hub(pool, Duration::from_millis(300)).await;
     let (id, token) = hub.session(SignInMethod::Password, None).await;
     let mut ws = TestWs::connect(hub.addr.unwrap(), TEST_ORIGIN, Some(&token))
@@ -95,4 +91,17 @@ async fn auth_ws_idle_expiry_closes_the_socket_on_the_periodic_check() {
         .unwrap();
     closed_as_revoked(&mut ws, Duration::from_secs(3)).await;
     assert_eq!(hub.revoke_reason(id).await.as_deref(), Some("idle"));
+}
+
+/// WSS и сеанс: отзыв закрывает сокет, потерянное уведомление, простой.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn auth_ws_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        auth_ws_revocation_closes_the_socket_within_two_seconds,
+        auth_ws_lost_notice_is_caught_by_the_periodic_check,
+        auth_ws_idle_expiry_closes_the_socket_on_the_periodic_check,
+    );
 }
