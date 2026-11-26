@@ -10,6 +10,9 @@ use canterlot_hub::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+use sqlx::PgPool;
+
 use crate::support::auth::{AuthHub, error_code, set_cookie};
 
 const FIREFOX: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:159.0) Gecko/20100101 Firefox/159.0";
@@ -82,9 +85,7 @@ async fn act(client: &TestClient, action: &str, secret: &str) -> TestResponse {
         .await
 }
 
-#[tokio::test]
-async fn auth_qr_start_scan_approve_signs_in_once() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_qr_start_scan_approve_signs_in_once(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let qr = started(&hub, "203.0.113.50").await;
     assert_eq!(qr.secret.len(), 43);
@@ -157,9 +158,7 @@ async fn auth_qr_start_scan_approve_signs_in_once() {
     assert_eq!(act(&hub.owner(), "approve", &qr.secret).await.status, 410);
 }
 
-#[tokio::test]
-async fn auth_qr_two_concurrent_polls_get_exactly_one_session() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_qr_two_concurrent_polls_get_exactly_one_session(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     for _ in 0..5 {
         let qr = started(&hub, "203.0.113.50").await;
@@ -190,9 +189,7 @@ async fn auth_qr_two_concurrent_polls_get_exactly_one_session() {
     assert_eq!(qr_sessions, 5);
 }
 
-#[tokio::test]
-async fn auth_qr_deny_and_expiry_end_the_code() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_qr_deny_and_expiry_end_the_code(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let client = poller(&hub);
     let denied = started(&hub, "203.0.113.50").await;
@@ -241,9 +238,7 @@ async fn auth_qr_deny_and_expiry_end_the_code() {
     assert_eq!(state(&unknown), "expired");
 }
 
-#[tokio::test]
-async fn auth_qr_inspect_approve_and_deny_need_a_session() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_qr_inspect_approve_and_deny_need_a_session(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let qr = started(&hub, "203.0.113.50").await;
     for action in ["inspect", "approve", "deny"] {
@@ -258,9 +253,7 @@ async fn auth_qr_inspect_approve_and_deny_need_a_session() {
     assert_eq!(state_now, "pending");
 }
 
-#[tokio::test]
-async fn auth_qr_secret_and_poll_token_are_not_interchangeable() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_qr_secret_and_poll_token_are_not_interchangeable(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let qr = started(&hub, "203.0.113.50").await;
     let wrong = act(&hub.owner(), "inspect", &qr.poll_token).await;
@@ -274,9 +267,7 @@ async fn auth_qr_secret_and_poll_token_are_not_interchangeable() {
     assert!(set_cookie(&response, SESSION_COOKIE).is_none());
 }
 
-#[tokio::test]
-async fn auth_qr_start_is_limited_per_bucket_and_in_total() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_qr_start_is_limited_per_bucket_and_in_total(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let retry_of = |limited: &TestResponse| {
         assert_eq!(limited.status, 429);
@@ -333,9 +324,7 @@ async fn auth_qr_start_is_limited_per_bucket_and_in_total() {
 
 /// `start` публичен. Один адрес, даже с IPv4 и IPv6 сразу, не выбирает общий предел
 /// ожидающих кодов: новое устройство владельца с другого адреса код получает.
-#[tokio::test]
-async fn auth_qr_one_host_cannot_take_every_pending_code() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_qr_one_host_cannot_take_every_pending_code(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let mut granted = 0;
     for _ in 0..10 {
@@ -351,9 +340,7 @@ async fn auth_qr_one_host_cannot_take_every_pending_code() {
 
 /// `poll` публичен, а слотов долгого опроса в процессе восемь. С одной корзины адресов
 /// ждут не больше трёх опросов, поэтому опрос с другого адреса слот получает.
-#[tokio::test]
-async fn auth_qr_one_address_cannot_take_every_poll_slot() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_qr_one_address_cannot_take_every_poll_slot(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let qr = started(&hub, "203.0.113.50").await;
     // Четыре долгих опроса с одного адреса разом: три ждут, а тот, что пришёл четвёртым,
@@ -394,9 +381,7 @@ async fn auth_qr_one_address_cannot_take_every_poll_slot() {
     assert_eq!(probe(poller(&hub)).await, 200);
 }
 
-#[tokio::test]
-async fn auth_qr_at_most_eight_polls_wait_at_once() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_qr_at_most_eight_polls_wait_at_once(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let qr = started(&hub, "203.0.113.50").await;
     // Восемь опросов с разных адресов: предел на корзину здесь не мешает общему.
@@ -427,9 +412,7 @@ async fn auth_qr_at_most_eight_polls_wait_at_once() {
     );
 }
 
-#[tokio::test]
-async fn auth_qr_born_session_dies_with_its_approver() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_qr_born_session_dies_with_its_approver(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let (approver, approver_token) = hub.session(SignInMethod::Password, None).await;
     let approver_client = hub.with_session(&approver_token, Some("198.51.100.9"));
@@ -465,9 +448,7 @@ async fn auth_qr_born_session_dies_with_its_approver() {
     );
 }
 
-#[tokio::test]
-async fn auth_qr_approval_by_a_revoked_session_is_not_delivered() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_qr_approval_by_a_revoked_session_is_not_delivered(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let (approver, approver_token) = hub.session(SignInMethod::Password, None).await;
     let qr = started(&hub, "203.0.113.50").await;
@@ -491,9 +472,7 @@ async fn auth_qr_approval_by_a_revoked_session_is_not_delivered() {
     assert!(set_cookie(&response, SESSION_COOKIE).is_none());
 }
 
-#[tokio::test]
-async fn auth_qr_one_session_approves_at_most_five_live_sessions() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_qr_one_session_approves_at_most_five_live_sessions(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let (_, approver_token) = hub.session(SignInMethod::Password, None).await;
     let approver = hub.with_session(&approver_token, Some("198.51.100.9"));
@@ -526,9 +505,7 @@ async fn auth_qr_one_session_approves_at_most_five_live_sessions() {
     );
 }
 
-#[tokio::test]
-async fn auth_qr_delivery_never_evicts_other_sessions() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_qr_delivery_never_evicts_other_sessions(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     // Заранее заведённый сеанс владельца плюс 49: предел 50 достигнут.
     for _ in 0..49 {
@@ -550,5 +527,40 @@ async fn auth_qr_delivery_never_evicts_other_sessions() {
         (live, limited),
         (50, 0),
         "no session evicted for a QR-born one"
+    );
+}
+
+/// Вход по QR: одно одобрение — один сеанс, отказ и срок, права, секреты, лимиты
+/// запуска и ожидающих кодов.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn qr_flow_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        auth_qr_start_scan_approve_signs_in_once,
+        auth_qr_two_concurrent_polls_get_exactly_one_session,
+        auth_qr_deny_and_expiry_end_the_code,
+        auth_qr_inspect_approve_and_deny_need_a_session,
+        auth_qr_secret_and_poll_token_are_not_interchangeable,
+        auth_qr_start_is_limited_per_bucket_and_in_total,
+        auth_qr_one_host_cannot_take_every_pending_code,
+    );
+}
+
+/// Слоты ожидания, сеанс одобрившего, отозванный одобривший, лимит живых сеансов,
+/// доставка без вытеснения.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn qr_limits_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        auth_qr_one_address_cannot_take_every_poll_slot,
+        auth_qr_at_most_eight_polls_wait_at_once,
+        auth_qr_born_session_dies_with_its_approver,
+        auth_qr_approval_by_a_revoked_session_is_not_delivered,
+        auth_qr_one_session_approves_at_most_five_live_sessions,
+        auth_qr_delivery_never_evicts_other_sessions,
     );
 }
