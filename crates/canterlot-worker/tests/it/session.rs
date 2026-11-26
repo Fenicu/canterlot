@@ -1089,7 +1089,10 @@ async fn slow_range_progress_resets_head_timer() {
     .await;
     hub.config.timers.range_ack = Duration::from_millis(600);
     hub.config.timers.heartbeat_ack = Duration::from_millis(500);
-    let store = seed_backlog(store, &hub.config.data_dir, 20, 200_000);
+    // Четыре пакета по 900 мс: весь хвост идёт дольше двух сроков подтверждения, так что
+    // без сброса таймера головы по прогрессу сеанс перезапустился бы. Двадцать записей
+    // (десять пакетов) проверяли то же за 9 с.
+    let store = seed_backlog(store, &hub.config.data_dir, 8, 200_000);
     let (stop, mut state, join) = start(hub.config.clone(), store);
     live_without_backoff(&mut state).await;
     stop_worker(stop, join).await;
