@@ -116,6 +116,7 @@ async fn nul_in_any_text_of_a_record_never_refuses_the_record() -> TestResult {
                 fresh_fork: false,
                 canonical_workdir: String::new(),
                 canonical_source: String::new(),
+                interrupted_git: None,
             }),
         ),
         (

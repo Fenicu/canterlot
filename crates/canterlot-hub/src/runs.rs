@@ -321,6 +321,32 @@ pub async fn close_open_in_tx(
     Ok(())
 }
 
+/// Факты git хода, который CLI не закончил: воркер снял их после смерти CLI и прислал с
+/// конечным состоянием. Они ложатся на последний ход, закрытый хабом без фактов; ход
+/// остаётся прерванным (`forced_close`), а обычный конец хода они не трогают.
+pub async fn store_interrupted_git(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+    git: &GitFacts,
+) -> Result<(), sqlx::Error> {
+    if !git.available {
+        return Ok(());
+    }
+    let value =
+        serde_json::to_value(StoredGit::from(git)).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    sqlx::query(
+        "update runs set git=$2 where input_command_id=(
+           select input_command_id from runs
+            where execution_id=$1 and forced_close and git is null
+            order by started_at desc, input_command_id desc limit 1)",
+    )
+    .bind(execution_id)
+    .bind(value)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 /// Рабочее время закрытого хода: представление считает его, пока `working_ms` пуст.
 async fn store_working(conn: &mut PgConnection, command: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("update runs r set working_ms=w.working_ms from run_working w where w.input_command_id=r.input_command_id and r.input_command_id=$1")

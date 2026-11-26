@@ -557,6 +557,7 @@ impl Watch {
                     fresh_fork: false,
                     canonical_workdir: String::new(),
                     canonical_source: String::new(),
+                    interrupted_git: None,
                 };
                 let seq = store.append_cj_fact(Body::ExecutionState(state.clone()))?;
                 let mut record = store

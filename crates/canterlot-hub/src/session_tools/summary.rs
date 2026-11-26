@@ -161,6 +161,8 @@ pub struct SessionSummary {
     unfinished: Vec<(Unfinished, i64)>,
     /// Вид последнего хода окна, если он не закончился: тогда факты git старше его работы.
     last_unfinished: Option<Unfinished>,
+    /// У незаконченного последнего хода есть свои факты git: воркер снял их после смерти CLI.
+    last_unfinished_git: bool,
     duration_ms: Option<i64>,
     working_ms: Option<i64>,
     /// `None`, пока расход незаконченного хода неизвестен и законченных ходов нет.
@@ -434,6 +436,12 @@ pub async fn build_bounded(
         .filter_map(|(run, end)| end.map(|end| (end, run.1.unwrap_or(0))))
         .collect();
     let last_unfinished = ends.last().copied().flatten();
+    let last_unfinished_git = last_unfinished.is_some()
+        && runs
+            .last()
+            .and_then(|run| run.2.clone())
+            .and_then(|value| serde_json::from_value::<RunGit>(value).ok())
+            .is_some_and(|git| git.available);
     // Удержанный итог снят в момент, когда цель уже устоялась: идущего хода в нём нет.
     let active = if boundary.is_some() {
         false
@@ -598,6 +606,7 @@ pub async fn build_bounded(
         turns,
         unfinished,
         last_unfinished,
+        last_unfinished_git,
         duration_ms: if turns.is_some() {
             Some(runs.iter().filter_map(|run| run.1).sum())
         } else {
@@ -748,11 +757,13 @@ fn list(lines: impl ExactSizeIterator<Item = String>, budget: usize, noun: &str)
 }
 
 /// `unfinished` — вид последнего хода окна, если он не закончился: факты git воркер
-/// снимает только на конце хода, поэтому работа такого хода в них не попала.
+/// снимает на конце хода, поэтому работа такого хода в них не попала. Исключение —
+/// `unfinished_git`: воркер пережил CLI и снял факты оборванного хода после его смерти.
 fn git_section(
     git: Option<&Git>,
     worktree: Option<&(String, String)>,
     unfinished: Option<Unfinished>,
+    unfinished_git: bool,
 ) -> String {
     let Some(git) = git else {
         return match (worktree, unfinished) {
@@ -820,12 +831,22 @@ fn git_section(
         "Uncommitted changes: {}",
         if git.dirty { "yes" } else { "no" }
     );
-    if let Some(end) = unfinished {
-        let _ = writeln!(
-            out,
-            "Git facts are from the last finished turn; the {} turn may have changed more.",
-            end.word()
-        );
+    match unfinished {
+        Some(end) if unfinished_git => {
+            let _ = writeln!(
+                out,
+                "Git facts include the {} turn, read after its CLI stopped.",
+                end.word()
+            );
+        }
+        Some(end) => {
+            let _ = writeln!(
+                out,
+                "Git facts are from the last finished turn; the {} turn may have changed more.",
+                end.word()
+            );
+        }
+        None => {}
     }
     out
 }
@@ -1021,6 +1042,7 @@ pub fn render_bounded(summary: &SessionSummary, limit: usize) -> String {
         summary.git.as_ref(),
         summary.worktree.as_ref(),
         summary.last_unfinished,
+        summary.last_unfinished_git,
     ));
     head.push_str(&tests_section(&summary.tests));
     if let Some((path, branch)) = &summary.worktree {

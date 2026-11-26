@@ -1270,6 +1270,9 @@ fn bounded_metadata(body: &Body) -> Cow<'_, Body> {
         Body::ExecutionState(f) => {
             f.outcome = bounded_text(&f.outcome, 1024);
             blocks::replace_nul(&mut f.native_conversation_id);
+            if let Some(git) = &mut f.interrupted_git {
+                crate::runs::bound_git(git);
+            }
         }
         Body::RunFinished(f) => {
             for usage in &mut f.usage {
@@ -1599,6 +1602,10 @@ async fn apply_body(
                         .await?;
                     }
                     if matches!(to, ExecutionState::Stopped | ExecutionState::Failed) {
+                        // Ход, оборванный смертью CLI, хаб уже закрыл этим переходом.
+                        if let Some(git) = &fact.interrupted_git {
+                            crate::runs::store_interrupted_git(conn, execution_id, git).await?;
+                        }
                         sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = case when kind in ('stop_execution', 'resolve_owner_lost') then jsonb_build_object('outcome', $3::text) else jsonb_build_object('status', 'superseded') end, last_status = case when kind = 'interrupt' then 'superseded' else last_status end where execution_id = $1 and machine_id = $2 and kind in ('stop_execution', 'interrupt', 'resolve_owner_lost') and delivery_state <> 'completed'")
                             .bind(execution_id).bind(machine_id).bind(&stored_outcome).execute(&mut *conn).await?;
                         if let Some(outcome) = stored_outcome.as_deref().filter(|outcome| {

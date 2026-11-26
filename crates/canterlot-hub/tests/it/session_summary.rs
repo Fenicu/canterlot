@@ -475,6 +475,145 @@ async fn crash_after_a_finished_turn_keeps_its_facts(pool: PgPool) {
     assert_eq!(whole_minutes(&whole_minutes(&text, "12"), "16"), expected);
 }
 
+/// Факты git, которые воркер снял после смерти CLI и прислал с конечным состоянием.
+async fn set_interrupted_git(pool: &PgPool, command: Uuid, git: Value) {
+    sqlx::query("update runs set git=$2 where input_command_id=$1 and forced_close")
+        .bind(command)
+        .bind(git)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// CLI умер посреди первого хода, но воркер успел снять факты git: итог показывает коммит
+/// и грязную копию вместо «unknown» и коротко говорит, что ход прерван.
+async fn crash_mid_first_turn_shows_its_git_facts(pool: PgPool) {
+    let f = fixture(&pool).await;
+    set_worktree(&pool, &f).await;
+    let open = open_run(&pool, &f, 62).await;
+    crash(&pool, &f).await;
+    set_interrupted_git(
+        &pool,
+        open,
+        git(
+            "1a2b3c4d5e6f",
+            "5d6e7f8a9b0c",
+            true,
+            &[("5d6e7f8a9b0c", "Parse the header")],
+            &[("src/a.rs", "M")],
+        ),
+    )
+    .await;
+    derive(
+        &pool,
+        &f,
+        "failed",
+        &Evidence::Failed {
+            reason: "crashed".into(),
+        },
+    )
+    .await;
+
+    let text = text_for(
+        &pool,
+        &f,
+        "failed",
+        Some(Utc::now() - TimeDelta::minutes(70)),
+    )
+    .await;
+    let expected = format!(
+        "[canterlot] Session \"Build parser\" (id {}, claude_code, model sonnet) is now failed.\n\
+         Reason: crashed.\n\
+         Turns: 0 finished, 1 interrupted after 1h02m00s; tokens in/out unknown.\n\
+         HEAD 1a2b3c4 -> 5d6e7f8, 1 commit:\n\
+         - 5d6e7f8 Parse the header\n\
+         Changed files (1):\n\
+         M src/a.rs\n\
+         Uncommitted changes: yes\n\
+         Git facts include the interrupted turn, read after its CLI stopped.\n\
+         {WORKTREE}\
+         Final answer: none.\n\
+         \n\
+         {FAILED_NEXT}",
+        f.target
+    );
+    assert_eq!(whole_minutes(&text, "1h02"), expected);
+}
+
+/// Законченный ход и оборванный следующий с фактами: факты обоих ходов сложены, а
+/// оговорки «от последнего законченного хода» нет.
+async fn crash_after_a_finished_turn_adds_the_interrupted_facts(pool: PgPool) {
+    let f = fixture(&pool).await;
+    set_worktree(&pool, &f).await;
+    add_run(
+        &pool,
+        &f,
+        Run {
+            finished_at: Utc::now() - TimeDelta::minutes(13),
+            duration_ms: 240_000,
+            git: Some(git(
+                "1a2b3c4d5e6f",
+                "5d6e7f8a9b0c",
+                false,
+                &[("5d6e7f8a9b0c", "Parse the header")],
+                &[("src/a.rs", "M")],
+            )),
+            tokens: (12345, 678),
+        },
+    )
+    .await;
+    let open = open_run(&pool, &f, 12).await;
+    crash(&pool, &f).await;
+    set_interrupted_git(
+        &pool,
+        open,
+        git(
+            "5d6e7f8a9b0c",
+            "9e8d7c6b5a4f",
+            true,
+            &[("9e8d7c6b5a4f", "Parse the body")],
+            &[("src/b.rs", "A")],
+        ),
+    )
+    .await;
+    derive(
+        &pool,
+        &f,
+        "failed",
+        &Evidence::Failed {
+            reason: "crashed".into(),
+        },
+    )
+    .await;
+
+    let text = text_for(
+        &pool,
+        &f,
+        "failed",
+        Some(Utc::now() - TimeDelta::minutes(20)),
+    )
+    .await;
+    let expected = format!(
+        "[canterlot] Session \"Build parser\" (id {}, claude_code, model sonnet) is now failed.\n\
+         Reason: crashed.\n\
+         Turns: 1 finished, 1 interrupted after 12m00s; duration 16m00s, tokens in/out 12345/678 in finished turns.\n\
+         HEAD 1a2b3c4 -> 9e8d7c6, 2 commits:\n\
+         - 9e8d7c6 Parse the body\n\
+         - 5d6e7f8 Parse the header\n\
+         Changed files (2):\n\
+         M src/a.rs\n\
+         A src/b.rs\n\
+         Uncommitted changes: yes\n\
+         Git facts include the interrupted turn, read after its CLI stopped.\n\
+         {WORKTREE}\
+         Final answer: none.\n\
+         \n\
+         {FAILED_NEXT}",
+        f.target
+    );
+    assert_eq!(whole_minutes(&whole_minutes(&text, "12"), "16"), expected);
+}
+
 /// Итог сессии, которая упала, зависла или потерялась посреди хода: каждый случай
 /// заводит свою цель на общей базе.
 #[tokio::test]
@@ -485,5 +624,7 @@ async fn unfinished_turn_cases() {
         stall_mid_turn_reports_the_running_turn,
         owner_lost_mid_turn_reports_the_lost_turn,
         crash_after_a_finished_turn_keeps_its_facts,
+        crash_mid_first_turn_shows_its_git_facts,
+        crash_after_a_finished_turn_adds_the_interrupted_facts,
     );
 }

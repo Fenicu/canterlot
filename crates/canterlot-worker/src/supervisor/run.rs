@@ -706,6 +706,7 @@ impl Supervisor {
                 fresh_fork,
                 canonical_workdir,
                 canonical_source,
+                interrupted_git: None,
             },
         ))?;
         Ok(())

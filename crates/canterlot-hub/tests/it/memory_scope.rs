@@ -343,6 +343,7 @@ fn running(
                 fresh_fork: false,
                 canonical_workdir: canonical.into(),
                 canonical_source: source.into(),
+                interrupted_git: None,
             })),
         }),
     }

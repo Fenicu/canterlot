@@ -587,6 +587,7 @@ pub(super) async fn report_owner_lost(
                 fresh_fork: false,
                 canonical_workdir: String::new(),
                 canonical_source: String::new(),
+                interrupted_git: None,
             })],
             vec![],
         )
@@ -756,6 +757,7 @@ pub(super) async fn reclaim_owner(
                 fresh_fork: false,
                 canonical_workdir: String::new(),
                 canonical_source: String::new(),
+                interrupted_git: None,
             }))?;
             let mut record = store
                 .ownership()
@@ -1337,6 +1339,7 @@ pub(super) async fn answer_without_execution(
                         fresh_fork: false,
                         canonical_workdir: String::new(),
                         canonical_source: String::new(),
+                        interrupted_git: None,
                     })],
                     terminal_self(command),
                 )
@@ -2074,6 +2077,7 @@ impl Actor {
                     fresh_fork: false,
                     canonical_workdir: String::new(),
                     canonical_source: String::new(),
+                    interrupted_git: None,
                 })],
                 terminal,
             )

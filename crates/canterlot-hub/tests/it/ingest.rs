@@ -723,6 +723,7 @@ async fn execution_facts_and_unknown_command_receipts_are_consumed(pool: PgPool)
             fresh_fork: false,
             canonical_workdir: String::new(),
             canonical_source: String::new(),
+            interrupted_git: None,
         })
     };
     let journal = Uuid::now_v7();
@@ -1068,6 +1069,7 @@ fn execution_fact(execution_id: Uuid, generation: i64, state: &str) -> record_bo
         fresh_fork: false,
         canonical_workdir: String::new(),
         canonical_source: String::new(),
+        interrupted_git: None,
     })
 }
 

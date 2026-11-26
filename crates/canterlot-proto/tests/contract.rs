@@ -417,6 +417,7 @@ fn exec_records_roundtrip() {
         fresh_fork: false,
         canonical_workdir: "/h/work/p".into(),
         canonical_source: "/h/work/src".into(),
+        interrupted_git: None,
     });
     assert_roundtrip(BlockStarted {
         block_id: "block".into(),
@@ -2137,7 +2138,10 @@ fn start_execution_remote_is_field_17_and_costs_nothing_when_unset() {
 
 #[test]
 fn side_chat_fields_are_additive_on_both_hops() {
-    use canterlot_proto::worker::{ipc, v1::ExecutionState};
+    use canterlot_proto::worker::{
+        ipc,
+        v1::{ExecutionState, GitFacts},
+    };
     // Неизвестное поле старый получатель пропускает, а его отсутствие значит обычный запуск.
     let start = StartExecution {
         fork_from_native: "parent".into(),
@@ -2233,6 +2237,33 @@ fn side_chat_fields_are_additive_on_both_hops() {
         &wire[old_wire.len()..],
         [&[0x42, 7][..], b"/h/work"].concat(),
         "ExecutionState.canonical_source is field 8"
+    );
+    assert_roundtrip(state);
+
+    // Факты git прерванного хода: поле 9, хвостом; без них запись прежняя байт в байт.
+    let old_wire = ExecutionState {
+        state: "failed".into(),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let git = GitFacts {
+        available: true,
+        head_after: "abc".into(),
+        dirty: true,
+        ..Default::default()
+    };
+    let state = ExecutionState {
+        state: "failed".into(),
+        interrupted_git: Some(git.clone()),
+        ..Default::default()
+    };
+    let wire = state.encode_to_vec();
+    assert_eq!(&wire[..old_wire.len()], old_wire.as_slice());
+    let git_wire = git.encode_to_vec();
+    assert_eq!(
+        &wire[old_wire.len()..],
+        [&[0x4a, git_wire.len() as u8][..], &git_wire].concat(),
+        "ExecutionState.interrupted_git is field 9"
     );
     assert_roundtrip(state);
 

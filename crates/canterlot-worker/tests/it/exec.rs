@@ -1164,6 +1164,7 @@ async fn crash_between_reclaim_fact_and_ownership_repeats_the_proof() {
                         fresh_fork: false,
                         canonical_workdir: String::new(),
                         canonical_source: String::new(),
+                        interrupted_git: None,
                     },
                 ))?;
             Ok(())

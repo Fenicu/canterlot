@@ -146,6 +146,7 @@ fn execution_fact(run: &StartedExecution, state: &str, outcome: &str) -> Body {
         fresh_fork: false,
         canonical_workdir: String::new(),
         canonical_source: String::new(),
+        interrupted_git: None,
     })
 }
 
