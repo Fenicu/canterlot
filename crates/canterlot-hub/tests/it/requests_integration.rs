@@ -21,6 +21,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn schema() -> Value {
@@ -81,9 +83,7 @@ fn block_started(id: Uuid, kind: &str) -> record_body::Body {
     })
 }
 
-#[tokio::test]
-async fn worker_journal_cannot_open_hub_owned_requests() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn worker_journal_cannot_open_hub_owned_requests(pool: PgPool) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
     for kind in ["settings_change", "spawn_approval"] {
         let request = Uuid::now_v7();
@@ -125,9 +125,7 @@ async fn worker_journal_cannot_open_hub_owned_requests() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn worker_journal_cannot_close_hub_owned_requests() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn worker_journal_cannot_close_hub_owned_requests(pool: PgPool) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
     let mut facts = Vec::new();
     for (kind, state, winner) in [
@@ -186,9 +184,7 @@ async fn worker_journal_cannot_close_hub_owned_requests() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn request_keeps_its_place_in_history_among_the_blocks() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn request_keeps_its_place_in_history_among_the_blocks(pool: PgPool) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
     let (call, later, request) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     let question = json!({"questions": [{"id": "q1", "text": "Продолжать?", "options": ["Да"]}]});
@@ -260,9 +256,9 @@ async fn request_keeps_its_place_in_history_among_the_blocks() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn open_request_of_a_stopped_execution_comes_back_closed_in_history() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn open_request_of_a_stopped_execution_comes_back_closed_in_history(
+    pool: PgPool,
+) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
     let request = Uuid::now_v7();
     let question = json!({"questions": [{"id": "q1", "text": "Продолжать?", "options": ["Да"]}]});
@@ -308,9 +304,7 @@ async fn open_request_of_a_stopped_execution_comes_back_closed_in_history() -> T
     Ok(())
 }
 
-#[tokio::test]
-async fn ingest_request_opened_inserts_request_row_and_emits_wss_event() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn ingest_request_opened_inserts_request_row_and_emits_wss_event(pool: PgPool) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
     let journal = Uuid::now_v7();
     let ingest = Ingest::new(pool.clone());
@@ -424,9 +418,9 @@ async fn ingest_request_opened_inserts_request_row_and_emits_wss_event() -> Test
     Ok(())
 }
 
-#[tokio::test]
-async fn open_request_sets_activity_waiting_for_user_with_question_summary() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn open_request_sets_activity_waiting_for_user_with_question_summary(
+    pool: PgPool,
+) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
     let req_id = Uuid::now_v7();
     let long_question = "A".repeat(150);
@@ -491,9 +485,7 @@ async fn open_request_sets_activity_waiting_for_user_with_question_summary() -> 
     Ok(())
 }
 
-#[tokio::test]
-async fn waiting_for_user_with_open_request_is_immune_from_stalled() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn waiting_for_user_with_open_request_is_immune_from_stalled(pool: PgPool) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
     let mut tx = pool.begin().await?;
     canterlot_hub::requests::create_request_in_tx(
@@ -542,9 +534,7 @@ async fn waiting_for_user_with_open_request_is_immune_from_stalled() -> TestResu
     Ok(())
 }
 
-#[tokio::test]
-async fn open_request_places_awaiting_user_request_queue_hold() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn open_request_places_awaiting_user_request_queue_hold(pool: PgPool) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
     let journal = Uuid::now_v7();
     let ingest = Ingest::new(pool.clone());
@@ -603,9 +593,9 @@ async fn open_request_places_awaiting_user_request_queue_hold() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn terminal_decision_applied_clears_queue_hold_and_emits_request_closed() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn terminal_decision_applied_clears_queue_hold_and_emits_request_closed(
+    pool: PgPool,
+) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
     let journal = Uuid::now_v7();
     let ingest = Ingest::new(pool.clone());
@@ -699,9 +689,7 @@ async fn terminal_decision_applied_clears_queue_hold_and_emits_request_closed() 
     Ok(())
 }
 
-#[tokio::test]
-async fn conversation_snapshot_includes_open_requests() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn conversation_snapshot_includes_open_requests(pool: PgPool) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
 
     let open_req_id = Uuid::now_v7();
@@ -761,9 +749,9 @@ async fn conversation_snapshot_includes_open_requests() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn decision_transmission_started_emits_request_transmitting_event() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn decision_transmission_started_emits_request_transmitting_event(
+    pool: PgPool,
+) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
     let journal = Uuid::now_v7();
     let ingest = Ingest::new(pool.clone());
@@ -884,9 +872,9 @@ async fn decision_transmission_started_emits_request_transmitting_event() -> Tes
     Ok(())
 }
 
-#[tokio::test]
-async fn snapshot_open_requests_include_saved_and_transmitting_requests() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn snapshot_open_requests_include_saved_and_transmitting_requests(
+    pool: PgPool,
+) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
 
     let states = [
@@ -1062,9 +1050,7 @@ fn events_schema_validates_request_opened_decided_closed() {
     );
 }
 
-#[tokio::test]
-async fn sj_poison_record_rolls_back_synchronously() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn sj_poison_record_rolls_back_synchronously(pool: PgPool) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
     let journal = Uuid::now_v7();
     let ingest = Ingest::new(pool.clone());
@@ -1176,9 +1162,9 @@ fn cj(journal: Uuid, bodies: Vec<record_body::Body>) -> JournalRecords {
     batch(journal, bodies)
 }
 
-#[tokio::test]
-async fn cj_decision_not_applied_closes_request_and_keeps_control_journal_moving() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn cj_decision_not_applied_closes_request_and_keeps_control_journal_moving(
+    pool: PgPool,
+) -> TestResult {
     let (seed, execution) = setup_running_execution(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let request = open_native_request(
@@ -1314,9 +1300,7 @@ async fn closed_events(pool: &PgPool, request: Uuid) -> usize {
     .unwrap() as usize
 }
 
-#[tokio::test]
-async fn decision_outcome_completes_only_the_command_of_its_request() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn decision_outcome_completes_only_the_command_of_its_request(pool: PgPool) {
     let (seed, execution) = setup_running_execution(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let journal = Uuid::now_v7();
@@ -1344,9 +1328,7 @@ async fn decision_outcome_completes_only_the_command_of_its_request() {
     assert_eq!(request_state(&pool, second).await, "decision_saved");
 }
 
-#[tokio::test]
-async fn decision_facts_respect_request_state_and_winner() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn decision_facts_respect_request_state_and_winner(pool: PgPool) {
     let (seed, execution) = setup_running_execution(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let journal = Uuid::now_v7();
@@ -1429,9 +1411,7 @@ async fn decision_facts_respect_request_state_and_winner() {
     assert_eq!(command_state(&pool, command).await, "completed");
 }
 
-#[tokio::test]
-async fn unconfirmed_decision_leaves_transmitting_and_late_proof_applies_it() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn unconfirmed_decision_leaves_transmitting_and_late_proof_applies_it(pool: PgPool) {
     let (seed, execution) = setup_running_execution(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let journal = Uuid::now_v7();
@@ -1510,9 +1490,7 @@ async fn closed_reason(pool: &PgPool, request: Uuid) -> Vec<String> {
     .unwrap()
 }
 
-#[tokio::test]
-async fn ended_execution_closes_its_requests_and_releases_the_queue() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn ended_execution_closes_its_requests_and_releases_the_queue(pool: PgPool) {
     let (seed, execution) = setup_running_execution(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let journal = Uuid::now_v7();
@@ -1620,9 +1598,7 @@ async fn ended_execution_closes_its_requests_and_releases_the_queue() {
     );
 }
 
-#[tokio::test]
-async fn owner_lost_execution_closes_its_open_requests() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn owner_lost_execution_closes_its_open_requests(pool: PgPool) {
     let (seed, execution) = setup_running_execution(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let request = open_native_request(
@@ -1658,9 +1634,7 @@ async fn owner_lost_execution_closes_its_open_requests() {
     );
 }
 
-#[tokio::test]
-async fn decision_stored_on_the_machine_is_unconfirmed_when_the_owner_is_lost() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn decision_stored_on_the_machine_is_unconfirmed_when_the_owner_is_lost(pool: PgPool) {
     let (seed, execution) = setup_running_execution(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let journal = Uuid::now_v7();
@@ -1720,9 +1694,7 @@ fn not_applied(native: &str, decision: Uuid, reason: &str) -> record_body::Body 
     })
 }
 
-#[tokio::test]
-async fn resent_decision_refused_as_already_transmitted_keeps_request_state() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn resent_decision_refused_as_already_transmitted_keeps_request_state(pool: PgPool) {
     let (seed, execution) = setup_running_execution(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let journal = Uuid::now_v7();
@@ -1791,9 +1763,7 @@ async fn resent_decision_refused_as_already_transmitted_keeps_request_state() {
     assert_eq!(closed_reason(&pool, request).await, ["applied"]);
 }
 
-#[tokio::test]
-async fn nul_in_request_payload_does_not_wedge_the_session_journal() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn nul_in_request_payload_does_not_wedge_the_session_journal(pool: PgPool) {
     let (seed, execution) = setup_running_execution(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let journal = Uuid::now_v7();
@@ -1850,9 +1820,7 @@ async fn blocked_or_done<T>(pool: &PgPool, task: &tokio::task::JoinHandle<T>) {
     panic!("background transaction neither blocked nor finished");
 }
 
-#[tokio::test]
-async fn request_opened_after_events_in_one_batch_does_not_invert_lock_order() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn request_opened_after_events_in_one_batch_does_not_invert_lock_order(pool: PgPool) {
     let (seed, execution) = setup_running_execution(&pool).await;
     // Решение владельца: строка разговора, затем счётчик событий разговора.
     let mut decision = pool.begin().await.unwrap();
@@ -1918,9 +1886,7 @@ async fn request_opened_after_events_in_one_batch_does_not_invert_lock_order() {
     );
 }
 
-#[tokio::test]
-async fn cj_decision_fact_of_another_machine_changes_nothing() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn cj_decision_fact_of_another_machine_changes_nothing(pool: PgPool) {
     let (seed, execution) = setup_running_execution(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let request = open_native_request(
@@ -1952,9 +1918,7 @@ async fn cj_decision_fact_of_another_machine_changes_nothing() {
     assert_eq!(command_state(&pool, command).await, "pending");
 }
 
-#[tokio::test]
-async fn decision_command_rejected_by_the_worker_closes_the_request() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn decision_command_rejected_by_the_worker_closes_the_request(pool: PgPool) {
     let (seed, execution) = setup_running_execution(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let request = open_native_request(
@@ -2006,4 +1970,62 @@ async fn decision_command_rejected_by_the_worker_closes_the_request() {
             .unwrap();
     assert_eq!(delivery, "completed");
     assert!(payload.get("decision_payload").is_none(), "{payload}");
+}
+
+/// Запросы владельцу: только хаб открывает и закрывает свои, место в истории,
+/// событие WSS, ожидание владельца, удержание очереди и его снятие.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn request_open_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        worker_journal_cannot_open_hub_owned_requests,
+        worker_journal_cannot_close_hub_owned_requests,
+        request_keeps_its_place_in_history_among_the_blocks,
+        open_request_of_a_stopped_execution_comes_back_closed_in_history,
+        ingest_request_opened_inserts_request_row_and_emits_wss_event,
+        open_request_sets_activity_waiting_for_user_with_question_summary,
+        waiting_for_user_with_open_request_is_immune_from_stalled,
+        open_request_places_awaiting_user_request_queue_hold,
+        terminal_decision_applied_clears_queue_hold_and_emits_request_closed,
+    );
+}
+
+/// Снимок с открытыми запросами, передача решения, отравленная запись SJ, решение
+/// не применено, итог только своей команды, неподтверждённое решение.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn decision_transmit_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        conversation_snapshot_includes_open_requests,
+        decision_transmission_started_emits_request_transmitting_event,
+        snapshot_open_requests_include_saved_and_transmitting_requests,
+        sj_poison_record_rolls_back_synchronously,
+        cj_decision_not_applied_closes_request_and_keeps_control_journal_moving,
+        decision_outcome_completes_only_the_command_of_its_request,
+        decision_facts_respect_request_state_and_winner,
+        unconfirmed_decision_leaves_transmitting_and_late_proof_applies_it,
+        ended_execution_closes_its_requests_and_releases_the_queue,
+    );
+}
+
+/// Потерянный владелец, повторно отправленное решение, NUL в запросе, порядок
+/// замков в пакете, чужая машина, отказ воркера.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn lost_owner_and_refusal_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        owner_lost_execution_closes_its_open_requests,
+        decision_stored_on_the_machine_is_unconfirmed_when_the_owner_is_lost,
+        resent_decision_refused_as_already_transmitted_keeps_request_state,
+        nul_in_request_payload_does_not_wedge_the_session_journal,
+        request_opened_after_events_in_one_batch_does_not_invert_lock_order,
+        cj_decision_fact_of_another_machine_changes_nothing,
+        decision_command_rejected_by_the_worker_closes_the_request,
+    );
 }
