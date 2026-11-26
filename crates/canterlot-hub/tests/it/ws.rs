@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use support::{Fixture, seq};
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 const WAIT: Duration = Duration::from_secs(5);
 
 struct Hub {
@@ -249,9 +251,7 @@ fn merge_window_is_bounded_to_25ms_and_64kib_serialized() {
     );
 }
 
-#[tokio::test]
-async fn ws_upgrade_with_foreign_origin_is_refused() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn ws_upgrade_with_foreign_origin_is_refused(pool: PgPool) {
     let h = Hub::new(pool, |_| {}).await;
     let e = TestWs::connect(h.addr, "https://foreign.test", Some(TEST_SESSION_TOKEN))
         .await
@@ -260,9 +260,7 @@ async fn ws_upgrade_with_foreign_origin_is_refused() {
     assert!(matches!(e,tokio_tungstenite::tungstenite::Error::Http(r) if r.status().as_u16()==403));
     h.stop().await;
 }
-#[tokio::test]
-async fn ws_upgrade_from_untrusted_peer_is_unauthenticated() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn ws_upgrade_from_untrusted_peer_is_unauthenticated(pool: PgPool) {
     let h = Hub::new(pool, |c| {
         c.trusted_proxies = vec!["192.0.2.1/32".parse().unwrap()]
     })
@@ -274,9 +272,7 @@ async fn ws_upgrade_from_untrusted_peer_is_unauthenticated() {
     assert!(matches!(e,tokio_tungstenite::tungstenite::Error::Http(r) if r.status().as_u16()==401));
     h.stop().await;
 }
-#[tokio::test]
-async fn subscribe_from_cursor_replays_missed_events_in_order() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn subscribe_from_cursor_replays_missed_events_in_order(pool: PgPool) {
     let h = Hub::new(pool, |_| {}).await;
     for _ in 0..8 {
         h.f.emit("run_finished", json!({})).await;
@@ -291,9 +287,7 @@ async fn subscribe_from_cursor_replays_missed_events_in_order() {
     w.close().await;
     h.stop().await;
 }
-#[tokio::test]
-async fn backlog_over_replay_limit_gets_resync_instead_of_replay() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn backlog_over_replay_limit_gets_resync_instead_of_replay(pool: PgPool) {
     let h = Hub::new(pool, |c| c.ws.replay_limit = 3).await;
     for _ in 0..8 {
         h.f.emit("run_finished", json!({})).await;
@@ -320,9 +314,9 @@ async fn backlog_over_replay_limit_gets_resync_instead_of_replay() {
     w.close().await;
     h.stop().await;
 }
-#[tokio::test]
-async fn subscription_to_foreign_scope_is_forbidden_and_indistinguishable_from_missing() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn subscription_to_foreign_scope_is_forbidden_and_indistinguishable_from_missing(
+    pool: PgPool,
+) {
     let h = Hub::new(pool, |_| {}).await;
     let foreign = testkit::seed(&h.f.pool).await;
     let mut conn = h.f.pool.acquire().await.unwrap();
@@ -368,9 +362,7 @@ async fn subscription_to_foreign_scope_is_forbidden_and_indistinguishable_from_m
     w.close().await;
     h.stop().await;
 }
-#[tokio::test]
-async fn internal_kinds_advance_the_cursor_without_payload() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn internal_kinds_advance_the_cursor_without_payload(pool: PgPool) {
     let h = Hub::new(pool, |_| {}).await;
     h.f.emit("run_finished", json!({})).await;
     h.f.emit("journal_closed", json!({"private":"internal text"}))
@@ -430,9 +422,7 @@ async fn backlog_text(h: &Hub, count: i64, text: &str) {
     tx.commit().await.unwrap();
 }
 
-#[tokio::test]
-async fn review_fix_small_queue_catches_up_across_reconnects() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn review_fix_small_queue_catches_up_across_reconnects(pool: PgPool) {
     for text in ["x".repeat(16384), "\"\\я🦄".repeat(2048)] {
         let h = Hub::new(pool.clone(), |c| c.ws.queue_bytes = 32768).await;
         assert!(h.f.state.http.validate().is_ok());
@@ -476,9 +466,7 @@ async fn review_fix_small_queue_catches_up_across_reconnects() {
     }
 }
 
-#[tokio::test]
-async fn review_fix_oversized_summary_commits_and_reaches_ws() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn review_fix_oversized_summary_commits_and_reaches_ws(pool: PgPool) {
     use canterlot_hub::{
         executions,
         ingest::{Ingest, IngestOutcome, JournalKind},
@@ -588,9 +576,7 @@ async fn review_fix_oversized_summary_commits_and_reaches_ws() {
     h.stop().await;
 }
 
-#[tokio::test]
-async fn review_fix_oversized_event_has_http_reference_and_resume_advances() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn review_fix_oversized_event_has_http_reference_and_resume_advances(pool: PgPool) {
     for budget in [1048576, 4096] {
         let h = Hub::new(pool.clone(), |c| c.ws.queue_bytes = budget).await;
         assert!(h.f.state.http.validate().is_ok());
@@ -637,9 +623,7 @@ async fn review_fix_oversized_event_has_http_reference_and_resume_advances() {
         h.stop().await;
     }
 }
-#[tokio::test]
-async fn catch_up_over_a_slow_link_completes_without_lagged() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn catch_up_over_a_slow_link_completes_without_lagged(pool: PgPool) {
     const EVENTS: i64 = 600;
     // Читатель медленнее хаба на каждом кадре, а срок зависания короткий: учёт ожидания медленного
     // читателя как зависания оборвал бы догон за секунды, а не за 15 с.
@@ -665,9 +649,9 @@ async fn catch_up_over_a_slow_link_completes_without_lagged() {
     w.close().await;
     h.stop().await;
 }
-#[tokio::test]
-async fn slow_client_subscription_is_cut_with_cursor_while_other_clients_keep_streaming() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn slow_client_subscription_is_cut_with_cursor_while_other_clients_keep_streaming(
+    pool: PgPool,
+) {
     use canterlot_hub::fault_injection::Point;
     const EVENTS: i64 = 64;
     let h = Hub::new(pool, |c| {
@@ -736,9 +720,7 @@ async fn slow_client_subscription_is_cut_with_cursor_while_other_clients_keep_st
     fast.close().await;
     h.stop().await;
 }
-#[tokio::test]
-async fn too_many_subscriptions_is_an_error_not_a_disconnect() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn too_many_subscriptions_is_an_error_not_a_disconnect(pool: PgPool) {
     let h = Hub::new(pool, |_| {}).await;
     let mut w = h.socket().await;
     for n in 0..16 {
@@ -756,9 +738,7 @@ async fn too_many_subscriptions_is_an_error_not_a_disconnect() {
     w.close().await;
     h.stop().await;
 }
-#[tokio::test]
-async fn connection_older_than_max_age_is_closed_with_reauth() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn connection_older_than_max_age_is_closed_with_reauth(pool: PgPool) {
     let h = Hub::new(pool, |c| {
         c.ws.max_connection_age = Duration::from_millis(150)
     })
@@ -772,9 +752,7 @@ async fn connection_older_than_max_age_is_closed_with_reauth() {
     assert_eq!(w.close_code, Some(4401));
     h.stop().await;
 }
-#[tokio::test]
-async fn unsubscribe_stops_delivery() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn unsubscribe_stops_delivery(pool: PgPool) {
     let h = Hub::new(pool, |_| {}).await;
     let mut w = h.socket().await;
     h.subscribe(&mut w, "s", None).await;
@@ -791,9 +769,7 @@ async fn unsubscribe_stops_delivery() {
     w.close().await;
     h.stop().await;
 }
-#[tokio::test]
-async fn events_wake_the_pump_without_waiting_for_the_poll_interval() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn events_wake_the_pump_without_waiting_for_the_poll_interval(pool: PgPool) {
     let h = Hub::new(pool, |c| c.ws.poll_interval = Duration::from_secs(5)).await;
     let mut w = h.socket().await;
     h.subscribe(&mut w, "s", None).await;
@@ -825,9 +801,7 @@ async fn events_wake_the_pump_without_waiting_for_the_poll_interval() {
     w.close().await;
     h.stop().await;
 }
-#[tokio::test]
-async fn stale_cursor_over_wss_gets_one_resync_not_a_loop() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn stale_cursor_over_wss_gets_one_resync_not_a_loop(pool: PgPool) {
     let h = Hub::new(pool, |c| c.ws.poll_interval = Duration::from_millis(25)).await;
     for _ in 0..4 {
         h.f.emit("run_finished", json!({})).await;
@@ -857,9 +831,7 @@ async fn stale_cursor_over_wss_gets_one_resync_not_a_loop() {
     w.close().await;
     h.stop().await;
 }
-#[tokio::test]
-async fn ws_reconnect_during_a_resync_converges_without_a_loop() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn ws_reconnect_during_a_resync_converges_without_a_loop(pool: PgPool) {
     let h = Hub::new(pool.clone(), |_| {}).await;
     for _ in 0..5 {
         h.f.emit("run_finished", json!({})).await;
@@ -904,9 +876,7 @@ async fn ws_reconnect_during_a_resync_converges_without_a_loop() {
     w.close().await;
     h.stop().await;
 }
-#[tokio::test]
-async fn hub_shutdown_closes_sockets_with_1001() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn hub_shutdown_closes_sockets_with_1001(pool: PgPool) {
     let h = Hub::new(pool, |_| {}).await;
     let mut w = h.socket().await;
     h.subscribe(&mut w, "s", None).await;
@@ -915,9 +885,7 @@ async fn hub_shutdown_closes_sockets_with_1001() {
     assert_eq!(w.close_code, Some(1001));
     h.stop().await;
 }
-#[tokio::test]
-async fn ws_frames_validate_against_client_and_server_op_schemas() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn ws_frames_validate_against_client_and_server_op_schemas(pool: PgPool) {
     let h = Hub::new(pool, |_| {}).await;
     let schema: Value =
         serde_json::from_str(include_str!("../../../../docs/api/events.schema.json")).unwrap();
@@ -974,9 +942,7 @@ async fn ws_frames_validate_against_client_and_server_op_schemas() {
     h.stop().await;
 }
 
-#[tokio::test]
-async fn ws_upgrade_requires_identity_secret_and_subprotocol() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn ws_upgrade_requires_identity_secret_and_subprotocol(pool: PgPool) {
     use tokio_tungstenite::{
         client_async,
         tungstenite::{Error, client::IntoClientRequest},
@@ -1044,9 +1010,7 @@ async fn ws_upgrade_requires_identity_secret_and_subprotocol() {
     }
     h.stop().await;
 }
-#[tokio::test]
-async fn ws_upgrade_keeps_connection_slot_and_survives_body_deadline() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn ws_upgrade_keeps_connection_slot_and_survives_body_deadline(pool: PgPool) {
     let h = Hub::new(pool, |c| {
         c.body_read_timeout = Duration::from_millis(30);
         c.max_connections = 1;
@@ -1066,9 +1030,7 @@ async fn ws_upgrade_keeps_connection_slot_and_survives_body_deadline() {
     h.socket().await.close().await;
     h.stop().await;
 }
-#[tokio::test]
-async fn bad_messages_never_create_a_subscription() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn bad_messages_never_create_a_subscription(pool: PgPool) {
     let h = Hub::new(pool, |_| {}).await;
     let mut w = h.socket().await;
     for after in [
@@ -1133,9 +1095,7 @@ fn websocket_resource_config_is_bounded() {
     }
 }
 
-#[tokio::test]
-async fn lost_bus_notice_is_recovered_by_polling_and_wildcard_wakes_all_scopes() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn lost_bus_notice_is_recovered_by_polling_and_wildcard_wakes_all_scopes(pool: PgPool) {
     let h = Hub::new(pool.clone(), |c| {
         c.ws.poll_interval = Duration::from_millis(50)
     })
@@ -1187,9 +1147,7 @@ async fn lost_bus_notice_is_recovered_by_polling_and_wildcard_wakes_all_scopes()
     h.stop().await;
 }
 
-#[tokio::test]
-async fn subscribe_without_after_starts_at_its_announced_head_under_a_commit_race() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn subscribe_without_after_starts_at_its_announced_head_under_a_commit_race(pool: PgPool) {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1262,4 +1220,61 @@ async fn subscribe_without_after_starts_at_its_announced_head_under_a_commit_rac
     w.close().await;
     h.stop().await;
     request_pool.close().await;
+}
+
+/// WSS: чужой Origin и сосед, повтор с курсора, ресинк вместо повтора, чужая
+/// область, внутренние виды, догоняющая очередь, большие события.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn ws_replay_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        ws_upgrade_with_foreign_origin_is_refused,
+        ws_upgrade_from_untrusted_peer_is_unauthenticated,
+        subscribe_from_cursor_replays_missed_events_in_order,
+        backlog_over_replay_limit_gets_resync_instead_of_replay,
+        subscription_to_foreign_scope_is_forbidden_and_indistinguishable_from_missing,
+        internal_kinds_advance_the_cursor_without_payload,
+        review_fix_small_queue_catches_up_across_reconnects,
+        review_fix_oversized_summary_commits_and_reaches_ws,
+    );
+}
+
+/// Ссылка HTTP на большое событие, медленный канал и клиент, лимит подписок,
+/// возраст соединения, отписка, насос без опроса, устаревший курсор.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn ws_flow_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        review_fix_oversized_event_has_http_reference_and_resume_advances,
+        catch_up_over_a_slow_link_completes_without_lagged,
+        slow_client_subscription_is_cut_with_cursor_while_other_clients_keep_streaming,
+        too_many_subscriptions_is_an_error_not_a_disconnect,
+        connection_older_than_max_age_is_closed_with_reauth,
+        unsubscribe_stops_delivery,
+        events_wake_the_pump_without_waiting_for_the_poll_interval,
+        stale_cursor_over_wss_gets_one_resync_not_a_loop,
+    );
+}
+
+/// Переподключение во время ресинка, остановка хаба, схемы кадров, личность и
+/// подпротокол, слот соединения, плохие сообщения, потерянное уведомление шины.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn ws_protocol_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        ws_reconnect_during_a_resync_converges_without_a_loop,
+        hub_shutdown_closes_sockets_with_1001,
+        ws_frames_validate_against_client_and_server_op_schemas,
+        ws_upgrade_requires_identity_secret_and_subprotocol,
+        ws_upgrade_keeps_connection_slot_and_survives_body_deadline,
+        bad_messages_never_create_a_subscription,
+        lost_bus_notice_is_recovered_by_polling_and_wildcard_wakes_all_scopes,
+        subscribe_without_after_starts_at_its_announced_head_under_a_commit_race,
+    );
 }
