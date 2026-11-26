@@ -414,9 +414,7 @@ fn turns_script(cases: Vec<(Option<Reply>, TurnEnd)>) -> Script {
         .steps
         .iter()
         .find_map(|step| match step {
-            Step::Expect { method, path, .. }
-                if method == "POST" && path.ends_with("/prompt") =>
-            {
+            Step::Expect { method, path, .. } if method == "POST" && path.ends_with("/prompt") => {
                 Some(path.clone())
             }
             _ => None,
@@ -428,9 +426,7 @@ fn turns_script(cases: Vec<(Option<Reply>, TurnEnd)>) -> Script {
         let recorded = format!("msg_clone{n:03}");
         // Привязка клона к живому id нужна и заданному ответу: конец хода ссылается
         // на клон, а подстановка берёт живой id из тела запроса.
-        let bind = [(recorded.clone(), "/id".to_owned())]
-            .into_iter()
-            .collect();
+        let bind = [(recorded.clone(), "/id".to_owned())].into_iter().collect();
         let reply = match reply {
             Some(reply) => reply,
             None => live_reply(&recorded),
@@ -973,7 +969,6 @@ fn preset_text_stays_out_of_debug_output() {
 /// применение — одним запуском.
 fn expected_session_rules() -> Vec<(&'static str, Value)> {
     vec![
-
         ("owner", Value::Null),
         (
             "read_only",
@@ -1043,7 +1038,7 @@ fn expected_session_rules() -> Vec<(&'static str, Value)> {
                 {"action": "canterlot_runners_list", "resource": "*", "effect": "allow"},
             ]),
         ),
-        ]
+    ]
 }
 
 #[test]
@@ -1051,7 +1046,10 @@ fn permission_modes_shape_the_session_rules() {
     for (mode, rules) in expected_session_rules() {
         // Создание сессии кладёт ruleset(): у владельца ключа нет вовсе.
         assert_eq!(
-            PermissionMode::parse(mode).unwrap().ruleset().unwrap_or(Value::Null),
+            PermissionMode::parse(mode)
+                .unwrap()
+                .ruleset()
+                .unwrap_or(Value::Null),
             rules,
             "{mode}"
         );
@@ -1408,7 +1406,6 @@ async fn foreign_server_is_refused_without_waiting_for_the_deadline() {
         "{failed:?}"
     );
 }
-
 
 /// Процесс сервера ушёл, пока шло ожидание MCP: связь потеряна, а не timeout изоляции.
 #[tokio::test]
@@ -1777,7 +1774,9 @@ async fn children_are_read_past_the_first_page() {
 async fn many_children_are_reconciled_within_the_start_wait() {
     let (mut script, id) = resume_script(true);
     let page = |from: usize, to: usize, cursor: Option<&str>| {
-        let mut data: Vec<Value> = (from..to).map(|n| json!({"id": format!("ses_{n}")})).collect();
+        let mut data: Vec<Value> = (from..to)
+            .map(|n| json!({"id": format!("ses_{n}")}))
+            .collect();
         if cursor.is_none() {
             data.push(json!({"id": "ses_far"}));
         }
@@ -1793,10 +1792,7 @@ async fn many_children_are_reconciled_within_the_start_wait() {
     script.set_route(
         "GET",
         "/api/session",
-        vec![
-            page(0, 100, Some("page2")),
-            page(100, 149, None),
-        ],
+        vec![page(0, 100, Some("page2")), page(100, 149, None)],
     );
     script.set_route("PATCH", "/api/session/ses_far", vec![reply_204()]);
     let mut bench = Bench::new(script);
@@ -1818,7 +1814,9 @@ async fn many_children_are_reconciled_within_the_start_wait() {
     );
     let patches = requests
         .iter()
-        .filter(|request| request["method"] == "PATCH" && path_of(request).starts_with("/api/session/ses_"))
+        .filter(|request| {
+            request["method"] == "PATCH" && path_of(request).starts_with("/api/session/ses_")
+        })
         .count();
     // Правила получают и сама сессия, и каждые из 150 потомков.
     assert_eq!(patches, 151, "every session gets the rules");
@@ -2009,7 +2007,6 @@ async fn first_turn_runs_from_prompt_to_run_finished() {
     bench.fake.wait_gone().await;
 }
 
-
 // Исходы ввода на общем стенде: приёмы, отказы и неопределённые доставки идут
 // подряд, утверждения видят срез журнала своего случая.
 #[tokio::test]
@@ -2035,18 +2032,18 @@ async fn prompt_outcomes_on_a_shared_bench() {
         })
     };
     let mut bench = bench_with_turns(vec![
-        (None, TurnEnd::Succeeded),       // первый ход доходит до конца
-        (None, TurnEnd::Succeeded),       // второй ход доходит до конца
+        (None, TurnEnd::Succeeded), // первый ход доходит до конца
+        (None, TurnEnd::Succeeded), // второй ход доходит до конца
         (refused(400, "InvalidRequestError"), TurnEnd::Rejected),
-        (None, TurnEnd::Succeeded),       // сессия usable после 400
+        (None, TurnEnd::Succeeded), // сессия usable после 400
         (refused(409, "ConflictError"), TurnEnd::Rejected),
-        (None, TurnEnd::Succeeded),       // сессия usable после 409
+        (None, TurnEnd::Succeeded), // сессия usable после 409
         (refused(404, "SessionNotFoundError"), TurnEnd::Rejected),
-        (None, TurnEnd::Succeeded),       // сессия usable после 404
-        (failed(), TurnEnd::Rejected),    // 500 оставляет ввод неподтверждённым
-        (None, TurnEnd::Succeeded),       // повтор без истории уходит один раз
-        (None, TurnEnd::Succeeded),       // вложение путём в тексте
-        (foreign(), TurnEnd::Rejected),   // чужой id не доказательство
+        (None, TurnEnd::Succeeded),     // сессия usable после 404
+        (failed(), TurnEnd::Rejected),  // 500 оставляет ввод неподтверждённым
+        (None, TurnEnd::Succeeded),     // повтор без истории уходит один раз
+        (None, TurnEnd::Succeeded),     // вложение путём в тексте
+        (foreign(), TurnEnd::Rejected), // чужой id не доказательство
     ]);
     let started = bench.start_ok().await;
 
@@ -2055,12 +2052,18 @@ async fn prompt_outcomes_on_a_shared_bench() {
     bench.accepted(&first).await;
     let events = bench.until_finished(first.command_id).await;
     assert_eq!(
-        events.iter().filter(|e| matches!(e, AdapterEvent::RunFinished { .. })).count(),
+        events
+            .iter()
+            .filter(|e| matches!(e, AdapterEvent::RunFinished { .. }))
+            .count(),
         1
     );
     assert!(matches!(
         bench.event().await,
-        AdapterEvent::Phase { phase: Phase::AwaitingInput, .. }
+        AdapterEvent::Phase {
+            phase: Phase::AwaitingInput,
+            ..
+        }
     ));
     let second = bench.input("what did I say");
     bench.accepted(&second).await;
@@ -2094,11 +2097,16 @@ async fn prompt_outcomes_on_a_shared_bench() {
     assert!(matches!(outcome, TransmitOutcome::Undetermined));
     let events = bench.until_finished(input.command_id).await;
     assert!(
-        !events.iter().any(|event| matches!(event, AdapterEvent::InputAccepted { .. }))
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::InputAccepted { .. }))
     );
     let requests = bench.since(mark);
     assert_eq!(
-        requests.iter().filter(|request| path_of(request).ends_with("/prompt")).count(),
+        requests
+            .iter()
+            .filter(|request| path_of(request).ends_with("/prompt"))
+            .count(),
         1,
         "no automatic resend"
     );
@@ -2111,7 +2119,14 @@ async fn prompt_outcomes_on_a_shared_bench() {
     input.attempt = 2;
     bench.accepted(&input).await;
     bench.until_finished(input.command_id).await;
-    assert_eq!(bench.since(mark).iter().filter(|r| path_of(r).ends_with("/prompt")).count(), 1);
+    assert_eq!(
+        bench
+            .since(mark)
+            .iter()
+            .filter(|r| path_of(r).ends_with("/prompt"))
+            .count(),
+        1
+    );
 
     // Вложение идёт путём в тексте, а не файлом.
     let mark = bench.fake.requests().len();
@@ -2157,7 +2172,11 @@ async fn prompt_outcomes_on_a_shared_bench() {
         TransmitOutcome::Undetermined
     ));
     assert_eq!(
-        bench.since(mark).iter().filter(|request| path_of(request).ends_with("/prompt")).count(),
+        bench
+            .since(mark)
+            .iter()
+            .filter(|request| path_of(request).ends_with("/prompt"))
+            .count(),
         1
     );
     bench.close(CloseMode::Graceful).await;
@@ -2204,7 +2223,10 @@ async fn timed_out_prompts_are_proven_late() {
     assert_eq!(accepted, 1, "{events:?}");
     assert!(matches!(
         bench.event().await,
-        AdapterEvent::Phase { phase: Phase::AwaitingInput, .. }
+        AdapterEvent::Phase {
+            phase: Phase::AwaitingInput,
+            ..
+        }
     ));
 
     // Потока нет, доказательство только в проекции.
@@ -2282,7 +2304,6 @@ async fn cyrillic_text_survives_the_stream_and_the_input() {
     bench.close(CloseMode::Graceful).await;
 }
 
-
 fn with_model_route(mut script: Script, replies: Vec<Reply>) -> Script {
     let session = session_of(&script);
     script.set_route("POST", &format!("/api/session/{session}/model"), replies);
@@ -2310,30 +2331,28 @@ async fn settings_changes_go_before_the_input() {
             ..Default::default()
         })
     };
-    let failed = |status: u16| {
-        Reply {
-            status,
-            body: Some(json!({"_tag": "InternalError"})),
-            ..Default::default()
-        }
+    let failed = |status: u16| Reply {
+        status,
+        body: Some(json!({"_tag": "InternalError"})),
+        ..Default::default()
     };
     let script = turns_script(vec![
-        (None, TurnEnd::Succeeded),                    // смена модели и усилия
-        (None, TurnEnd::Succeeded),                    // только усилие
-        (None, TurnEnd::Succeeded),                    // модель без вариантов
-        (None, TurnEnd::Succeeded),                    // та же модель
-        (None, TurnEnd::Succeeded),                    // следующий после отказа модели
-        (None, TurnEnd::Succeeded),                    // следующий после отказа правил
-        (None, TurnEnd::Succeeded),                    // та же мода
-        (None, TurnEnd::Succeeded),                    // смена моды
-        (None, TurnEnd::Succeeded),                    // первая смена в read_only
-        (None, TurnEnd::Succeeded),                    // вторая без смены
-        (None, TurnEnd::Succeeded),                    // смена на владельца
-        (None, TurnEnd::Succeeded),                    // возврат в bypass
-        (None, TurnEnd::Succeeded),                    // следующий после отказа моды
-        (refused_prompt(), TurnEnd::Rejected),         // отказ хаба в приёме
-        (None, TurnEnd::Succeeded),                    // следующий после отказа хаба
-        (refused_prompt(), TurnEnd::Rejected),         // отказ смены на владельца
+        (None, TurnEnd::Succeeded),            // смена модели и усилия
+        (None, TurnEnd::Succeeded),            // только усилие
+        (None, TurnEnd::Succeeded),            // модель без вариантов
+        (None, TurnEnd::Succeeded),            // та же модель
+        (None, TurnEnd::Succeeded),            // следующий после отказа модели
+        (None, TurnEnd::Succeeded),            // следующий после отказа правил
+        (None, TurnEnd::Succeeded),            // та же мода
+        (None, TurnEnd::Succeeded),            // смена моды
+        (None, TurnEnd::Succeeded),            // первая смена в read_only
+        (None, TurnEnd::Succeeded),            // вторая без смены
+        (None, TurnEnd::Succeeded),            // смена на владельца
+        (None, TurnEnd::Succeeded),            // возврат в bypass
+        (None, TurnEnd::Succeeded),            // следующий после отказа моды
+        (refused_prompt(), TurnEnd::Rejected), // отказ хаба в приёме
+        (None, TurnEnd::Succeeded),            // следующий после отказа хаба
+        (refused_prompt(), TurnEnd::Rejected), // отказ смены на владельца
     ]);
     let script = with_model_route(
         script,
@@ -2432,7 +2451,12 @@ async fn settings_changes_go_before_the_input() {
     input.settings = Some(model_change(Some("opencode/big-pickle"), Some("default")));
     bench.accepted(&input).await;
     bench.until_finished(input.command_id).await;
-    assert!(bench.since(mark).iter().all(|request| !path_of(request).ends_with("/model")));
+    assert!(
+        bench
+            .since(mark)
+            .iter()
+            .all(|request| !path_of(request).ends_with("/model"))
+    );
 
     // Отказ в смене модели: ввод не уходит, следующий возвращает то, что считает хаб.
     let mark = bench.fake.requests().len();
@@ -2493,7 +2517,12 @@ async fn settings_changes_go_before_the_input() {
     input.settings = Some(mode_change("bypass"));
     bench.accepted(&input).await;
     bench.until_finished(input.command_id).await;
-    assert!(bench.since(mark).iter().all(|request| request["method"] != "PATCH"));
+    assert!(
+        bench
+            .since(mark)
+            .iter()
+            .all(|request| request["method"] != "PATCH")
+    );
 
     // Смена моды: новые правила раньше ввода.
     let mark = bench.fake.requests().len();
@@ -2597,8 +2626,16 @@ async fn settings_changes_go_before_the_input() {
         .map(|request| request["body"]["permissions"].clone())
         .collect();
     assert_eq!(bodies.len(), 2, "{bodies:?}");
-    assert_eq!(bodies[0], json!([]), "правила владельца снимаются пустым списком");
-    assert_eq!(bodies[1][0]["effect"], json!("allow"), "отказ вернул моду bypass");
+    assert_eq!(
+        bodies[0],
+        json!([]),
+        "правила владельца снимаются пустым списком"
+    );
+    assert_eq!(
+        bodies[1][0]["effect"],
+        json!("allow"),
+        "отказ вернул моду bypass"
+    );
     bench.close(CloseMode::Graceful).await;
 }
 
@@ -2608,9 +2645,7 @@ async fn settings_changes_go_before_the_input() {
 
 // У модели без вариантов усилие каталога условное, серверу оно не передаётся.
 
-
 // Отказ в смене: ввод не уходит, следующий ввод возвращает то, что считает текущим хаб.
-
 
 fn catalog_reply(models: Value) -> Reply {
     Reply {
@@ -2969,7 +3004,6 @@ fn position(requests: &[Value], method: &str, tail: &str) -> usize {
 
 // `null` сервер игнорирует: снять правила можно только пустым списком.
 
-
 fn prompt_texts(requests: &[Value]) -> Vec<String> {
     requests
         .iter()
@@ -2998,7 +3032,6 @@ async fn leaving_read_only_adds_a_note_to_the_first_input_only() {
     assert_eq!(texts[1], "два");
     bench.close(CloseMode::Graceful).await;
 }
-
 
 // Хаб нового режима не принял: выход из `read_only` не состоялся, напоминание ждёт повтора.
 #[tokio::test]
@@ -3072,7 +3105,6 @@ async fn mode_change_reaches_the_live_children() {
 }
 
 // Правила не применились: ввод не уходит, а следующий ввод применяет их снова.
-
 
 // Отказ в приёме ввода оставляет прежний режим: хаб нового не применил.
 
@@ -3585,16 +3617,17 @@ fn permission_script(cases: Vec<(Reply, bool)>) -> Script {
         .steps
         .iter()
         .find_map(|step| match step {
-            Step::Expect { method, path, reply, .. }
-                if method == "POST" && path.ends_with("/prompt") =>
-            {
-                reply
-                    .body
-                    .as_ref()
-                    .and_then(|body| body.pointer("/data/id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            }
+            Step::Expect {
+                method,
+                path,
+                reply,
+                ..
+            } if method == "POST" && path.ends_with("/prompt") => reply
+                .body
+                .as_ref()
+                .and_then(|body| body.pointer("/data/id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             _ => None,
         })
         .unwrap();
@@ -3689,18 +3722,42 @@ fn permission_script(cases: Vec<(Reply, bool)>) -> Script {
 // каждого случая уходит ровно один раз.
 #[tokio::test]
 async fn permission_decisions_reach_the_server_once() {
-    let ok = || Reply { status: 204, ..Default::default() };
+    let ok = || Reply {
+        status: 204,
+        ..Default::default()
+    };
     let mut bench = Bench::new(permission_script(vec![
-        (ok(), true),   // карточка с полями запроса
-        (ok(), true),   // запрос с промптом без пометки
-        (ok(), false),  // отказ без сообщения
-        (ok(), false),  // отказ с пробелами
-        (ok(), false),  // отказ с текстом
-        (ok(), false),  // повтор решения
-        (Reply { status: 404, body: Some(json!({"_tag": "PermissionNotFoundError", "message": "gone"})), ..Default::default() }, false),
-        (Reply { status: 500, body: Some(json!({"_tag": "InternalError"})), ..Default::default() }, false),
-        (Reply { status: 503, body: Some(json!({"_tag": "InternalError"})), ..Default::default() }, false),
-        (ok(), false),  // отказ мимо владельца
+        (ok(), true),  // карточка с полями запроса
+        (ok(), true),  // запрос с промптом без пометки
+        (ok(), false), // отказ без сообщения
+        (ok(), false), // отказ с пробелами
+        (ok(), false), // отказ с текстом
+        (ok(), false), // повтор решения
+        (
+            Reply {
+                status: 404,
+                body: Some(json!({"_tag": "PermissionNotFoundError", "message": "gone"})),
+                ..Default::default()
+            },
+            false,
+        ),
+        (
+            Reply {
+                status: 500,
+                body: Some(json!({"_tag": "InternalError"})),
+                ..Default::default()
+            },
+            false,
+        ),
+        (
+            Reply {
+                status: 503,
+                body: Some(json!({"_tag": "InternalError"})),
+                ..Default::default()
+            },
+            false,
+        ),
+        (ok(), false), // отказ мимо владельца
     ]));
     bench.spec.permission_mode = "ask".into();
     bench.start_ok().await;
@@ -3714,19 +3771,36 @@ async fn permission_decisions_reach_the_server_once() {
     assert_eq!(payload["command"], "echo one > one.txt");
     assert_eq!(payload["agent"], "orchestrator");
     assert_eq!(payload["deny_also_interrupts"], false);
-    assert!(payload["tool_use_id"].as_str().unwrap().starts_with("call_"));
+    assert!(
+        payload["tool_use_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("call_")
+    );
     assert!(matches!(
         bench.event().await,
-        AdapterEvent::Phase { phase: Phase::AwaitingPermission, .. }
+        AdapterEvent::Phase {
+            phase: Phase::AwaitingPermission,
+            ..
+        }
     ));
     assert!(bench.replies().is_empty(), "no answer before the owner");
-    assert!(matches!(bench.deliver(&request, &allow()).await, DecisionOutcome::Applied(_)));
+    assert!(matches!(
+        bench.deliver(&request, &allow()).await,
+        DecisionOutcome::Applied(_)
+    ));
     assert_eq!(bench.replies()[0]["body"], json!({"decision": "once"}));
     let events = bench.until_finished(input.command_id).await;
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AdapterEvent::Phase { phase: Phase::RunningTool, .. }
-    )), "the card is gone: {events:?}");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::Phase {
+                phase: Phase::RunningTool,
+                ..
+            }
+        )),
+        "the card is gone: {events:?}"
+    );
 
     // Запрос разрешения снимает удержание без пометки: решал не CLI.
     let input = bench.input("x");
@@ -3756,7 +3830,11 @@ async fn permission_decisions_reach_the_server_once() {
             DecisionOutcome::Applied(_)
         ));
         bench.until_finished(input.command_id).await;
-        let reply = bench.since(mark).into_iter().find(|r| path_of(r).ends_with("/reply")).unwrap();
+        let reply = bench
+            .since(mark)
+            .into_iter()
+            .find(|r| path_of(r).ends_with("/reply"))
+            .unwrap();
         assert_eq!(reply["body"]["decision"], "reject");
         let message = reply["body"]["message"].as_str().unwrap();
         assert!(!message.trim().is_empty());
@@ -3780,7 +3858,11 @@ async fn permission_decisions_reach_the_server_once() {
     assert_eq!(reason, "request_not_pending");
     bench.until_finished(input.command_id).await;
     assert_eq!(
-        bench.since(mark).into_iter().filter(|r| path_of(r).ends_with("/reply")).count(),
+        bench
+            .since(mark)
+            .into_iter()
+            .filter(|r| path_of(r).ends_with("/reply"))
+            .count(),
         1
     );
 
@@ -3812,7 +3894,11 @@ async fn permission_decisions_reach_the_server_once() {
         bench.adapter.refuse_request(&request, "turn ended").await;
         bench.until_finished(input.command_id).await;
         assert_eq!(
-            bench.since(mark).into_iter().filter(|r| path_of(r).ends_with("/reply")).count(),
+            bench
+                .since(mark)
+                .into_iter()
+                .filter(|r| path_of(r).ends_with("/reply"))
+                .count(),
             1
         );
     }
@@ -3822,20 +3908,28 @@ async fn permission_decisions_reach_the_server_once() {
     let input = bench.input("x");
     bench.accepted(&input).await;
     let (request, ..) = bench.until_request().await;
-    bench.adapter.refuse_request(&request, "Request is too large to show to the owner").await;
+    bench
+        .adapter
+        .refuse_request(&request, "Request is too large to show to the owner")
+        .await;
     bench.until_finished(input.command_id).await;
-    let replies: Vec<_> = bench.since(mark).into_iter().filter(|r| path_of(r).ends_with("/reply")).collect();
+    let replies: Vec<_> = bench
+        .since(mark)
+        .into_iter()
+        .filter(|r| path_of(r).ends_with("/reply"))
+        .collect();
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0]["body"]["decision"], "reject");
-    assert_eq!(replies[0]["body"]["message"], "Request is too large to show to the owner");
+    assert_eq!(
+        replies[0]["body"]["message"],
+        "Request is too large to show to the owner"
+    );
     bench.close(CloseMode::Graceful).await;
 }
-
 
 // Отказ без сообщения кончает ход, поэтому сообщение есть всегда.
 
 // Повтор решения доходит до сервера один раз: запрос живёт только в его памяти.
-
 
 // Доставку не доказать: исход неизвестен, повторной отправки нет.
 
@@ -4188,16 +4282,17 @@ fn question_script(cases: Vec<QuestionCase>) -> Script {
         .steps
         .iter()
         .filter_map(|step| match step {
-            Step::Expect { method, path, reply, .. }
-                if method == "POST" && path.ends_with("/prompt") =>
-            {
-                reply
-                    .body
-                    .as_ref()
-                    .and_then(|body| body.pointer("/data/id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            }
+            Step::Expect {
+                method,
+                path,
+                reply,
+                ..
+            } if method == "POST" && path.ends_with("/prompt") => reply
+                .body
+                .as_ref()
+                .and_then(|body| body.pointer("/data/id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             _ => None,
         })
         .next()
@@ -4260,7 +4355,14 @@ fn question_script(cases: Vec<QuestionCase>) -> Script {
         turn.extend(prefix.iter().map(rewrite));
         turn.push(asked);
         script.steps.push(Step::Emit { events: turn });
-        case.append(&mut script, &ready_session, &owner, &request, &recorded, rewrite);
+        case.append(
+            &mut script,
+            &ready_session,
+            &owner,
+            &request,
+            &recorded,
+            rewrite,
+        );
     }
     script
 }
@@ -4287,8 +4389,7 @@ impl QuestionCase {
         recorded: &str,
         rewrite: impl Fn(&Value) -> Value,
     ) {
-        let answer_path =
-            format!("/api/session/{session}/form/{request}/reply");
+        let answer_path = format!("/api/session/{session}/form/{request}/reply");
         match self.end {
             QuestionEnd::Answered(reply) => {
                 script.steps.push(Step::Expect {
@@ -4352,7 +4453,10 @@ impl QuestionCase {
 #[tokio::test]
 async fn question_answers_go_by_the_form_keys() {
     fn echo(answer: Value) -> Reply {
-        Reply { body: Some(json!({"answer": answer})), ..Default::default() }
+        Reply {
+            body: Some(json!({"answer": answer})),
+            ..Default::default()
+        }
     }
     let mut bench = Bench::new(question_script(vec![
         QuestionCase {
@@ -4416,24 +4520,49 @@ async fn question_answers_go_by_the_form_keys() {
     let (request, payload, _) = bench.until_request().await;
     assert!(request.starts_with("frm_"), "{request}");
     assert_eq!(payload["agent"], "orchestrator");
-    assert!(payload["tool_use_id"].as_str().unwrap().starts_with("call_"));
+    assert!(
+        payload["tool_use_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("call_")
+    );
     assert_eq!(payload["questions"].as_array().unwrap().len(), 2);
     assert_eq!(payload["questions"][0]["id"], "q0");
     assert!(matches!(
         bench.event().await,
-        AdapterEvent::Phase { phase: Phase::AwaitingAnswer, .. }
+        AdapterEvent::Phase {
+            phase: Phase::AwaitingAnswer,
+            ..
+        }
     ));
     let decision = answers(&[("q0", single("Blue")), ("q1", multiple(&["A", "B"]))]);
-    assert!(matches!(bench.deliver(&request, &decision).await, DecisionOutcome::Applied(_)));
+    assert!(matches!(
+        bench.deliver(&request, &decision).await,
+        DecisionOutcome::Applied(_)
+    ));
     let DecisionOutcome::NotApplied(reason) = bench.deliver(&request, &decision).await else {
         panic!("second answer");
     };
     assert_eq!(reason, "request_not_pending");
     bench.until_finished(input.command_id).await;
-    let echo = bench.since(mark).into_iter().find(|r| path_of(r).ends_with("/reply")).unwrap();
-    assert_eq!(echo["body"], json!({"answer": {"q0": "Blue", "q1": ["A", "B"]}}));
-    let echo = bench.since(mark).into_iter().find(|r| path_of(r).ends_with("/reply")).unwrap();
-    assert_eq!(echo["body"], json!({"answer": {"q0": "Blue", "q1": ["A", "B"]}}));
+    let echo = bench
+        .since(mark)
+        .into_iter()
+        .find(|r| path_of(r).ends_with("/reply"))
+        .unwrap();
+    assert_eq!(
+        echo["body"],
+        json!({"answer": {"q0": "Blue", "q1": ["A", "B"]}})
+    );
+    let echo = bench
+        .since(mark)
+        .into_iter()
+        .find(|r| path_of(r).ends_with("/reply"))
+        .unwrap();
+    assert_eq!(
+        echo["body"],
+        json!({"answer": {"q0": "Blue", "q1": ["A", "B"]}})
+    );
 
     // Сервер принял бы неполный ответ и подставил "Unanswered": проверка раньше него.
     let mark = bench.fake.requests().len();
@@ -4452,12 +4581,24 @@ async fn question_answers_go_by_the_form_keys() {
     };
     assert_eq!(reason, "decision_invalid");
     assert!(matches!(
-        bench.deliver(&request, &answers(&[("q0", single("Свой ответ")), ("q1", multiple(&["Другое"]))])).await,
+        bench
+            .deliver(
+                &request,
+                &answers(&[("q0", single("Свой ответ")), ("q1", multiple(&["Другое"]))])
+            )
+            .await,
         DecisionOutcome::Applied(_)
     ));
     bench.until_finished(input.command_id).await;
-    let echo = bench.since(mark).into_iter().find(|r| path_of(r).ends_with("/reply")).unwrap();
-    assert_eq!(echo["body"], json!({"answer": {"q0": "Свой ответ", "q1": ["Другое"]}}));
+    let echo = bench
+        .since(mark)
+        .into_iter()
+        .find(|r| path_of(r).ends_with("/reply"))
+        .unwrap();
+    assert_eq!(
+        echo["body"],
+        json!({"answer": {"q0": "Свой ответ", "q1": ["Другое"]}})
+    );
 
     // Подпись видит владелец, значение ждёт сервер.
     let mark = bench.fake.requests().len();
@@ -4466,9 +4607,16 @@ async fn question_answers_go_by_the_form_keys() {
     let (request, payload, _) = bench.until_request().await;
     assert_eq!(payload["questions"][0]["options"][0]["label"], "Синий");
     let decision = answers(&[("q0", single("Синий")), ("q1", multiple(&["A"]))]);
-    assert!(matches!(bench.deliver(&request, &decision).await, DecisionOutcome::Applied(_)));
+    assert!(matches!(
+        bench.deliver(&request, &decision).await,
+        DecisionOutcome::Applied(_)
+    ));
     bench.until_finished(input.command_id).await;
-    let echo = bench.since(mark).into_iter().find(|r| path_of(r).ends_with("/reply")).unwrap();
+    let echo = bench
+        .since(mark)
+        .into_iter()
+        .find(|r| path_of(r).ends_with("/reply"))
+        .unwrap();
     assert_eq!(echo["body"]["answer"]["q0"], "Blue");
 
     // Больше четырёх вопросов карточка не показывает, без ответа ход завис бы.
@@ -4478,7 +4626,12 @@ async fn question_answers_go_by_the_form_keys() {
     let events = bench.until_finished(input.command_id).await;
     let path = format!("/api/session/{}/form/frm_clone003", live);
     assert_cancelled(&bench, &events, &path);
-    assert!(bench.since(mark).iter().all(|r| !path_of(r).ends_with("/reply")));
+    assert!(
+        bench
+            .since(mark)
+            .iter()
+            .all(|r| !path_of(r).ends_with("/reply"))
+    );
 
     // Формы MCP не вопросы: полей карточка не соберёт.
     let input = bench.input("x");
@@ -4492,11 +4645,28 @@ async fn question_answers_go_by_the_form_keys() {
     let input = bench.input("x");
     bench.accepted(&input).await;
     let (request, ..) = bench.until_request().await;
-    bench.adapter.refuse_request(&request, "The turn has ended").await;
+    bench
+        .adapter
+        .refuse_request(&request, "The turn has ended")
+        .await;
     bench.until_finished(input.command_id).await;
-    let cancel = bench.since(mark).into_iter().find(|r| path_of(r).ends_with("/form/frm_clone005")).unwrap_or_else(|| panic!("form cancel"));
-    assert!(cancel["query"].as_str().unwrap().contains("message=The+turn+has+ended"));
-    assert!(bench.since(mark).iter().all(|r| !path_of(r).ends_with("/reply")));
+    let cancel = bench
+        .since(mark)
+        .into_iter()
+        .find(|r| path_of(r).ends_with("/form/frm_clone005"))
+        .unwrap_or_else(|| panic!("form cancel"));
+    assert!(
+        cancel["query"]
+            .as_str()
+            .unwrap()
+            .contains("message=The+turn+has+ended")
+    );
+    assert!(
+        bench
+            .since(mark)
+            .iter()
+            .all(|r| !path_of(r).ends_with("/reply"))
+    );
 
     // Сервер снял форму сам: карточка закрывается по form.cancelled.
     let input = bench.input("x");
@@ -6395,7 +6565,10 @@ async fn failed_turns_name_their_cause() {
     let fact = limit_of(&events).expect("limit fact");
     assert!(matches!(
         fact,
-        LimitFact::Reached { window: LimitWindow::FiveHour, .. }
+        LimitFact::Reached {
+            window: LimitWindow::FiveHour,
+            ..
+        }
     ));
     assert!(reset_in(&fact, 3_600_000), "{fact:?}");
     assert_eq!(text_of(&events, "Error").len(), 1);
@@ -6414,7 +6587,10 @@ async fn failed_turns_name_their_cause() {
     let events = bench.until_finished(input.command_id).await;
     assert!(matches!(
         limit_of(&events),
-        Some(LimitFact::Reached { window: LimitWindow::Weekly, .. })
+        Some(LimitFact::Reached {
+            window: LimitWindow::Weekly,
+            ..
+        })
     ));
 
     // Чужой сбой не предел и называет только свой вид.
@@ -6425,7 +6601,12 @@ async fn failed_turns_name_their_cause() {
     let more = bench
         .until(|event| matches!(event, AdapterEvent::Diagnostic { kind, .. } if *kind == "provider_failure"))
         .await;
-    let Some(AdapterEvent::Diagnostic { event_type, required, .. }) = more.last() else {
+    let Some(AdapterEvent::Diagnostic {
+        event_type,
+        required,
+        ..
+    }) = more.last()
+    else {
         panic!("diagnostic");
     };
     assert_eq!(event_type, "provider.internal");
@@ -6435,11 +6616,18 @@ async fn failed_turns_name_their_cause() {
     let input = bench.input("x");
     bench.accepted(&input).await;
     let events = bench.until_finished(input.command_id).await;
-    assert_eq!(text_of(&events, "Error").len(), 1, "the owner sees the text");
+    assert_eq!(
+        text_of(&events, "Error").len(),
+        1,
+        "the owner sees the text"
+    );
     let more = bench
         .until(|event| matches!(event, AdapterEvent::Diagnostic { kind, .. } if *kind == "auth_required"))
         .await;
-    assert!(matches!(more.last(), Some(AdapterEvent::Diagnostic { required: true, .. })));
+    assert!(matches!(
+        more.last(),
+        Some(AdapterEvent::Diagnostic { required: true, .. })
+    ));
 
     // Переполнение, которое сервер не смог отыграть, исчерпывает контекст.
     let input = bench.input("x");
@@ -6451,12 +6639,7 @@ async fn failed_turns_name_their_cause() {
     bench.close(CloseMode::Graceful).await;
 }
 
-
 // Тот же отказ Go в 2.2.5 и 2.2.6: свой тип вместо `provider.quota` (живой кадр 09.11.2026).
-
-
-
-
 
 #[tokio::test]
 async fn failed_compaction_with_an_overflow_exhausts_the_context_after_the_turn() {
@@ -6595,8 +6778,6 @@ async fn same_refusal_twice_offers_compaction_and_compaction_clears_it() {
     bench.close(CloseMode::Graceful).await;
 }
 
-
-
 // Настоящая последовательность `live/invalid_request_stuck.jsonl`: отказ сжатия закрывает период
 // как успешный, блока ошибки хода нет, текст провайдера показывает только сжатие.
 /// Сжатия на общем стенде: ходы идут, сжатие отвечает, конец закрывает ход.
@@ -6652,15 +6833,23 @@ fn compaction_script() -> Script {
                 body: Some(json!({"data": {"id": compact, "type": "compaction"}})),
                 ..Default::default()
             },
-            bind: [(compact.to_owned(), "/id".to_owned())].into_iter().collect(),
+            bind: [(compact.to_owned(), "/id".to_owned())]
+                .into_iter()
+                .collect(),
         });
         let end = if n == 0 {
-            failed(compact, json!({"type": "provider.invalid-request",
+            failed(
+                compact,
+                json!({"type": "provider.invalid-request",
                 "message": "Upstream request failed: Model is unavailable.",
                 "status": 400,
-                "response": {"body": "{\"error\":{\"type\":\"server_error\",\"message\":\"Upstream request failed: Model is unavailable.\"}}"}}))
+                "response": {"body": "{\"error\":{\"type\":\"server_error\",\"message\":\"Upstream request failed: Model is unavailable.\"}}"}}),
+            )
         } else {
-            failed(compact, json!({"type": "aborted", "message": "Compaction cancelled"}))
+            failed(
+                compact,
+                json!({"type": "aborted", "message": "Compaction cancelled"}),
+            )
         };
         script.steps.push(Step::Emit { events: end });
         script.steps.push(Step::Emit {
@@ -6944,7 +7133,9 @@ async fn failed_steer_reconciliation_leaves_the_running_turn_alone() {
         if std::time::Instant::now() >= cap {
             break;
         }
-        if let Ok(event) = tokio::time::timeout(Duration::from_millis(200), bench.adapter.next_event()).await {
+        if let Ok(event) =
+            tokio::time::timeout(Duration::from_millis(200), bench.adapter.next_event()).await
+        {
             if matches!(
                 &event,
                 AdapterEvent::RunFinished { input_command_id, .. }

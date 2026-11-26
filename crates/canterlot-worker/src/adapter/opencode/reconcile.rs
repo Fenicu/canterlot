@@ -4,7 +4,10 @@
 //!
 //! Порядок важен: подписка раньше чтения. Событие либо придёт живым, либо уже видно здесь.
 
-use super::{PATCH_BATCH, http::{Http, HttpError}};
+use super::{
+    PATCH_BATCH,
+    http::{Http, HttpError},
+};
 use serde_json::Value;
 use std::{collections::HashSet, time::Duration};
 use tokio::task::JoinSet;
@@ -192,8 +195,9 @@ pub async fn read(http: &Http, session: &str, known: Vec<String>) -> Result<Snap
         .get(&format!("/api/session/{session}/inbox"), READ_WAIT)
         .await?;
     let children = children_of(http, session, known).await?;
-    let owners: Vec<String> =
-        std::iter::once(session.to_owned()).chain(children.iter().cloned()).collect();
+    let owners: Vec<String> = std::iter::once(session.to_owned())
+        .chain(children.iter().cloned())
+        .collect();
     let (permissions, forms) = projections_of(http, &owners).await?;
     let (messages, truncated) = tail_within(http, session, MAX_TAIL_BYTES).await?;
     // Ввод мог лечь уже после первого чтения: история его покажет, а тот ответ ещё нет.
