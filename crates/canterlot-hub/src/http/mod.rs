@@ -26,6 +26,7 @@ use crate::{
     session::Registry,
 };
 
+pub mod agent_reminders;
 pub mod alarms;
 pub mod attachments;
 pub mod auth;
@@ -271,6 +272,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(spawn_queue::routes())
         .merge(limit_settings::routes())
         .merge(prompt_suggestions::routes())
+        .merge(agent_reminders::routes())
         .merge(claude_auto_memory::routes())
         .merge(memory::routes())
         .merge(hibernate::routes())

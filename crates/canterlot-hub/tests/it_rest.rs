@@ -21,6 +21,8 @@ mod activity_refresh;
 mod agent_calls;
 #[path = "it/agent_facts.rs"]
 mod agent_facts;
+#[path = "it/agent_reminders.rs"]
+mod agent_reminders;
 #[path = "it/alarms.rs"]
 mod alarms;
 #[path = "it/attachments.rs"]

@@ -63,6 +63,7 @@ pub mod pricing;
 pub mod probe;
 pub mod prompt_suggestions;
 pub mod provider_status;
+pub mod reminders;
 pub mod rendition;
 pub mod requests;
 pub mod rescue;

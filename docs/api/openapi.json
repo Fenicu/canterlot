@@ -6,6 +6,120 @@
     "version": "1.53.1"
   },
   "paths": {
+    "/api/v1/agent-reminder-settings": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "get__api_v1_agent_reminder_settings",
+        "responses": {
+          "200": {
+            "description": "Напоминания агентам о плане и списке задач",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentReminderSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "put__api_v1_agent_reminder_settings",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentReminderSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Настройка сохранена; действует со следующей выдачи ввода",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentReminderSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/attachments": {
       "post": {
         "tags": [
@@ -15080,6 +15194,24 @@
             "$ref": "#/components/schemas/ActivityState"
           }
         }
+      },
+      "AgentReminderSettings": {
+        "type": "object",
+        "required": [
+          "plan_enabled",
+          "todo_enabled"
+        ],
+        "properties": {
+          "plan_enabled": {
+            "type": "boolean",
+            "description": "Напоминать оркестратору об устаревших задачах его плана."
+          },
+          "todo_enabled": {
+            "type": "boolean",
+            "description": "Напоминать агенту о списке задач, который давно не менялся."
+          }
+        },
+        "additionalProperties": false
       },
       "AlarmEvent": {
         "type": "object",

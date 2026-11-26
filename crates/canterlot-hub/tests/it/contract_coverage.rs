@@ -912,6 +912,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api() {
         ),
         case(
             Method::PUT,
+            "/api/v1/agent-reminder-settings",
+            "/api/v1/agent-reminder-settings".into(),
+            Some(json!({"plan_enabled":false,"todo_enabled":true})),
+            Some(json!({"plan_enabled":true,"todo_enabled":false})),
+        ),
+        case(
+            Method::PUT,
             "/api/v1/prompt-suggestion-settings",
             "/api/v1/prompt-suggestion-settings".into(),
             Some(json!({"enabled":false})),

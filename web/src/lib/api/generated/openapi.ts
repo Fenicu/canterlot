@@ -1,4 +1,20 @@
 export interface paths {
+    "/api/v1/agent-reminder-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_agent_reminder_settings"];
+        put: operations["put__api_v1_agent_reminder_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/attachments": {
         parameters: {
             query?: never;
@@ -2490,6 +2506,12 @@ export interface components {
             evidence: components["schemas"]["Evidence"];
             since: string;
             state: components["schemas"]["ActivityState"];
+        };
+        AgentReminderSettings: {
+            /** @description Напоминать оркестратору об устаревших задачах его плана. */
+            plan_enabled: boolean;
+            /** @description Напоминать агенту о списке задач, который давно не менялся. */
+            todo_enabled: boolean;
         };
         /** @description Один сработавший будильник пачки: те же поля, что и у одиночного события. */
         AlarmEvent: {
@@ -6257,6 +6279,78 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get__api_v1_agent_reminder_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Напоминания агентам о плане и списке задач */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentReminderSettings"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_agent_reminder_settings: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentReminderSettings"];
+            };
+        };
+        responses: {
+            /** @description Настройка сохранена; действует со следующей выдачи ввода */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentReminderSettings"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     post__api_v1_attachments: {
         parameters: {
             query?: never;
