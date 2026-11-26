@@ -39,12 +39,18 @@ case "$action" in
         recreate=0
         if docker container inspect "$container" >/dev/null 2>&1; then
             docker start "$container" >/dev/null
-            # max_connections читается только при старте postgres: контейнер со старым
-            # лимитом пересоздаём. Данные тестовой базы лежат в tmpfs и не нужны.
+            # max_connections читается только при старте postgres, а pg_hba пишет initdb:
+            # контейнер со старым лимитом или с паролем (scram-sha-256) на TCP пересоздаём.
+            # Смотрим действующие правила pg_hba, а не окружение контейнера: правила и
+            # решают, спросит ли сервер пароль. Данные тестовой базы лежат в tmpfs и не нужны.
             if wait_ready; then
                 current=$(docker exec "$container" psql -U canterlot -d canterlot \
                     -tAc 'show max_connections' 2>/dev/null || true)
                 [[ "$current" == "$max_connections" ]] || recreate=1
+                not_trust=$(docker exec "$container" psql -U canterlot -d canterlot -tAc \
+                    "select count(*) from pg_hba_file_rules where type = 'host' and auth_method <> 'trust'" \
+                    2>/dev/null || true)
+                [[ "$not_trust" == 0 ]] || recreate=1
             else
                 recreate=1
             fi
@@ -55,10 +61,16 @@ case "$action" in
             recreate=1
         fi
         if ((recreate)); then
+            # trust вместо scram-sha-256: SCRAM стоит клиенту 11–20 мс процессора на
+            # соединение, а тест открывает их несколько; без пароля суммарное время тестов
+            # хаба в замере стало меньше на 23%. Пароль остаётся в окружении, поэтому DATABASE_URL с
+            # паролем работают как прежде. Граница доступа — публикация порта только на
+            # 127.0.0.1: войти без пароля может лишь процесс этой машины.
             docker run --detach --name "$container" \
                 --publish "127.0.0.1:${port}:5432" \
                 --env POSTGRES_USER=canterlot \
                 --env POSTGRES_PASSWORD=canterlot \
+                --env POSTGRES_HOST_AUTH_METHOD=trust \
                 --env POSTGRES_DB=canterlot \
                 --tmpfs /var/lib/postgresql \
                 postgres:18.6-trixie -c max_connections="$max_connections" >/dev/null
