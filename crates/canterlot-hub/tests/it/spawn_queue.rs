@@ -471,12 +471,8 @@ async fn eleventh_spawn_queues_and_the_job_starts_it_with_one_note() {
     let notes = notes_for(&f.pool, f.parent).await;
     assert_eq!(notes.len(), 1, "exactly one note: {notes:?}");
     assert!(notes[0].contains("Queued spawn q-"), "{}", notes[0]);
-}
 
-#[tokio::test]
-async fn retried_call_id_returns_the_same_item() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
+    // ── Повтор вызова с тем же call_id возвращает тот же элемент ──
     fill_rate(&f.pool, f.parent).await;
     let call_id = Uuid::now_v7();
     let first = session_tools::call(
@@ -624,6 +620,98 @@ async fn spawn_cancel_withdraws_a_pending_approval_before_the_owner_decides() {
         again,
         json!({"status": "already_cancelled", "request_id": request})
     );
+
+    // ── Решение владельца уже принято: отмена не меняет его ──
+    let request = f.spawn_pending().await;
+    let decided = owner_decides(&f.pool, f.owner, f.parent, request, "owner-decided").await;
+    assert!(
+        matches!(decided, Ok(DecisionResult::Committed { .. })),
+        "{decided:?}"
+    );
+    let before = f.children().await;
+    let error = f
+        .call("spawn_queue.cancel", json!({"queue_id": request}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::AlreadyDecided);
+    let state: String = sqlx::query_scalar("select state from requests where id=$1")
+        .bind(request)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "decision_saved", "the owner's decision stays");
+    let outcome = f
+        .run_job(json!({"action": "spawn", "request_id": request}))
+        .await;
+    assert!(matches!(outcome, JobOutcome::Done(_)), "{outcome:?}");
+    assert_eq!(f.children().await, before + 1, "the session is created");
+
+    // ── Чужой родитель и неизвестный номер отказаны, карточка остаётся ──
+    let request = f.spawn_pending().await;
+    let foreign = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let foreign_exec = canterlot_hub::executions::start(&f.pool, f.owner, foreign, Uuid::now_v7())
+        .await
+        .unwrap();
+    let foreign_caller = Caller {
+        owner_id: f.owner,
+        conversation_id: foreign,
+        execution_id: foreign_exec.execution_id,
+        machine_id: f.machine,
+        call_id: Uuid::now_v7(),
+    };
+    let refused = session_tools::call(
+        &f.context,
+        &foreign_caller,
+        "spawn_queue.cancel",
+        json!({"queue_id": request}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.code, Code::NotParent);
+    let state: String = sqlx::query_scalar("select state from requests where id=$1")
+        .bind(request)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "open");
+    let unknown = f
+        .call("spawn_queue.cancel", json!({"queue_id": Uuid::now_v7()}))
+        .await
+        .unwrap_err();
+    assert_eq!(unknown.code, Code::NotParent);
+
+    // ── Отмена и решение владельца: ровно один победитель ──
+    let request = f.spawn_pending().await;
+    let (cancel_result, decision_result) = tokio::join!(
+        f.call("spawn_queue.cancel", json!({"queue_id": request})),
+        owner_decides(&f.pool, f.owner, f.parent, request, "race-owner"),
+    );
+    let decision_result = decision_result.unwrap();
+    let decision_won = matches!(&decision_result, DecisionResult::Committed { .. });
+    let state: String = sqlx::query_scalar("select state from requests where id=$1")
+        .bind(request)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    match cancel_result {
+        Ok(answer) => {
+            assert!(!decision_won, "{decision_result:?}");
+            assert_eq!(answer["status"], "cancelled");
+            assert_eq!(state, "closed_without_decision");
+            assert!(
+                matches!(
+                    decision_result,
+                    DecisionResult::AlreadyClosed { .. } | DecisionResult::Conflict { .. }
+                ),
+                "{decision_result:?}"
+            );
+        }
+        Err(error) => {
+            assert!(decision_won, "{decision_result:?}");
+            assert_eq!(error.code, Code::AlreadyDecided);
+            assert_eq!(state, "decision_saved");
+        }
+    }
 }
 
 /// Решение владельца тем же порядком блокировок, что у HTTP-обработчика.
@@ -659,113 +747,6 @@ async fn owner_decides(
         requests::save_decision_in_tx(&mut tx, parent, request, generation, &decision, key).await;
     tx.commit().await.unwrap();
     outcome
-}
-
-#[tokio::test]
-async fn spawn_cancel_after_the_owner_decided_changes_nothing() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let request = f.spawn_pending().await;
-    let decided = owner_decides(&f.pool, f.owner, f.parent, request, "owner-decided").await;
-    assert!(
-        matches!(decided, Ok(DecisionResult::Committed { .. })),
-        "{decided:?}"
-    );
-    let before = f.children().await;
-
-    let error = f
-        .call("spawn_queue.cancel", json!({"queue_id": request}))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, Code::AlreadyDecided);
-    let state: String = sqlx::query_scalar("select state from requests where id=$1")
-        .bind(request)
-        .fetch_one(&f.pool)
-        .await
-        .unwrap();
-    assert_eq!(state, "decision_saved", "the owner's decision stays");
-
-    let outcome = f
-        .run_job(json!({"action": "spawn", "request_id": request}))
-        .await;
-    assert!(matches!(outcome, JobOutcome::Done(_)), "{outcome:?}");
-    assert_eq!(f.children().await, before + 1, "the session is created");
-}
-
-#[tokio::test]
-async fn spawn_cancel_of_a_pending_approval_refuses_another_parent_and_an_unknown_id() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let request = f.spawn_pending().await;
-    let foreign = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
-    let foreign_exec = canterlot_hub::executions::start(&f.pool, f.owner, foreign, Uuid::now_v7())
-        .await
-        .unwrap();
-    let foreign_caller = Caller {
-        owner_id: f.owner,
-        conversation_id: foreign,
-        execution_id: foreign_exec.execution_id,
-        machine_id: f.machine,
-        call_id: Uuid::now_v7(),
-    };
-    let refused = session_tools::call(
-        &f.context,
-        &foreign_caller,
-        "spawn_queue.cancel",
-        json!({"queue_id": request}),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(refused.code, Code::NotParent);
-    let state: String = sqlx::query_scalar("select state from requests where id=$1")
-        .bind(request)
-        .fetch_one(&f.pool)
-        .await
-        .unwrap();
-    assert_eq!(state, "open");
-
-    let unknown = f
-        .call("spawn_queue.cancel", json!({"queue_id": Uuid::now_v7()}))
-        .await
-        .unwrap_err();
-    assert_eq!(unknown.code, Code::NotParent);
-}
-
-#[tokio::test]
-async fn spawn_cancel_and_the_owners_decision_have_exactly_one_winner() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let request = f.spawn_pending().await;
-    let (cancel_result, decision_result) = tokio::join!(
-        f.call("spawn_queue.cancel", json!({"queue_id": request})),
-        owner_decides(&f.pool, f.owner, f.parent, request, "race-owner"),
-    );
-    let decision_result = decision_result.unwrap();
-    let decision_won = matches!(&decision_result, DecisionResult::Committed { .. });
-    let state: String = sqlx::query_scalar("select state from requests where id=$1")
-        .bind(request)
-        .fetch_one(&f.pool)
-        .await
-        .unwrap();
-    match cancel_result {
-        Ok(answer) => {
-            assert!(!decision_won, "{decision_result:?}");
-            assert_eq!(answer["status"], "cancelled");
-            assert_eq!(state, "closed_without_decision");
-            assert!(
-                matches!(
-                    decision_result,
-                    DecisionResult::AlreadyClosed { .. } | DecisionResult::Conflict { .. }
-                ),
-                "{decision_result:?}"
-            );
-        }
-        Err(error) => {
-            assert!(decision_won, "{decision_result:?}");
-            assert_eq!(error.code, Code::AlreadyDecided);
-            assert_eq!(state, "decision_saved");
-        }
-    }
 }
 
 #[tokio::test]
@@ -830,7 +811,7 @@ async fn queue_full_at_twenty() {
 }
 
 #[tokio::test]
-async fn guard_queues_on_low_disk_and_names_cleanup_candidates() {
+async fn the_guard_queues_on_low_disk_and_only_names_visible_cleanup_candidates() {
     let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let cleanup = child_of(
@@ -869,6 +850,95 @@ async fn guard_queues_on_low_disk_and_names_cleanup_candidates() {
         .unwrap();
     assert_eq!(preview["guard"]["blocked"], true, "{preview}");
     assert_eq!(preview["guard"]["stale"], false, "{preview}");
+
+    // ── Подсказка стража называет только видимые вызывающему сессии ──
+    stale_worktree(&f.pool, f.parent, "T3").await;
+    let work = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let domains: Vec<Option<String>> =
+        sqlx::query_scalar("select memory_domain from conversations where id=any($1) order by 1")
+            .bind([f.parent, work])
+            .fetch_all(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(domains, [Some("personal".into()), Some("work".into())]);
+    stale_worktree(&f.pool, work, "ACME: биллинг").await;
+    low_disk(&f.pool, f.machine).await;
+    let answer = f.spawn_direct().await.unwrap();
+    let detail = answer["detail"].as_str().unwrap();
+    assert!(detail.contains("T3 idle 3 h"), "{detail}");
+    assert!(!detail.contains("ACME"), "{detail}");
+    // Делегат того же домена: чужие потомки ему не видны, своих у него нет.
+    let delegate = stale_worktree(&f.pool, f.parent, "T4").await;
+    let mut conn = f.pool.acquire().await.unwrap();
+    let verdict = canterlot_hub::session_tools::guard::check_in_tx(
+        &mut conn,
+        f.owner,
+        f.machine,
+        Some(delegate),
+        &f.context.guards,
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        verdict.detail.as_deref(),
+        Some("disk 12 GB free < 30 GB."),
+        "{verdict:?}"
+    );
+    // Владелец видит всё: его экран маршрута получает полный список.
+    let verdict = canterlot_hub::session_tools::guard::check_in_tx(
+        &mut conn,
+        f.owner,
+        f.machine,
+        None,
+        &f.context.guards,
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    let detail = verdict.detail.unwrap();
+    assert!(detail.contains("T3") && detail.contains("ACME"), "{detail}");
+
+    // ── Просроченное показание метрик: страж видит его старым, но не занятым ──
+    let old = Utc::now() - chrono::TimeDelta::minutes(10);
+    let metrics = canterlot_proto::worker::v1::MachineMetrics {
+        machine_time_ms: old.timestamp_millis() as u64,
+        cpu_cores: 4,
+        cpu_permille: 50,
+        mem_total_bytes: 16_000_000_000,
+        mem_available_bytes: 12_000_000_000,
+        disks: vec![canterlot_proto::worker::v1::DiskUsage {
+            label: "data".into(),
+            total_bytes: 100_000_000_000,
+            free_bytes: 90_000_000_000,
+        }],
+        load1_centi: 40,
+        ..Default::default()
+    };
+    canterlot_hub::machine_info::apply_metrics(
+        &f.pool,
+        f.owner,
+        f.machine,
+        &metrics,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let verdict = canterlot_hub::session_tools::guard::check_in_tx(
+        &mut conn,
+        f.owner,
+        f.machine,
+        None,
+        &Default::default(),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        verdict.stale,
+        "a delayed sample must not look fresh: {verdict:?}"
+    );
+    assert!(!verdict.blocked());
 }
 
 /// Делегат с неубранной рабочей копией, простаивающий три часа.
@@ -901,61 +971,6 @@ async fn stale_worktree(pool: &PgPool, parent: Uuid, title: &str) -> Uuid {
 
 /// Подсказка стража называет только сессии, которые вызывающий видит и может принять: чужой
 /// домен памяти для агента не существует, а делегат не видит чужих потомков.
-#[tokio::test]
-async fn guard_hint_names_only_sessions_the_caller_can_see() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    stale_worktree(&f.pool, f.parent, "T3").await;
-    // Родитель стенда личный. Рабочий корень со своим делегатом на той же машине.
-    let work = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
-    let domains: Vec<Option<String>> =
-        sqlx::query_scalar("select memory_domain from conversations where id=any($1) order by 1")
-            .bind([f.parent, work])
-            .fetch_all(&f.pool)
-            .await
-            .unwrap();
-    assert_eq!(domains, [Some("personal".into()), Some("work".into())]);
-    stale_worktree(&f.pool, work, "ACME: биллинг").await;
-    low_disk(&f.pool, f.machine).await;
-
-    let answer = f.spawn_direct().await.unwrap();
-    let detail = answer["detail"].as_str().unwrap();
-    assert!(detail.contains("T3 idle 3 h"), "{detail}");
-    assert!(!detail.contains("ACME"), "{detail}");
-
-    // Делегат того же домена: чужие потомки ему не видны, своих у него нет.
-    let delegate = stale_worktree(&f.pool, f.parent, "T4").await;
-    let mut conn = f.pool.acquire().await.unwrap();
-    let verdict = canterlot_hub::session_tools::guard::check_in_tx(
-        &mut conn,
-        f.owner,
-        f.machine,
-        Some(delegate),
-        &f.context.guards,
-        Utc::now(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        verdict.detail.as_deref(),
-        Some("disk 12 GB free < 30 GB."),
-        "{verdict:?}"
-    );
-    // Владелец видит всё: его экран маршрута получает полный список.
-    let verdict = canterlot_hub::session_tools::guard::check_in_tx(
-        &mut conn,
-        f.owner,
-        f.machine,
-        None,
-        &f.context.guards,
-        Utc::now(),
-    )
-    .await
-    .unwrap();
-    let detail = verdict.detail.unwrap();
-    assert!(detail.contains("T3") && detail.contains("ACME"), "{detail}");
-}
-
 #[tokio::test]
 async fn start_now_bypasses_the_guard_but_not_the_whitelist() {
     let pool = canterlot_hub::testkit::db().await;
@@ -992,29 +1007,6 @@ async fn start_now_bypasses_the_guard_but_not_the_whitelist() {
             .iter()
             .any(|note| note.contains("not_in_whitelist")),
         "failure note"
-    );
-}
-
-#[tokio::test]
-async fn expiry_after_expires_at_across_a_restart() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    fill_rate(&f.pool, f.parent).await;
-    let answer = f.spawn_direct().await.unwrap();
-    let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
-    sqlx::query("update spawn_queue set expires_at=now()-interval '1 second',not_before=now()-interval '1 second' where id=$1")
-        .bind(queue_id)
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    // Новый запуск хаба: задание берётся из базы.
-    f.run_dequeue(queue_id, Utc::now()).await;
-    let (state, _reason, _detail, _child, _not_before) = queue_row(&f.pool, queue_id).await;
-    assert_eq!(state, "expired");
-    let notes = notes_for(&f.pool, f.parent).await;
-    assert!(
-        notes.iter().any(|note| note.contains("expired")),
-        "{notes:?}"
     );
 }
 
@@ -1483,7 +1475,7 @@ async fn past_reset_limits_fixture(f: &Fx, unknown: &str) -> Uuid {
 }
 
 #[tokio::test]
-async fn a_queued_spawn_runs_when_the_reading_reset_just_passed() {
+async fn a_past_reset_reading_starts_or_queues_the_spawn() {
     let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let queue_id = past_reset_limits_fixture(&f, "allow").await;
@@ -1492,12 +1484,8 @@ async fn a_queued_spawn_runs_when_the_reading_reset_just_passed() {
     let (state, _reason, _detail, child, _not_before) = queue_row(&f.pool, queue_id).await;
     assert_eq!(state, "started");
     assert!(child.is_some());
-}
 
-#[tokio::test]
-async fn a_queued_spawn_keeps_waiting_when_the_reading_reset_just_passed() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
+    // ── Неизвестный лимит: элемент остаётся в очереди, а не падает ──
     let queue_id = past_reset_limits_fixture(&f, "skip").await;
     let outcome = f.run_dequeue(queue_id, Utc::now()).await;
     assert!(matches!(outcome, JobOutcome::Done(_)), "{outcome:?}");
@@ -1506,12 +1494,8 @@ async fn a_queued_spawn_keeps_waiting_when_the_reading_reset_just_passed() {
     assert_eq!(reason, "limits");
     assert!(child.is_none());
     assert!(not_before > Utc::now());
-}
 
-#[tokio::test]
-async fn a_first_spawn_waits_when_the_reading_reset_just_passed() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
+    // ── И первый запуск при неизвестном лимите тоже встаёт в очередь ──
     past_reset_limits_fixture(&f, "skip").await;
     let answer = f
         .call(
@@ -1680,6 +1664,24 @@ async fn start_now_expires_a_past_item() {
             .iter()
             .any(|note| note.contains("expired")),
         "expiry note"
+    );
+
+    // ── Срок вышел до прохода: задание из базы (как после перезапуска) истекает ──
+    fill_rate(&f.pool, f.parent).await;
+    let answer = f.spawn_direct().await.unwrap();
+    let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
+    sqlx::query("update spawn_queue set expires_at=now()-interval '1 second',not_before=now()-interval '1 second' where id=$1")
+        .bind(queue_id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.run_dequeue(queue_id, Utc::now()).await;
+    let (state, _reason, _detail, _child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "expired");
+    let notes = notes_for(&f.pool, f.parent).await;
+    assert!(
+        notes.iter().any(|note| note.contains("expired")),
+        "{notes:?}"
     );
 }
 
@@ -2134,52 +2136,6 @@ async fn start_now_ignores_unknown_limits() {
     assert_eq!(started.status, "started", "{started:?}");
 }
 
-#[tokio::test]
-async fn guard_uses_the_sample_time_not_the_arrival_time() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let old = Utc::now() - chrono::TimeDelta::minutes(10);
-    let metrics = canterlot_proto::worker::v1::MachineMetrics {
-        machine_time_ms: old.timestamp_millis() as u64,
-        cpu_cores: 4,
-        cpu_permille: 50,
-        mem_total_bytes: 16_000_000_000,
-        mem_available_bytes: 12_000_000_000,
-        disks: vec![canterlot_proto::worker::v1::DiskUsage {
-            label: "data".into(),
-            total_bytes: 100_000_000_000,
-            free_bytes: 90_000_000_000,
-        }],
-        load1_centi: 40,
-        ..Default::default()
-    };
-    canterlot_hub::machine_info::apply_metrics(
-        &f.pool,
-        f.owner,
-        f.machine,
-        &metrics,
-        Uuid::now_v7(),
-    )
-    .await
-    .unwrap();
-    let mut conn = f.pool.acquire().await.unwrap();
-    let verdict = canterlot_hub::session_tools::guard::check_in_tx(
-        &mut conn,
-        f.owner,
-        f.machine,
-        None,
-        &Default::default(),
-        Utc::now(),
-    )
-    .await
-    .unwrap();
-    assert!(
-        verdict.stale,
-        "a delayed sample must not look fresh: {verdict:?}"
-    );
-    assert!(!verdict.blocked());
-}
-
 async fn stale_metrics(pool: &PgPool, owner: Uuid, machine: Uuid) {
     let old = Utc::now() - chrono::TimeDelta::minutes(10);
     let metrics = canterlot_proto::worker::v1::MachineMetrics {
@@ -2202,7 +2158,7 @@ async fn stale_metrics(pool: &PgPool, owner: Uuid, machine: Uuid) {
 }
 
 #[tokio::test]
-async fn the_start_answer_marks_stale_metrics_and_replays_identically() {
+async fn the_start_answer_and_the_queue_note_mark_stale_metrics() {
     let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     stale_metrics(&f.pool, f.owner, f.machine).await;
@@ -2226,14 +2182,9 @@ async fn the_start_answer_marks_stale_metrics_and_replays_identically() {
     .await
     .unwrap();
     assert_eq!(replay, first, "transport replay stays byte-identical");
-}
 
-#[tokio::test]
-async fn a_queued_start_note_marks_stale_metrics() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
+    // ── Запуск из очереди тоже помечает просроченные метрики запиской ──
     fill_rate(&f.pool, f.parent).await;
-    stale_metrics(&f.pool, f.owner, f.machine).await;
     let answer = f.spawn_direct().await.unwrap();
     let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
     sqlx::query(
