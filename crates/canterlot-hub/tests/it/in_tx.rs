@@ -16,6 +16,8 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 async fn dispatched_input(
@@ -75,9 +77,7 @@ async fn snapshot(pool: &PgPool, input_id: Uuid) -> Result<Value, sqlx::Error> {
     .await
 }
 
-#[tokio::test]
-async fn receipt_in_tx_rolls_back_with_caller() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn receipt_in_tx_rolls_back_with_caller(pool: PgPool) -> TestResult {
     let (_, _, input) = dispatched_input(&pool).await?;
     let before = snapshot(&pool, input.input_id).await?;
     assert_eq!(before["input"]["state"], "dispatched");
@@ -116,9 +116,7 @@ async fn receipt_in_tx_rolls_back_with_caller() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn set_state_in_tx_composes() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn set_state_in_tx_composes(pool: PgPool) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let execution =
         executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()).await?;
@@ -165,9 +163,7 @@ async fn set_state_in_tx_composes() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn run_finished_in_tx_composes() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn run_finished_in_tx_composes(pool: PgPool) -> TestResult {
     let (seed, execution, input) = dispatched_input(&pool).await?;
     let before = snapshot(&pool, input.input_id).await?;
     let correlation_id = Uuid::now_v7();
@@ -224,4 +220,18 @@ async fn run_finished_in_tx_composes() -> TestResult {
         input.command_id.to_string()
     );
     Ok(())
+}
+
+/// Функции *_in_tx: квитанция откатывается с вызывающим, смена состояния и итог
+/// хода собираются в одну транзакцию.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn in_tx_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        receipt_in_tx_rolls_back_with_caller,
+        set_state_in_tx_composes,
+        run_finished_in_tx_composes,
+    );
 }
