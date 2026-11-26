@@ -4,9 +4,10 @@
 //!
 //! Порядок важен: подписка раньше чтения. Событие либо придёт живым, либо уже видно здесь.
 
-use super::http::{Http, HttpError};
+use super::{PATCH_BATCH, http::{Http, HttpError}};
 use serde_json::Value;
 use std::{collections::HashSet, time::Duration};
+use tokio::task::JoinSet;
 
 const READ_WAIT: Duration = Duration::from_secs(10);
 const PAGE_SIZE: usize = 100;
@@ -117,6 +118,45 @@ fn missing_is_empty(reply: Result<Value, HttpError>) -> Result<Value, HttpError>
     }
 }
 
+/// Запросы и формы владельцев: у сессии с сотнями потомков последовательные чтения
+/// не укладываются в срок старта, поэтому владельцы читаются пачками. Порядок
+/// владельцев сохраняется: сначала своя сессия, дальше как в списке.
+async fn projections_of(
+    http: &Http,
+    owners: &[String],
+) -> Result<(Vec<Value>, Vec<Value>), HttpError> {
+    let mut permissions = Vec::new();
+    let mut forms = Vec::new();
+    for chunk in owners.chunks(PATCH_BATCH) {
+        let mut reads = JoinSet::new();
+        for (index, owner) in chunk.iter().enumerate() {
+            let (http, path) = (http.clone(), format!("/api/session/{owner}"));
+            reads.spawn(async move {
+                let permissions = items(&missing_is_empty(
+                    http.get(&format!("{path}/permission"), READ_WAIT).await,
+                )?);
+                let forms = items(&missing_is_empty(
+                    http.get(&format!("{path}/form"), READ_WAIT).await,
+                )?);
+                Ok::<_, HttpError>((index, permissions, forms))
+            });
+        }
+        let mut batch = Vec::with_capacity(chunk.len());
+        while let Some(done) = reads.join_next().await {
+            match done.map_err(|_| HttpError::Lost)? {
+                Ok(found) => batch.push(found),
+                Err(error) => return Err(error),
+            }
+        }
+        batch.sort_by_key(|(index, _, _)| *index);
+        for (_, owner_permissions, owner_forms) in batch {
+            permissions.extend(owner_permissions);
+            forms.extend(owner_forms);
+        }
+    }
+    Ok((permissions, forms))
+}
+
 /// Потомок мог родиться в разрыве: о нём знает только список сессий.
 async fn children_of(
     http: &Http,
@@ -152,17 +192,9 @@ pub async fn read(http: &Http, session: &str, known: Vec<String>) -> Result<Snap
         .get(&format!("/api/session/{session}/inbox"), READ_WAIT)
         .await?;
     let children = children_of(http, session, known).await?;
-    let mut permissions = Vec::new();
-    let mut forms = Vec::new();
-    for owner in std::iter::once(session).chain(children.iter().map(String::as_str)) {
-        let path = format!("/api/session/{owner}");
-        permissions.extend(items(&missing_is_empty(
-            http.get(&format!("{path}/permission"), READ_WAIT).await,
-        )?));
-        forms.extend(items(&missing_is_empty(
-            http.get(&format!("{path}/form"), READ_WAIT).await,
-        )?));
-    }
+    let owners: Vec<String> =
+        std::iter::once(session.to_owned()).chain(children.iter().cloned()).collect();
+    let (permissions, forms) = projections_of(http, &owners).await?;
     let (messages, truncated) = tail_within(http, session, MAX_TAIL_BYTES).await?;
     // Ввод мог лечь уже после первого чтения: история его покажет, а тот ответ ещё нет.
     let running = running || is_running(http, session).await?;

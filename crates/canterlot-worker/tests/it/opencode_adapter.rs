@@ -1649,6 +1649,62 @@ async fn children_are_read_past_the_first_page() {
     bench.close(CloseMode::Graceful).await;
 }
 
+// Возобновление с сотнями потомков укладывается в срок старта: чтение проекций
+// идёт не по одному запросу, а пачками.
+#[tokio::test]
+async fn many_children_are_reconciled_within_the_start_wait() {
+    let (mut script, id) = resume_script(true);
+    let page = |from: usize, to: usize, cursor: Option<&str>| {
+        let mut data: Vec<Value> = (from..to).map(|n| json!({"id": format!("ses_{n}")})).collect();
+        if cursor.is_none() {
+            data.push(json!({"id": "ses_far"}));
+        }
+        let mut body = json!({"data": data});
+        if let Some(next) = cursor {
+            body["cursor"] = json!({"next": next});
+        }
+        Reply {
+            body: Some(body),
+            ..Default::default()
+        }
+    };
+    script.set_route(
+        "GET",
+        "/api/session",
+        vec![
+            page(0, 100, Some("page2")),
+            page(100, 200, Some("page3")),
+            page(200, 249, None),
+        ],
+    );
+    script.set_route("PATCH", "/api/session/ses_far", vec![reply_204()]);
+    let mut bench = Bench::new(script);
+    bench.spec.native_conversation_id = Some(id);
+    bench.start_ok().await;
+    let requests = bench.fake.requests();
+    let queries: Vec<&str> = requests
+        .iter()
+        .filter(|request| request["method"] == "GET" && path_of(request) == "/api/session")
+        .map(|request| request["query"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        queries,
+        [
+            "parentID=ses_11112222333344445555666677778888&limit=100",
+            "limit=100&cursor=page2",
+            "limit=100&cursor=page3",
+        ],
+        "{queries:?}"
+    );
+    let patches = requests
+        .iter()
+        .filter(|request| request["method"] == "PATCH" && path_of(request).starts_with("/api/session/ses_"))
+        .count();
+    // Правила получают и сама сессия, и каждые из 250 потомков.
+    assert_eq!(patches, 251, "every session gets the rules");
+    bench.close(CloseMode::Graceful).await;
+}
+
 #[tokio::test]
 async fn resume_of_a_lost_session_fails_the_start() {
     let (script, id) = resume_script(false);
