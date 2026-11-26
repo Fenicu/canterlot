@@ -14,6 +14,8 @@ use webauthn_rs::prelude::{CreationChallengeResponse, RequestChallengeResponse, 
 
 use crate::support::auth::{AuthHub, PASSWORD, error_code, session_token, set_cookie};
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 const CHROME_ANDROID: &str = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 \
     (KHTML, like Gecko) Chrome/142.0.0.0 Mobile Safari/537.36";
 
@@ -87,9 +89,7 @@ async fn failures(pool: &PgPool) -> i64 {
         .unwrap()
 }
 
-#[tokio::test]
-async fn auth_passkeys_register_list_and_sign_in_update_the_counter() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_passkeys_register_list_and_sign_in_update_the_counter(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let methods: Value = hub
         .anonymous(None)
@@ -150,9 +150,7 @@ async fn auth_passkeys_register_list_and_sign_in_update_the_counter() {
     assert!(stored_counter(&hub.pool).await > after);
 }
 
-#[tokio::test]
-async fn auth_passkeys_challenge_is_single_use_and_expires() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_passkeys_challenge_is_single_use_and_expires(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let mut key = authenticator();
     assert_eq!(
@@ -195,9 +193,7 @@ async fn auth_passkeys_challenge_is_single_use_and_expires() {
     assert!((299.0..=301.0).contains(&ttl), "{ttl}");
 }
 
-#[tokio::test]
-async fn auth_passkeys_wrong_key_counts_and_locks_the_bucket() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_passkeys_wrong_key_counts_and_locks_the_bucket(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let mut key = authenticator();
     assert_eq!(register(&hub.owner(), &mut key, None).await.status, 200);
@@ -234,9 +230,7 @@ async fn auth_passkeys_wrong_key_counts_and_locks_the_bucket() {
     assert_eq!(sign_in(&hub, &mut key, "198.51.100.73").await.status, 200);
 }
 
-#[tokio::test]
-async fn auth_passkeys_start_is_limited_and_needs_a_key() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_passkeys_start_is_limited_and_needs_a_key(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let client = hub.anonymous(Some("203.0.113.74"));
     let none = post(&client, "/api/v1/auth/passkey/start", json!({})).await;
@@ -257,9 +251,7 @@ async fn auth_passkeys_start_is_limited_and_needs_a_key() {
     assert_eq!(error_code(&limited), "too_many_attempts");
 }
 
-#[tokio::test]
-async fn auth_passkeys_full_global_cap_still_lets_a_known_device_start() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_passkeys_full_global_cap_still_lets_a_known_device_start(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let mut key = authenticator();
@@ -300,9 +292,7 @@ async fn auth_passkeys_full_global_cap_still_lets_a_known_device_start() {
     assert_eq!(refused.status, 429);
 }
 
-#[tokio::test]
-async fn auth_passkeys_adding_and_deleting_need_a_fresh_session() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_passkeys_adding_and_deleting_need_a_fresh_session(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let mut key = authenticator();
     let owner = hub.owner();
@@ -374,9 +364,7 @@ async fn auth_passkeys_adding_and_deleting_need_a_fresh_session() {
     assert_eq!(missing.status, 404);
 }
 
-#[tokio::test]
-async fn auth_passkeys_reauth_makes_a_qr_session_fresh() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_passkeys_reauth_makes_a_qr_session_fresh(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let mut key = authenticator();
     assert_eq!(register(&hub.owner(), &mut key, None).await.status, 200);
@@ -413,9 +401,7 @@ async fn auth_passkeys_reauth_makes_a_qr_session_fresh() {
     assert_eq!(start.status, 200, "fresh after the passkey reauth");
 }
 
-#[tokio::test]
-async fn auth_passkeys_challenges_are_bound_to_their_kind_and_session() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_passkeys_challenges_are_bound_to_their_kind_and_session(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let mut key = authenticator();
     let owner = hub.owner();
@@ -463,9 +449,7 @@ async fn auth_passkeys_challenges_are_bound_to_their_kind_and_session() {
     assert_eq!(rows, 0, "every finish consumes its row, right or wrong");
 }
 
-#[tokio::test]
-async fn auth_passkeys_register_finish_needs_the_session_still_fresh() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_passkeys_register_finish_needs_the_session_still_fresh(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let owner = hub.owner();
     let mut key = authenticator();
@@ -538,4 +522,24 @@ async fn auth_passkeys_sign_in_by_a_key_deleted_meanwhile_is_refused() {
     .await
     .unwrap();
     assert_eq!(live, 0);
+}
+
+/// Ключи доступа: регистрация и вход, одноразовый вызов, неверный ключ и корзина,
+/// лимиты, свежесть сеанса, повторная проверка.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn passkey_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        auth_passkeys_register_list_and_sign_in_update_the_counter,
+        auth_passkeys_challenge_is_single_use_and_expires,
+        auth_passkeys_wrong_key_counts_and_locks_the_bucket,
+        auth_passkeys_start_is_limited_and_needs_a_key,
+        auth_passkeys_full_global_cap_still_lets_a_known_device_start,
+        auth_passkeys_adding_and_deleting_need_a_fresh_session,
+        auth_passkeys_reauth_makes_a_qr_session_fresh,
+        auth_passkeys_challenges_are_bound_to_their_kind_and_session,
+        auth_passkeys_register_finish_needs_the_session_still_fresh,
+    );
 }
