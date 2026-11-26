@@ -17,6 +17,8 @@ use sqlx::PgPool;
 use tokio::{sync::Barrier, task::JoinSet, time::timeout};
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 fn request(seed: &Seed, key: &str, text: &str) -> SubmitInput {
     SubmitInput {
         owner_id: seed.owner_id,
@@ -55,9 +57,7 @@ async fn assert_sequence(pool: &PgPool, conversation_id: Uuid, next_seq: i64, ev
     assert_eq!(sequences, (next_seq, event_seq));
 }
 
-#[tokio::test]
-async fn same_key_same_content_returns_same_input() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn same_key_same_content_returns_same_input(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     let req = request(&seed, "same", "synthetic input");
     let received_at = req.received_at;
@@ -132,9 +132,7 @@ async fn same_key_same_content_returns_same_input() {
     assert_sequence(&pool, seed.conversation_id, 2, 1).await;
 }
 
-#[tokio::test]
-async fn same_key_different_content_conflicts() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn same_key_different_content_conflicts(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     let first = submit_input(&pool, request(&seed, "same", "original"))
         .await
@@ -153,9 +151,7 @@ async fn same_key_different_content_conflicts() {
     assert_sequence(&pool, seed.conversation_id, 2, 1).await;
 }
 
-#[tokio::test]
-async fn concurrent_same_key_submits_create_one_input() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn concurrent_same_key_submits_create_one_input(pool: PgPool) {
     timeout(Duration::from_secs(30), async {
         let seed = testkit::seed(&pool).await;
         let start = Arc::new(Barrier::new(9));
@@ -184,9 +180,7 @@ async fn concurrent_same_key_submits_create_one_input() {
     .expect("same-key submitters timed out");
 }
 
-#[tokio::test]
-async fn uncommitted_submit_leaves_nothing() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn uncommitted_submit_leaves_nothing(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     let req = request(&seed, "uncommitted", "synthetic input");
     let rolled_back = {
@@ -209,9 +203,7 @@ async fn uncommitted_submit_leaves_nothing() {
     assert_sequence(&pool, seed.conversation_id, 2, 1).await;
 }
 
-#[tokio::test]
-async fn in_tx_requires_an_outer_transaction() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn in_tx_requires_an_outer_transaction(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     let mut conn = pool.acquire().await.unwrap();
     assert!(matches!(
@@ -226,9 +218,7 @@ async fn in_tx_requires_an_outer_transaction() {
     assert_sequence(&pool, seed.conversation_id, 1, 0).await;
 }
 
-#[tokio::test]
-async fn text_limit_counts_utf8_bytes() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn text_limit_counts_utf8_bytes(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     let mut text = "я".repeat(MAX_INPUT_TEXT_BYTES / 2);
     if text.len() < MAX_INPUT_TEXT_BYTES {
@@ -258,9 +248,7 @@ async fn text_limit_counts_utf8_bytes() {
     assert_counts(&pool, (2, 2, 2, 2)).await;
 }
 
-#[tokio::test]
-async fn queue_limit_refuses_101st_without_binding_key() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn queue_limit_refuses_101st_without_binding_key(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     assert_eq!(QUEUE_LIMIT, 100);
     for index in 0..100 {
@@ -291,9 +279,7 @@ async fn queue_limit_refuses_101st_without_binding_key() {
     assert_sequence(&pool, seed.conversation_id, 102, 101).await;
 }
 
-#[tokio::test]
-async fn fifo_order_is_server_sequence() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn fifo_order_is_server_sequence(pool: PgPool) {
     timeout(Duration::from_secs(30), async {
         let seed = testkit::seed(&pool).await;
         let start = Arc::new(Barrier::new(3));
@@ -342,9 +328,7 @@ async fn fifo_order_is_server_sequence() {
     .expect("FIFO submitters timed out");
 }
 
-#[tokio::test]
-async fn unknown_or_foreign_conversation_not_found() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn unknown_or_foreign_conversation_not_found(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     let foreign = testkit::seed(&pool).await;
     for conversation_id in [Uuid::now_v7(), foreign.conversation_id] {
@@ -363,9 +347,7 @@ async fn unknown_or_foreign_conversation_not_found() {
     assert_counts(&pool, (1, 1, 1, 1)).await;
 }
 
-#[tokio::test]
-async fn closed_conversation_refuses() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn closed_conversation_refuses(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     sqlx::query("update queue_state set closed = true where conversation_id = $1")
         .bind(seed.conversation_id)
@@ -400,9 +382,7 @@ async fn closed_conversation_refuses() {
     assert_counts(&pool, (1, 1, 1, 1)).await;
 }
 
-#[tokio::test]
-async fn metadata_limit_refuses_without_binding_key() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn metadata_limit_refuses_without_binding_key(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     let mut req = request(&seed, "metadata", "");
     req.content = (0..17_000)
@@ -448,9 +428,7 @@ async fn wait_for_queue_lock(pool: &PgPool) {
     wait_for_submit_lock(pool, "%for update of q%").await;
 }
 
-#[tokio::test]
-async fn queue_lock_replay_after_winner_fills_queue() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn queue_lock_replay_after_winner_fills_queue(pool: PgPool) {
     timeout(Duration::from_secs(30), async {
         let seed = testkit::seed(&pool).await;
         for index in 0..99 {
@@ -474,9 +452,7 @@ async fn queue_lock_replay_after_winner_fills_queue() {
     .expect("full-queue replay timed out");
 }
 
-#[tokio::test]
-async fn queue_lock_replay_after_winner_closes_conversation() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn queue_lock_replay_after_winner_closes_conversation(pool: PgPool) {
     timeout(Duration::from_secs(30), async {
         let seed = testkit::seed(&pool).await;
         let req = request(&seed, "close-race", "original");
@@ -506,9 +482,7 @@ async fn queue_lock_replay_after_winner_closes_conversation() {
     .expect("closed-conversation replay timed out");
 }
 
-#[tokio::test]
-async fn lost_race_rolls_back_and_returns_winner_or_conflict() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn lost_race_rolls_back_and_returns_winner_or_conflict(pool: PgPool) {
     timeout(Duration::from_secs(30), async {
         let seed = testkit::seed(&pool).await;
         for (key, loser_text) in [("replay-race", "original"), ("conflict-race", "changed")] {
@@ -535,9 +509,7 @@ async fn lost_race_rolls_back_and_returns_winner_or_conflict() {
     .expect("lost-race test timed out");
 }
 
-#[tokio::test]
-async fn in_tx_queue_lock_replay_can_commit_without_duplicate_rows() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn in_tx_queue_lock_replay_can_commit_without_duplicate_rows(pool: PgPool) {
     timeout(Duration::from_secs(30), async {
         let seed = testkit::seed(&pool).await;
         let mut winner_tx = pool.begin().await.unwrap();
@@ -562,9 +534,7 @@ async fn in_tx_queue_lock_replay_can_commit_without_duplicate_rows() {
     .expect("in-tx queue replay timed out");
 }
 
-#[tokio::test]
-async fn in_tx_input_key_race_requires_caller_rollback() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn in_tx_input_key_race_requires_caller_rollback(pool: PgPool) {
     timeout(Duration::from_secs(30), async {
         let seed = testkit::seed(&pool).await;
         let loser_conversation =
@@ -615,9 +585,7 @@ async fn in_tx_input_key_race_requires_caller_rollback() {
     .expect("in-tx lost-race test timed out");
 }
 
-#[tokio::test]
-async fn durable_input_replay_does_not_wait_for_generic_key_recreation() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn durable_input_replay_does_not_wait_for_generic_key_recreation(pool: PgPool) {
     timeout(Duration::from_secs(30), async {
         let seed = testkit::seed(&pool).await;
         for (key, loser_text) in [
@@ -711,9 +679,7 @@ async fn nul_content_is_rejected_before_sql_without_binding_key() {
     ));
 }
 
-#[tokio::test]
-async fn db_error_formatting_redacts_message_detail_and_context() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn db_error_formatting_redacts_message_detail_and_context(pool: PgPool) {
     let error = sqlx::query(
         "do $$ begin raise exception using errcode = 'P0001',
          message = 'private-message-marker', detail = 'private-detail-marker'; end $$",
@@ -763,9 +729,7 @@ fn db_error_formatting_without_sqlstate_shows_only_kind() {
     }
 }
 
-#[tokio::test]
-async fn same_key_in_another_conversation_conflicts() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn same_key_in_another_conversation_conflicts(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     submit_input(&pool, request(&seed, "same", "synthetic input"))
         .await
@@ -781,9 +745,7 @@ async fn same_key_in_another_conversation_conflicts() {
     assert_sequence(&pool, conversation_id, 1, 0).await;
 }
 
-#[tokio::test]
-async fn idempotency_lookup_record_are_owner_scoped_and_atomic() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn idempotency_lookup_record_are_owner_scoped_and_atomic(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     let other = testkit::seed(&pool).await;
     let hash = idempotency::request_hash("operation", &json!({"a": 1}));
@@ -889,5 +851,47 @@ fn request_hash_canonicalizes_objects_and_includes_operation() {
     assert_ne!(
         idempotency::request_hash("operation", &[1, 2]),
         idempotency::request_hash("operation", &[2, 1])
+    );
+}
+
+/// Отправка ввода: ключ и содержимое, одновременные ключи, откат, лимиты текста и
+/// очереди, порядок, чужой и закрытый разговор.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn submit_key_and_limit_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        same_key_same_content_returns_same_input,
+        same_key_different_content_conflicts,
+        concurrent_same_key_submits_create_one_input,
+        uncommitted_submit_leaves_nothing,
+        in_tx_requires_an_outer_transaction,
+        text_limit_counts_utf8_bytes,
+        queue_limit_refuses_101st_without_binding_key,
+        fifo_order_is_server_sequence,
+        unknown_or_foreign_conversation_not_found,
+        closed_conversation_refuses,
+    );
+}
+
+/// Лимит метаданных, повтор под замком очереди после победителя, проигранная гонка,
+/// повтор в транзакции вызывающего, форматирование ошибок.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn submit_race_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        metadata_limit_refuses_without_binding_key,
+        queue_lock_replay_after_winner_fills_queue,
+        queue_lock_replay_after_winner_closes_conversation,
+        lost_race_rolls_back_and_returns_winner_or_conflict,
+        in_tx_queue_lock_replay_can_commit_without_duplicate_rows,
+        in_tx_input_key_race_requires_caller_rollback,
+        durable_input_replay_does_not_wait_for_generic_key_recreation,
+        db_error_formatting_redacts_message_detail_and_context,
+        same_key_in_another_conversation_conflicts,
+        idempotency_lookup_record_are_owner_scoped_and_atomic,
     );
 }
