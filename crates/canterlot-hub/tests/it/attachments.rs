@@ -727,14 +727,19 @@ async fn ready_row_is_never_visible_before_the_blob_is_durable() {
     );
 }
 
+/// Три сценария на одной загрузке файла предельного размера: сама загрузка в 100 МиБ
+/// стоит секунды, поэтому её проходят один раз. Предел и байт сверх него, память во
+/// время загрузки и завершения, чтение диапазонов без буферизации файла.
 #[tokio::test]
-async fn max_size_upload_succeeds_and_one_byte_more_is_rejected() {
+async fn max_size_upload_is_bounded_in_memory_and_serves_ranges() {
     let pool = canterlot_hub::testkit::db().await;
-    let _shared = HEAVY.read().await;
+    let _exclusive = HEAVY.write().await;
     let f = Fixture::new(pool).await;
     let size = MAX_ATTACHMENT_BYTES;
     let sha = generated_sha(size);
-    let request = |size: u64| json!({"conversation_id": f.conversation, "name": "max.bin", "size": size, "sha256": sha});
+    let request = |size: u64| json!({"conversation_id": f.conversation, "name": "big.webm", "mime": "video/webm", "size": size, "sha256": sha});
+
+    // Предел: файл на байт больше отвергается до загрузки.
     let over = f
         .client
         .send(
@@ -756,33 +761,8 @@ async fn max_size_upload_succeeds_and_one_byte_more_is_rejected() {
         .await;
     assert_eq!(created.status, 201);
     let id = id_of(&created);
-    upload_generated(&f, id, size, None).await;
-    let extra = f.patch_bytes(id, size, &[0u8]).await;
-    assert_error(&extra, 413, "resource_limit", "never");
-    assert_eq!(upload_offset(&extra), Some(size));
-    let done = f.complete(id, "max_done", None).await;
-    assert_eq!(done.status, 200, "{:?}", done.body);
-    assert_eq!(done.json::<Value>()["size"], size);
-    assert_eq!(std::fs::metadata(f.blob_path(id)).unwrap().len(), size);
-}
 
-#[tokio::test]
-async fn upload_memory_stays_bounded() {
-    let pool = canterlot_hub::testkit::db().await;
-    let _exclusive = HEAVY.write().await;
-    let f = Fixture::new(pool).await;
-    let size = MAX_ATTACHMENT_BYTES;
-    let sha = generated_sha(size);
-    let created = f
-        .client
-        .send(
-            Method::POST,
-            "/api/v1/attachments",
-            Some("memory"),
-            Some(json!({"conversation_id": f.conversation, "name": "memory.bin", "size": size, "sha256": sha})),
-        )
-        .await;
-    let id = id_of(&created);
+    // Память: потоковая загрузка и завершение не держат файл в памяти.
     let baseline = rss_bytes();
     let peak = Arc::new(std::sync::atomic::AtomicU64::new(baseline));
     let probe_peak = peak.clone();
@@ -791,13 +771,50 @@ async fn upload_memory_stays_bounded() {
     });
     upload_generated(&f, id, size, Some(probe)).await;
     peak.fetch_max(rss_bytes(), std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(f.complete(id, "memory_done", None).await.status, 200);
+
+    // Предел: байт сверх объявленного размера не принимается.
+    let extra = f.patch_bytes(id, size, &[0u8]).await;
+    assert_error(&extra, 413, "resource_limit", "never");
+    assert_eq!(upload_offset(&extra), Some(size));
+    let done = f.complete(id, "max_done", None).await;
+    assert_eq!(done.status, 200, "{:?}", done.body);
     peak.fetch_max(rss_bytes(), std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(done.json::<Value>()["size"], size);
+    assert_eq!(std::fs::metadata(f.blob_path(id)).unwrap().len(), size);
     let growth = peak.load(std::sync::atomic::Ordering::SeqCst) - baseline;
-    eprintln!("rss growth {} KiB", growth / 1024);
+    eprintln!("upload rss growth {} KiB", growth / 1024);
     assert!(
         growth < 32 * MIB as u64,
         "RSS grew by {} MiB while 100 MiB streamed",
+        growth / MIB as u64
+    );
+
+    // Диапазоны: хвост и середина большого файла читаются без буферизации.
+    let baseline = rss_bytes();
+    let from = size - 1024 * 1024;
+    let tail = get_content(&f, id, &[("Range", &format!("bytes={from}-"))]).await;
+    assert_eq!(tail.status, 206);
+    assert_eq!(tail.headers["content-length"], (1024 * 1024).to_string());
+    assert_eq!(
+        tail.headers["content-range"],
+        format!("bytes {from}-{}/{size}", size - 1)
+    );
+    let mut expected = Vec::new();
+    for index in from / BLOCK as u64..size.div_ceil(BLOCK as u64) {
+        let data = block(index);
+        let take = (size - index * BLOCK as u64).min(BLOCK as u64) as usize;
+        expected.extend_from_slice(&data[..take]);
+    }
+    let skip = (from - from / BLOCK as u64 * BLOCK as u64) as usize;
+    assert_eq!(tail.body.as_ref(), &expected[skip..]);
+    let middle = get_content(&f, id, &[("Range", "bytes=50000000-50000099")]).await;
+    assert_eq!(middle.status, 206);
+    assert_eq!(middle.body.len(), 100);
+    let growth = rss_bytes().saturating_sub(baseline);
+    eprintln!("range rss growth {} KiB", growth / 1024);
+    assert!(
+        growth < 24 * MIB as u64,
+        "RSS grew by {} MiB while reading 1 MiB of a 100 MiB file",
         growth / MIB as u64
     );
 }
@@ -2987,53 +3004,6 @@ async fn content_serves_video_type_only_with_a_matching_signature() {
     }
 }
 
-#[tokio::test]
-async fn content_range_of_a_large_file_is_not_buffered() {
-    let pool = canterlot_hub::testkit::db().await;
-    let _exclusive = HEAVY.write().await;
-    let f = Fixture::new(pool).await;
-    let size = MAX_ATTACHMENT_BYTES;
-    let created = f
-        .client
-        .send(
-            Method::POST,
-            "/api/v1/attachments",
-            Some("range_big"),
-            Some(json!({"conversation_id": f.conversation, "name": "big.webm", "mime": "video/webm", "size": size, "sha256": generated_sha(size)})),
-        )
-        .await;
-    let id = id_of(&created);
-    upload_generated(&f, id, size, None).await;
-    assert_eq!(f.complete(id, "range_big_done", None).await.status, 200);
-    let baseline = rss_bytes();
-    let from = size - 1024 * 1024;
-    let tail = get_content(&f, id, &[("Range", &format!("bytes={from}-"))]).await;
-    assert_eq!(tail.status, 206);
-    assert_eq!(tail.headers["content-length"], (1024 * 1024).to_string());
-    assert_eq!(
-        tail.headers["content-range"],
-        format!("bytes {from}-{}/{size}", size - 1)
-    );
-    let mut expected = Vec::new();
-    for index in from / BLOCK as u64..size.div_ceil(BLOCK as u64) {
-        let data = block(index);
-        let take = (size - index * BLOCK as u64).min(BLOCK as u64) as usize;
-        expected.extend_from_slice(&data[..take]);
-    }
-    let skip = (from - from / BLOCK as u64 * BLOCK as u64) as usize;
-    assert_eq!(tail.body.as_ref(), &expected[skip..]);
-    let middle = get_content(&f, id, &[("Range", "bytes=50000000-50000099")]).await;
-    assert_eq!(middle.status, 206);
-    assert_eq!(middle.body.len(), 100);
-    let growth = rss_bytes().saturating_sub(baseline);
-    eprintln!("rss growth {} KiB", growth / 1024);
-    assert!(
-        growth < 24 * MIB as u64,
-        "RSS grew by {} MiB while reading 1 MiB of a 100 MiB file",
-        growth / MIB as u64
-    );
-}
-
 async fn blocked_by_pid(pool: &PgPool, pid: i32) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -3130,7 +3100,7 @@ async fn settings_promotion_and_attachment_fk_have_no_deadlocks_50_times() {
 }
 #[test]
 fn blob_shards_use_random_uuid_tail() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = canterlot_hub::testkit::scratch_dir().unwrap();
     let config = canterlot_hub::config::AttachmentsConfig {
         blob_dir: dir.path().into(),
         ..Default::default()
@@ -3145,7 +3115,7 @@ fn blob_shards_use_random_uuid_tail() {
 #[tokio::test]
 async fn legacy_blob_shards_remain_readable_and_removable() {
     use canterlot_hub::attachments::BlobStore;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = canterlot_hub::testkit::scratch_dir().unwrap();
     let config = canterlot_hub::config::AttachmentsConfig {
         blob_dir: dir.path().into(),
         ..Default::default()
