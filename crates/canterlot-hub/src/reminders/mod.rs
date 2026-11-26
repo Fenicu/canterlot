@@ -5,6 +5,7 @@
 //! выдача приклеивает к вводу. Обе включаются и выключаются настройкой владельца.
 
 pub mod plan;
+pub mod todo;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -82,8 +83,9 @@ pub async fn prepare_in_tx(
     conversation_id: Uuid,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let Some(owner_id): Option<Uuid> = sqlx::query_scalar(
-        "select owner_id from conversations where id = $1 and trashed_at is null",
+    let Some((owner_id, side)): Option<(Uuid, bool)> = sqlx::query_as(
+        "select owner_id, side_of is not null from conversations
+         where id = $1 and trashed_at is null",
     )
     .bind(conversation_id)
     .fetch_optional(&mut *conn)
@@ -97,10 +99,27 @@ pub async fn prepare_in_tx(
     {
         let origin = event_origin(json!({"kind": "plan_reminder", "plan_tasks": numbers}));
         note_in_tx(
-            conn,
+            &mut *conn,
             owner_id,
             conversation_id,
             "plan_reminder",
+            text,
+            origin,
+            correlation_id,
+        )
+        .await?;
+    }
+    // Боковой чат — короткий разговор владельца о родителе: список задач в нём не ведут.
+    if settings.todo_enabled
+        && !side
+        && let Some((text, revision)) = todo::take_in_tx(&mut *conn, conversation_id).await?
+    {
+        let origin = event_origin(json!({"kind": "todo_reminder", "todo_revision": revision}));
+        note_in_tx(
+            conn,
+            owner_id,
+            conversation_id,
+            "todo_reminder",
             text,
             origin,
             correlation_id,

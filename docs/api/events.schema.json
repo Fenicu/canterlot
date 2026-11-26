@@ -9394,6 +9394,9 @@
             "type": "integer"
           }
         },
+        "todo_revision": {
+          "type": "integer"
+        },
         "turn_hung_action": { "type": "string" },
         "turn_hung_notice": { "type": "boolean" },
         "turn_hung_episode": { "$ref": "#/$defs/Uuid" },

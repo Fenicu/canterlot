@@ -372,6 +372,188 @@ async fn orphaned_reviews_are_capped_and_the_setting_turns_them_off(pool: PgPool
     );
 }
 
+/// Основная дорожка списка задач с пунктами `(текст, состояние)`, обновлённая `age` назад.
+async fn todo_list(pool: &PgPool, conversation_id: Uuid, items: &[(&str, &str)], age: &str) {
+    let items: Vec<Value> = items
+        .iter()
+        .map(|(text, status)| json!({"text": text, "status": status}))
+        .collect();
+    sqlx::query(
+        "insert into agent_todos as t (conversation_id, lane_block_id, generation,
+                                       source_revision, revision, items, omitted, updated_at)
+         values ($1, null, 1, 1, 1, $2, 0, clock_timestamp() - $3::interval)
+         on conflict (conversation_id, lane_block_id) do update
+         set revision = t.revision + 1, source_revision = t.source_revision + 1,
+             items = excluded.items, updated_at = excluded.updated_at",
+    )
+    .bind(conversation_id)
+    .bind(Value::Array(items))
+    .bind(age)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn rewind_todo_note(pool: &PgPool, conversation_id: Uuid, by: &str) {
+    sqlx::query(
+        "update agent_todos set reminded_at = reminded_at - $2::interval
+         where conversation_id = $1 and lane_block_id is null",
+    )
+    .bind(conversation_id)
+    .bind(by)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn todo_in_progress_after_three_quiet_turns(pool: PgPool) {
+    let seed = orchestrator(&pool).await;
+    let id = seed.conversation_id;
+    todo_list(
+        &pool,
+        id,
+        &[
+            ("Fix X", "in_progress"),
+            ("Ship Y", "in_progress"),
+            ("Z", "completed"),
+        ],
+        "1 hour",
+    )
+    .await;
+    finished_runs(&pool, id, 2).await;
+    assert!(
+        prepare(&pool, id, "todo_reminder").await.is_empty(),
+        "two turns are normal"
+    );
+    finished_runs(&pool, id, 1).await;
+    let notes = prepare(&pool, id, "todo_reminder").await;
+    assert_eq!(
+        notes,
+        [
+            "[canterlot] Your todo list still shows 2 in progress (\"Fix X\", …) and has not changed for 3 turns. Update it if that no longer matches your work."
+        ]
+    );
+    let origin: Value =
+        sqlx::query_scalar("select origin from inputs where conversation_id=$1 and service_note")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        origin["event"],
+        json!({"kind": "todo_reminder", "todo_revision": 1})
+    );
+    finished_runs(&pool, id, 10).await;
+    rewind_todo_note(&pool, id, "4 hours").await;
+    assert!(
+        prepare(&pool, id, "todo_reminder").await.is_empty(),
+        "one note per list revision"
+    );
+
+    // Новая ревизия, но с прошлой заметки не прошло трёх часов.
+    rewind_todo_note(&pool, id, "-4 hours").await;
+    todo_list(&pool, id, &[("Fix X", "in_progress")], "1 hour").await;
+    finished_runs(&pool, id, 3).await;
+    assert!(
+        prepare(&pool, id, "todo_reminder").await.is_empty(),
+        "three hours"
+    );
+    rewind_todo_note(&pool, id, "4 hours").await;
+    let notes = prepare(&pool, id, "todo_reminder").await;
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].contains("1 in progress (\"Fix X\")"),
+        "{}",
+        notes[0]
+    );
+}
+
+async fn todo_pending_only_after_ten_turns(pool: PgPool) {
+    let seed = orchestrator(&pool).await;
+    let id = seed.conversation_id;
+    todo_list(&pool, id, &[("A", "pending"), ("B", "completed")], "1 hour").await;
+    finished_runs(&pool, id, 9).await;
+    assert!(prepare(&pool, id, "todo_reminder").await.is_empty());
+    finished_runs(&pool, id, 1).await;
+    assert_eq!(
+        prepare(&pool, id, "todo_reminder").await,
+        [
+            "[canterlot] Your todo list has not changed for 10 turns (1 open). Update it if it no longer matches your work."
+        ]
+    );
+}
+
+async fn todo_reminder_skips_finished_lists_side_chats_and_the_setting(pool: PgPool) {
+    let seed = orchestrator(&pool).await;
+    let id = seed.conversation_id;
+    todo_list(
+        &pool,
+        id,
+        &[("A", "completed"), ("B", "cancelled")],
+        "1 hour",
+    )
+    .await;
+    finished_runs(&pool, id, 12).await;
+    assert!(
+        prepare(&pool, id, "todo_reminder").await.is_empty(),
+        "finished list"
+    );
+
+    todo_list(&pool, id, &[("A", "in_progress")], "1 hour").await;
+    finished_runs(&pool, id, 3).await;
+    let mut conn = pool.acquire().await.unwrap();
+    reminders::replace_settings_in_tx(
+        &mut conn,
+        seed.owner_id,
+        AgentReminderSettings {
+            plan_enabled: true,
+            todo_enabled: false,
+        },
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    assert!(
+        prepare(&pool, id, "todo_reminder").await.is_empty(),
+        "setting off"
+    );
+
+    let mut conn = pool.acquire().await.unwrap();
+    reminders::replace_settings_in_tx(&mut conn, seed.owner_id, AgentReminderSettings::default())
+        .await
+        .unwrap();
+    drop(conn);
+    let parent = child(&pool, &seed).await;
+    sqlx::query("update conversations set side_of = $2 where id = $1")
+        .bind(id)
+        .bind(parent)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        prepare(&pool, id, "todo_reminder").await.is_empty(),
+        "side chat"
+    );
+
+    // Дорожка субагента не считается.
+    let other = child(&pool, &seed).await;
+    sqlx::query(
+        "insert into agent_todos (conversation_id, lane_block_id, generation, source_revision,
+                                  revision, items, omitted, updated_at)
+         values ($1, $2, 1, 1, 1, '[{\"text\":\"A\",\"status\":\"in_progress\"}]', 0,
+                 clock_timestamp() - interval '1 hour')",
+    )
+    .bind(other)
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        prepare(&pool, other, "todo_reminder").await.is_empty(),
+        "subagent lane"
+    );
+}
+
 /// Напоминания: настройка, план, список задач.
 /// Перед каждым случаем база возвращается к снимку пустой базы.
 #[tokio::test]
@@ -383,5 +565,8 @@ async fn agent_reminder_cases() {
         plan_digest_rides_the_next_dispatched_input,
         plan_digest_is_not_repeated_and_waits_three_hours,
         orphaned_reviews_are_capped_and_the_setting_turns_them_off,
+        todo_in_progress_after_three_quiet_turns,
+        todo_pending_only_after_ten_turns,
+        todo_reminder_skips_finished_lists_side_chats_and_the_setting,
     );
 }
