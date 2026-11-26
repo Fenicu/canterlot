@@ -2247,26 +2247,6 @@ async fn second_input_during_a_turn_is_rejected_not_steered() {
     bench.until_finished(first.command_id).await;
     bench.close(CloseMode::Graceful).await;
 }
-
-
-
-// 500 ничего не доказывает, а автоматического повтора нет (D-6): запись не найдена,
-// исполнение освобождается, ввод остаётся неподтверждённым.
-
-
-// Потока нет, доказательство только в проекции.
-
-fn bench_route_inbox(bench: &Bench, session: &str, input: &Transmission) {
-    // Маршрут пишется в журнал двойника файлом: сценарий уже загружен.
-    let id = format!("msg_{}", input.command_id.simple());
-    let body = json!({"data": [{"id": id, "sessionID": session, "type": "user"}]});
-    bench
-        .fake
-        .write_override("GET", &format!("/api/session/{session}/inbox"), &body);
-}
-
-
-
 #[tokio::test]
 async fn cyrillic_text_survives_the_stream_and_the_input() {
     let mut script = ready();
@@ -3679,7 +3659,7 @@ fn permission_script(cases: Vec<(Reply, bool)>) -> Script {
             relocate(&json!({"type": "session.inbox.delivered",
                 "data": {"inboxID": recorded, "sessionID": ready_session}})),
         ];
-        turn.extend(prefix.iter().map(|event| relocate(event)));
+        turn.extend(prefix.iter().map(relocate));
         let mut asked = relocate(&asked);
         asked["data"]["id"] = request.clone().into();
         turn.push(asked);
@@ -3695,7 +3675,7 @@ fn permission_script(cases: Vec<(Reply, bool)>) -> Script {
         replied["data"]["requestID"] = request.clone().into();
         end.push(replied);
         if full_tail {
-            end.extend(rest.iter().map(|event| relocate(event)));
+            end.extend(rest.iter().map(relocate));
         } else {
             end.push(finish(&ready_session));
         }
@@ -4183,19 +4163,6 @@ fn single(text: &str) -> AnswerValue {
 fn multiple(values: &[&str]) -> AnswerValue {
     AnswerValue::Multiple(values.iter().map(|value| (*value).to_owned()).collect())
 }
-
-fn edit_form(script: &mut Script, change: impl Fn(&mut Value)) {
-    for step in &mut script.steps {
-        if let Step::Emit { events } = step {
-            for event in events {
-                if event["type"] == "form.created" {
-                    change(&mut event["data"]["form"]);
-                }
-            }
-        }
-    }
-}
-
 /// Вопросы формы на общем стенде: у каждого случая свой id формы. Конец хода общий,
 /// отмена уходит маршрутом с id случая.
 fn question_script(cases: Vec<QuestionCase>) -> Script {
@@ -4516,7 +4483,7 @@ async fn question_answers_go_by_the_form_keys() {
     let input = bench.input("x");
     bench.accepted(&input).await;
     let events = bench.until_finished(input.command_id).await;
-    let path = format!("/api/session/global/form/frm_clone004");
+    let path = "/api/session/global/form/frm_clone004".to_owned();
     assert_cancelled(&bench, &events, &path);
 
     // Отказ без текста кончил бы ход: DELETE всегда с сообщением.
@@ -4561,57 +4528,6 @@ async fn question_answers_go_by_the_form_keys() {
     bench.until_finished(input.command_id).await;
     bench.close(CloseMode::Graceful).await;
 }
-
-
-// Сервер принял бы неполный ответ и подставил модели "Unanswered".
-
-// Подпись видит владелец, значение ждёт сервер. Кадр выдуман: инструмент `question` кладёт
-// в оба поля одно и то же, различать их разрешает схема `Form.Option`.
-
-async fn cancelled_form(script: Script) -> (Bench, Vec<AdapterEvent>) {
-    let mut bench = Bench::new(script);
-    bench.start_ok().await;
-    let input = bench.input("x");
-    bench.accepted(&input).await;
-    let events = bench.until_finished(input.command_id).await;
-    (bench, events)
-}
-
-fn form_cancel_script(change: impl Fn(&mut Value)) -> (Script, String) {
-    let capture = Script::from_capture("question", None);
-    let mut form = tool_events(&capture, &["form.created"]).remove(0);
-    change(&mut form["data"]["form"]);
-    let session = session_of(&capture);
-    let owner = form["data"]["form"]["sessionID"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let id = form["data"]["form"]["id"].as_str().unwrap().to_owned();
-    let mut script = capture
-        .clone()
-        .with_canterlot_mcp("connected")
-        .with_recorded_models()
-        .with_recorded_agents();
-    replace_events_after_prompt(
-        &mut script,
-        vec![
-            Step::Emit { events: vec![form] },
-            Step::Stall { ms: 200 },
-            Step::Emit {
-                events: vec![finish(&session)],
-            },
-        ],
-    );
-    let path = format!("/api/session/{owner}/form/{id}");
-    script.set_route("DELETE", &path, vec![reply_204()]);
-    (script, path)
-}
-
-/// Путь отмены в этом запуске: записанную сессию корня двойник заменил живой.
-fn live_path(bench: &Bench, script: &Script, path: &str) -> String {
-    path.replace(&session_of(script), &bench.fake.session())
-}
-
 fn assert_cancelled(bench: &Bench, events: &[AdapterEvent], path: &str) {
     assert!(
         events
@@ -6383,16 +6299,6 @@ fn failing_turn(error: Value) -> Script {
     }
     script
 }
-
-async fn failed_turn(error: Value) -> (Bench, Vec<AdapterEvent>) {
-    let mut bench = Bench::new(failing_turn(error));
-    bench.start_ok().await;
-    let input = bench.input("x");
-    bench.accepted(&input).await;
-    let events = bench.until_finished(input.command_id).await;
-    (bench, events)
-}
-
 impl Bench {
     async fn until(&mut self, wanted: impl Fn(&AdapterEvent) -> bool) -> Vec<AdapterEvent> {
         let mut events = Vec::new();
@@ -7037,25 +6943,22 @@ async fn failed_steer_reconciliation_leaves_the_running_turn_alone() {
         if std::time::Instant::now() >= cap {
             break;
         }
-        match tokio::time::timeout(Duration::from_millis(200), bench.adapter.next_event()).await {
-            Ok(event) => {
-                if matches!(
-                    &event,
-                    AdapterEvent::RunFinished { input_command_id, .. }
+        if let Ok(event) = tokio::time::timeout(Duration::from_millis(200), bench.adapter.next_event()).await {
+            if matches!(
+                &event,
+                AdapterEvent::RunFinished { input_command_id, .. }
                     if *input_command_id == second.command_id
-                ) {
-                    stray_finish = true;
-                    break;
-                }
-                if matches!(
-                    &event,
-                    AdapterEvent::RunFinished { input_command_id, .. }
-                    if *input_command_id == first.command_id
-                ) {
-                    break;
-                }
+            ) {
+                stray_finish = true;
+                break;
             }
-            Err(_) => {}
+            if matches!(
+                &event,
+                AdapterEvent::RunFinished { input_command_id, .. }
+                    if *input_command_id == first.command_id
+            ) {
+                break;
+            }
         }
         let reads = bench
             .fake
