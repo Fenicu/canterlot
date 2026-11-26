@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Состав гейта по тексту скриптов: gate.sh зовёт ровно настоящие шаги (один npm ci,
-# check.sh --all --no-web, наборы scripts/deploy/tests/run.sh, check-web.sh), check.sh и
+# check.sh --all --no-web, профиль stress при X.Y.0 или --stress, наборы
+# scripts/deploy/tests/run.sh, check-web.sh), check.sh и
 # check-web.sh держат свои команды Rust, речи, статики и vitest, а контейнерный путь
 # (gate-remote.sh, гейт на раннере) делегирует gate.sh и несёт пакеты наборов выката.
 # scripts/gate/test.sh проверяет поведение гейта на подменённых шагах
@@ -43,6 +44,9 @@ has "$code" 'bash scripts/check.sh --all --no-web' \
     || fail 'gate.sh не зовёт check.sh --all --no-web'
 has "$code" 'bash scripts/check-web.sh' \
     || fail 'gate.sh не зовёт check-web.sh'
+# Нагрузочный профиль — отдельный шаг гейта: он идёт при версии X.Y.0 или с --stress.
+has "$code" -- '--profile stress' || fail 'gate.sh не запускает профиль stress'
+has "$code" -- '--stress' || fail 'gate.sh не принимает --stress'
 
 # --no-web обязан снимать только веб-этап: единственное место, где флаг меняет
 # выбор, — want_web=0; Rust и речь от него не зависят.
@@ -129,6 +133,6 @@ printf 'Состав гейта:\n'
 printf '  версия, fmt, clippy, nextest, речь, эта сверка      %s\n' "$check"
 printf '  статические проверки, vitest, сборки, vitest.build  %s\n' "$web_check"
 printf '  --no-web снимает только веб-этап, Rust и речь целы: да\n'
-printf '  один npm ci, check.sh --all --no-web, наборы выката, check-web.sh: да\n'
+printf '  один npm ci, check.sh --all --no-web, профиль stress, наборы выката, check-web.sh: да\n'
 printf '  контейнерный путь (gate-remote.sh, runner-gate.sh) = scripts/gate.sh, наборы выката включены: да\n'
 printf 'Итог: состав гейта на месте\n'

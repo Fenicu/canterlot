@@ -546,6 +546,90 @@ sed -n '/отчёт о нестабильных тестах/,$p' "$out" >"$tmp/
 grep -qF 'rust|crate-a|mod::flaky' "$tmp/flaky-report" || fail 'старое состояние: тест пропал из отчёта'
 [[ -d "$g9dir/pass-1" ]] || fail 'повторный перезапуск не сохранил проход'
 
+# --- нагрузочный профиль stress: версия X.Y.0, --stress и перезапуск ---
+# Подмена stress пишет свой junit и падает на FAKE_STRESS_FAIL, как настоящий профиль.
+# shellcheck disable=SC2016 # переменные раскрываются внутри bash -c
+fake_stress='
+echo "stress $GATE_STEP_MODE [$GATE_STEP_SELECTION]" >>"$GATE_FAKE_CALLS"
+mkdir -p target/nextest/stress
+if [[ "${FAKE_STRESS_FAIL:-none}" == none ]]; then
+  printf "%s\n" "<testsuites><testsuite name=\"crate-s\"><testcase name=\"mod::slow\"/></testsuite></testsuites>" >target/nextest/stress/junit.xml
+  exit 0
+fi
+printf "%s\n" "<testsuites><testsuite name=\"crate-s\"><testcase name=\"$FAKE_STRESS_FAIL\"><failure/></testcase></testsuite></testsuites>" >target/nextest/stress/junit.xml
+exit 1
+'
+stress_env=(
+    env CANTERLOT_NO_LEASE=1 CANTERLOT_GATE_DEPLOY_NEEDED=0
+    CANTERLOT_GATE_STEP_NPM="$fake_npm" CANTERLOT_GATE_STEP_CHECK="$fake_check_pass_early"
+    CANTERLOT_GATE_STEP_STRESS="$fake_stress"
+    CANTERLOT_GATE_STEP_DEPLOY="$fake_deploy" CANTERLOT_GATE_STEP_WEB="$fake_web"
+)
+new_version_repo() {
+    new_gate_repo "$1"
+    printf '[workspace.package]\nversion = "%s"\n' "$2" >"$1/Cargo.toml"
+    git -C "$1" add Cargo.toml
+    git -C "$1" commit -qm version
+}
+state_of() {
+    printf '%s/.superpowers/gate/%s/state.tsv' "$1" "$(git -C "$1" rev-parse --short=8 HEAD)"
+}
+
+# Патч-выпуск без --stress профиль пропускает: состояние помнит stress_exit=skipped.
+gs1="$tmp/gs-patch"
+new_version_repo "$gs1" 1.52.1
+: >"$GATE_FAKE_CALLS"
+run 0 "${stress_env[@]}" bash "$gs1/scripts/gate.sh" --no-attest
+grep -q 'skipped (патч-выпуск без --stress)' "$out" || { cat "$out" >&2; fail 'патч-выпуск не пропустил stress'; }
+if grep -q '^stress ' "$GATE_FAKE_CALLS"; then fail 'патч-выпуск всё же запустил stress'; fi
+grep -qF $'stress_required\t0' "$(state_of "$gs1")" || fail 'в состоянии нет stress_required=0'
+grep -qF $'stress_exit\tskipped' "$(state_of "$gs1")" || fail 'в состоянии нет stress_exit=skipped'
+
+# Явный --stress включает профиль и на патч-выпуске.
+: >"$GATE_FAKE_CALLS"
+run 0 "${stress_env[@]}" bash "$gs1/scripts/gate.sh" --stress --no-attest
+grep -q '^stress full' "$GATE_FAKE_CALLS" || { cat "$GATE_FAKE_CALLS" >&2; fail '--stress не запустил профиль'; }
+grep -qF $'stress_exit\t0' "$(state_of "$gs1")" || fail 'успешный stress не дал stress_exit=0'
+
+# Минорный выпуск (X.Y.0) запускает профиль сам, и аттестация это записывает.
+gs2="$tmp/gs-minor"
+new_version_repo "$gs2" 1.53.0
+: >"$GATE_FAKE_CALLS"
+run 0 "${stress_env[@]}" bash "$gs2/scripts/gate.sh"
+grep -q '^stress full' "$GATE_FAKE_CALLS" || { cat "$GATE_FAKE_CALLS" >&2; fail 'минорный выпуск не запустил stress'; }
+gs2att="$gs2/.superpowers/gate/$(git -C "$gs2" rev-parse HEAD).ok"
+grep -qx 'stress_exit=0' "$gs2att" || fail 'в аттестации нет stress_exit=0'
+grep -q '^stress_duration_s=' "$gs2att" || fail 'в аттестации нет stress_duration_s'
+grep -qF $'stress_required\t1' "$(state_of "$gs2")" || fail 'в состоянии нет stress_required=1'
+
+# Перезапуск после падения stress трогает только stress, с точным фильтром и полным
+# профилем; прошедший check не перезапускается.
+gs3="$tmp/gs-rerun"
+new_version_repo "$gs3" 1.53.0
+export FAKE_STRESS_FAIL=mod::slow
+run 1 "${stress_env[@]}" bash "$gs3/scripts/gate.sh" --no-attest
+grep -qF $'stress_failed\ttests' "$(state_of "$gs3")" || fail 'падение stress не отнесено к тестам'
+grep -qF $'stress_fail\trust|crate-s|mod::slow' "$(state_of "$gs3")" || fail 'нет идентичности упавшего stress-теста'
+export FAKE_STRESS_FAIL=none
+: >"$GATE_FAKE_CALLS"
+run 0 "${stress_env[@]}" bash "$gs3/scripts/gate.sh" --rerun-failed --no-attest
+if grep -qE '^(npm|check|deploy|web) ' "$GATE_FAKE_CALLS"; then fail 'перезапуск stress задел прошедшие шаги'; fi
+grep -qF 'stress tests [(binary_id(=crate-s) & test(=mod::slow))]' "$GATE_FAKE_CALLS" \
+    || { cat "$GATE_FAKE_CALLS" >&2; fail 'перезапуск stress не взял точный фильтр'; }
+grep -qF $'flaky\trust|crate-s|mod::slow' "$(state_of "$gs3")" || fail 'нет отметки flaky для stress'
+
+# Профиль, включённый --stress на патч-выпуске, перезапускается и без флага: состояние
+# помнит stress_required=1, иначе упавший шаг тихо стал бы skipped.
+gs4="$tmp/gs-stress-flag"
+new_version_repo "$gs4" 1.52.1
+export FAKE_STRESS_FAIL=mod::slow
+run 1 "${stress_env[@]}" bash "$gs4/scripts/gate.sh" --stress --no-attest
+export FAKE_STRESS_FAIL=none
+: >"$GATE_FAKE_CALLS"
+run 0 "${stress_env[@]}" bash "$gs4/scripts/gate.sh" --rerun-failed --no-attest
+grep -q '^stress tests ' "$GATE_FAKE_CALLS" || { cat "$GATE_FAKE_CALLS" >&2; fail 'перезапуск забыл профиль из первого прохода'; }
+grep -qF $'stress_required\t1' "$(state_of "$gs4")" || fail 'перезапуск снял stress_required=1'
+
 # Битый индекс: git status падает, и проверка чистоты обязана провалиться, а не
 # пропустить аттестацию из-за пустого вывода.
 printf 'garbage' >"$scratch/.git/index"
@@ -591,10 +675,19 @@ if grep -q '^test_seams=' "$att"; then fail 'аттестация раннера
 for leftover in "$r1/.superpowers/gate/"*.tmp.*; do
     [[ ! -e "$leftover" ]] || fail 'после записи остался временный файл аттестации'
 done
-# Ровно те ключи, которые release.sh проверяет: все *_exit равны 0 или deploy skipped.
+# Ровно те ключи, которые release.sh проверяет: все *_exit равны 0 или deploy/stress skipped.
 while IFS='=' read -r key value; do
     if [[ $key == *_exit && $value != 0 && $value != skipped ]]; then fail "аттестация раннера: $key=$value"; fi
 done <"$att"
+grep -qx 'stress_exit=0' "$att" || fail 'аттестация раннера: нет stress_exit из отчёта раннера'
+
+# --stress уходит на раннер вместе с sha.
+r1s="$tmp/r1-stress"
+new_runner_repo "$r1s"
+r1ssha=$(git -C "$r1s" rev-parse HEAD)
+run 0 "${runner_env[@]}" bash "$r1s/scripts/gate.sh" --runner auto --stress
+grep -qF -- "scripts/gate/runner-gate.sh $r1ssha --stress" "$FAKE_WORKER_CALLS" \
+    || { cat "$FAKE_WORKER_CALLS" >&2; fail '--stress не дошёл до runner-gate.sh'; }
 
 # --no-attest: гейт идёт, аттестации нет.
 r1b="$tmp/r1b"
@@ -838,6 +931,13 @@ tmp_host=${tmp_line#tmp }; tmp_host=${tmp_host% empty}
 if grep -q '^build ' "$FAKE_DOCKER_CALLS"; then fail 'runner-gate: образ пересобран, хотя он есть'; fi
 grep -qx 'runner	runner-a' "$rwt/.gate-out/state.tsv" || fail 'runner-gate: имя раннера не дописано в state.tsv'
 [[ -s "$rwt/.gate-out/result.txt" ]] || fail 'runner-gate: нет result.txt в .gate-out'
+
+# --stress передаётся контейнеру и дальше в scripts/gate.sh.
+rm -rf "$rwt/.gate-out"
+: >"$FAKE_DOCKER_CALLS"
+run 0 "${rg_env[@]}" CANTERLOT_RUNNER_NAME=runner-a bash "$rwt/scripts/gate/runner-gate.sh" "$rsha" --stress
+run_line=$(grep '^run ' "$FAKE_DOCKER_CALLS") || fail 'runner-gate --stress: нет docker run'
+grep -qF -- "--sha ${rsha:0:12} --stress" <<<"$run_line" || fail 'runner-gate: --stress не дошёл до in-container.sh'
 
 # Образа нет: он собирается из Dockerfile ЭТОЙ рабочей копии с версиями из неё.
 rm -rf "$rwt/.gate-out"

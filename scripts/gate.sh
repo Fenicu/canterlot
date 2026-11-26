@@ -10,6 +10,9 @@
 #                                    по умолчанию --runner prefer: первый доступный раннер,
 #                                    иначе эта VM
 #   scripts/gate.sh --rerun-failed   перезапустить только то, что упало на этом же коммите
+#   scripts/gate.sh --stress         добавить нагрузочный профиль nextest (stress) в прогон;
+#                                    без флага он идёт сам при версии X.Y.0, а патч-выпуски
+#                                    его пропускают
 #   scripts/gate.sh --no-attest      гейт без аттестации (нужен, если рабочая копия грязная)
 #   scripts/gate.sh --runner prefer|local|auto|<машина>
 #                                    prefer (по умолчанию) — первый доступный статический
@@ -66,16 +69,18 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 original_args=("$@")
 
 usage() {
-    echo 'Использование: scripts/gate.sh [--rerun-failed] [--no-attest] [--runner prefer|local|auto|<машина>]'
+    echo 'Использование: scripts/gate.sh [--rerun-failed] [--stress] [--no-attest] [--runner prefer|local|auto|<машина>]'
 }
 
 attest=1
 rerun=0
+want_stress=0
 runner=prefer
 while (($#)); do
     case "$1" in
         --no-attest) attest=0 ;;
         --rerun-failed) rerun=1 ;;
+        --stress) want_stress=1 ;;
         --runner)
             [[ $# -ge 2 ]] || { usage >&2; exit 2; }
             runner=$2
@@ -111,17 +116,34 @@ step_npm="${CANTERLOT_GATE_STEP_NPM:-}"
 step_check="${CANTERLOT_GATE_STEP_CHECK:-}"
 step_deploy="${CANTERLOT_GATE_STEP_DEPLOY:-}"
 step_web="${CANTERLOT_GATE_STEP_WEB:-}"
+step_stress="${CANTERLOT_GATE_STEP_STRESS:-}"
 step_needed="${CANTERLOT_GATE_DEPLOY_NEEDED:-}"
 # Подменённый шаг — уже не доказательство качества: такой прогон не имеет права
 # дать аттестацию, которую примет release.sh. Метка живёт и в состоянии, чтобы
 # перезапуск не «отмыл» швы, использованные в первом прогоне.
 seams_active=0
-for seam in "$step_npm" "$step_check" "$step_deploy" "$step_web" "$step_needed"; do
+for seam in "$step_npm" "$step_check" "$step_deploy" "$step_web" "$step_stress" "$step_needed"; do
     [[ -n "$seam" ]] && seams_active=1
 done
 if ((seams_active)); then
     printf 'ВНИМАНИЕ: включены тестовые швы CANTERLOT_GATE_STEP_* / CANTERLOT_GATE_DEPLOY_NEEDED: это НЕ настоящий гейт; аттестация получит test_seams=1 и будет отклонена release.sh\n' >&2
 fi
+
+# Версия выпуска решает, нужен ли нагрузочный профиль: X.Y.0 — минорный или мажорный
+# выпуск, X.Y.Z с Z>0 — патч, и он профиль не гоняет. --stress включает его явно.
+workspace_version() {
+    [[ -f Cargo.toml ]] || return 0
+    sed -n 's/^version = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' Cargo.toml | head -n 1
+}
+stress_needed=0
+if ((want_stress)); then
+    stress_needed=1
+elif [[ "$(workspace_version)" =~ ^[0-9]+\.[0-9]+\.0$ ]]; then
+    stress_needed=1
+fi
+# Явный --stress уходит и на раннер; версию там читает уже его рабочая копия.
+runner_extra=()
+((want_stress)) && runner_extra+=(--stress)
 
 die() { printf 'гейт: %s\n' "$*" >&2; exit 1; }
 
@@ -184,7 +206,7 @@ runner_gate() {
     "$CANTERLOT_WORKER_BIN" job run --title "Гейт $short" --machine "$requested" \
         --lease gate --timeout-minutes 240 --expected-minutes 45 \
         --source "$PWD@$sha" --output .gate-out --wait \
-        -- scripts/gate/runner-gate.sh "$sha" \
+        -- scripts/gate/runner-gate.sh "$sha" "${runner_extra[@]}" \
         >"$log_dir/runner-job.out" 2>"$rj_fifo" || code=$?
     wait "$tee_pid" 2>/dev/null || true
     trap - INT TERM
@@ -220,9 +242,10 @@ runner_gate() {
         elif [[ "$(runner_state "$state" seams)" == 1 ]]; then
             why='state.tsv: на раннере были включены тестовые швы'
         else
-            for key in npm_ci_exit check_exit deploy_exit web_exit; do
+            for key in npm_ci_exit check_exit stress_exit deploy_exit web_exit; do
                 value=$(runner_state "$state" "$key")
-                if [[ "$value" != 0 && ! ("$key" == deploy_exit && "$value" == skipped) ]]; then
+                if [[ "$value" != 0 && ! ("$key" == deploy_exit && "$value" == skipped) \
+                    && ! ("$key" == stress_exit && "$value" == skipped) ]]; then
                     why="$key=${value:-нет}"
                     break
                 fi
@@ -266,6 +289,8 @@ runner_gate() {
         printf 'npm_ci_duration_s=%s\n' "$(runner_state "$state" npm_ci_duration_s)"
         printf 'check_exit=%s\n' "$(runner_state "$state" check_exit)"
         printf 'check_duration_s=%s\n' "$(runner_state "$state" check_duration_s)"
+        printf 'stress_exit=%s\n' "$(runner_state "$state" stress_exit)"
+        printf 'stress_duration_s=%s\n' "$(runner_state "$state" stress_duration_s)"
         printf 'deploy_exit=%s\n' "$(runner_state "$state" deploy_exit)"
         printf 'deploy_duration_s=%s\n' "$(runner_state "$state" deploy_duration_s)"
         printf 'web_exit=%s\n' "$(runner_state "$state" web_exit)"
@@ -412,7 +437,7 @@ in_array() {
 
 prev=""
 prev_started=""
-declare -a done_ids=() prev_flaky=() prev_rust=() prev_deploy=() to_rerun=()
+declare -a done_ids=() prev_flaky=() prev_rust=() prev_stress=() prev_deploy=() to_rerun=()
 declare -A flaky_pass=()
 if ((rerun)); then
     prev="$log_dir/state.tsv"
@@ -439,19 +464,41 @@ if ((rerun)); then
         [[ -z "$id" || -z "${pass_name:-}" ]] || flaky_pass["$id"]=$pass_name
     done < <(awk -F '\t' '$1=="flaky"{print $2 "\t" $3}' "$prev")
     mapfile -t prev_rust < <(state_values "$prev" rust_fail)
+    mapfile -t prev_stress < <(state_values "$prev" stress_fail)
     mapfile -t prev_deploy < <(state_values "$prev" deploy_fail)
     npm_status=$(state_value "$prev" npm_ci_exit); npm_s=$(state_value "$prev" npm_ci_duration_s)
     check_status=$(state_value "$prev" check_exit); check_s=$(state_value "$prev" check_duration_s)
+    stress_exit=$(state_value "$prev" stress_exit); stress_s=$(state_value "$prev" stress_duration_s)
     deploy_exit=$(state_value "$prev" deploy_exit); deploy_s=$(state_value "$prev" deploy_duration_s)
     web_status=$(state_value "$prev" web_exit); web_s=$(state_value "$prev" web_duration_s)
+    # Профиль, который шёл в первом проходе, перезапускается и без --stress: иначе
+    # упавший нагрузочный шаг тихо стал бы skipped и аттестация скрыла бы провал.
+    if [[ "$(state_value "$prev" stress_required)" == 1 ]] \
+        || [[ -n "$stress_exit" && "$stress_exit" != 0 && "$stress_exit" != skipped ]]; then
+        stress_needed=1
+    fi
 else
-    npm_status=0 npm_s=0 check_status=0 check_s=0 deploy_exit=skipped deploy_s=0 web_status=0 web_s=0
+    npm_status=0 npm_s=0 check_status=0 check_s=0 stress_exit=skipped stress_s=0 \
+        deploy_exit=skipped deploy_s=0 web_status=0 web_s=0
 fi
 
 # Что перезапускаем: skip — прошедший шаг берём из состояния, full — весь шаг,
 # tests — только упавшие тесты Rust и наборов выката.
 npm_action=full check_action=full deploy_action=full web_action=full
-check_sel="" deploy_sel=""
+stress_action=skip
+check_sel="" stress_sel="" deploy_sel=""
+if ((stress_needed)); then
+    if ((!rerun)); then
+        stress_action=full
+    elif [[ "$stress_exit" == 0 ]]; then
+        stress_action=skip
+    elif [[ "$(state_value "$prev" stress_failed)" == tests ]]; then
+        stress_action=tests
+    else
+        stress_action=full
+    fi
+    [[ "$stress_action" == skip ]] || stress_exit=0
+fi
 if ((rerun)); then
     [[ "$npm_status" == 0 ]] && npm_action=skip || npm_action=full
     if [[ "$check_status" == 0 ]]; then
@@ -475,6 +522,7 @@ if ((rerun)); then
     fi
 
     if [[ "$check_action" == tests ]]; then to_rerun+=("${prev_rust[@]}"); fi
+    if [[ "$stress_action" == tests ]]; then to_rerun+=("${prev_stress[@]}"); fi
     if [[ "$deploy_action" == tests ]]; then to_rerun+=("${prev_deploy[@]}"); fi
     for id in "${to_rerun[@]}"; do
         if in_array "$id" "${done_ids[@]}"; then
@@ -493,7 +541,7 @@ prev_pass=""
 archive_previous_pass() {
     local n=1 f
     while [[ -e "$log_dir/pass-$n" ]]; do n=$((n + 1)); done
-    for f in npm-ci.log check.log deploy.log web.log result.txt failures.txt state.tsv deploy; do
+    for f in npm-ci.log check.log stress.log deploy.log web.log result.txt failures.txt state.tsv deploy; do
         [[ -e "$log_dir/$f" ]] || continue
         [[ -n "$prev_pass" ]] || { prev_pass=pass-$n; mkdir -p "$log_dir/$prev_pass"; }
         cp -a "$log_dir/$f" "$log_dir/$prev_pass/$f"
@@ -515,13 +563,20 @@ if [[ "$check_action" == tests ]]; then
         check_sel+="${check_sel:+ | }(binary_id(=$(nextest_quote "$binary")) & test(=$(nextest_quote "$name")))"
     done
 fi
+if [[ "$stress_action" == tests ]]; then
+    for id in "${prev_stress[@]}"; do
+        IFS='|' read -r _ binary name <<<"$id"
+        stress_sel+="${stress_sel:+ | }(binary_id(=$(nextest_quote "$binary")) & test(=$(nextest_quote "$name")))"
+    done
+fi
 if [[ "$deploy_action" == tests ]]; then
     for id in "${prev_deploy[@]}"; do
         deploy_sel+="${deploy_sel:+ }${id#deploy|}"
     done
 fi
-# Куда шаги кладут machine-readable отчёты: JUnit nextest — фиксированный путь.
+# Куда шаги кладут machine-readable отчёты: JUnit nextest — фиксированный путь на профиль.
 junit="target/nextest/default/junit.xml"
+stress_junit="target/nextest/stress/junit.xml"
 
 # --- запуск шага ---------------------------------------------------------------
 # В обычном прогоне вызывает настоящий скрипт; в тесте — подменённую команду.
@@ -547,6 +602,7 @@ run_gate_step_cmd() {
                     (
                         # shellcheck disable=SC1090 # окружение cargo из домашнего каталога разработчика
                         source ~/.cargo/env 2>/dev/null || true
+                        # shellcheck disable=SC2030 # намеренный экспорт внутри шага; его читает и шаг stress
                         export DATABASE_URL="${DATABASE_URL:-postgres://canterlot:canterlot@127.0.0.1:${CANTERLOT_TEST_PG_PORT}/canterlot}"
                         cargo nextest run --workspace --exclude canterlot-speech --all-features \
                             --profile default --test-threads "${CANTERLOT_TEST_THREADS:-$(nproc)}" \
@@ -555,6 +611,21 @@ run_gate_step_cmd() {
                 else
                     bash scripts/check.sh --all --no-web
                 fi
+                ;;
+            stress)
+                (
+                    # shellcheck disable=SC1090 # окружение cargo из домашнего каталога разработчика
+                    source ~/.cargo/env 2>/dev/null || true
+                    # Профиль stress сам выбирает ровно нагрузочные тесты; в режиме
+                    # tests точный фильтр сужает его до упавших, круги остаются полными.
+                    args=()
+                    [[ -z "${1:-}" ]] || args=(-E "$1")
+                    # shellcheck disable=SC2031 # DATABASE_URL выставляет соседняя ветка check
+                    DATABASE_URL="${DATABASE_URL:-postgres://canterlot:canterlot@127.0.0.1:${CANTERLOT_TEST_PG_PORT}/canterlot}" \
+                        cargo nextest run --workspace --exclude canterlot-speech --all-features \
+                            --profile stress --test-threads "${CANTERLOT_TEST_THREADS:-$(nproc)}" \
+                            "${args[@]}" --no-tests=fail
+                )
                 ;;
             deploy)
                 if [[ "$mode" == tests ]]; then
@@ -580,10 +651,11 @@ tree_after_step() {
 # Идентичности канонические: rust|binary|test и deploy|suite. Те же строки идут
 # в состояние и в flaky= аттестации при перезапуске.
 rust_failures() {
-    # Упавшие тесты берутся из JUnit и из check.log. Одного JUnit мало: check.sh --all после
+    # Упавшие тесты берутся из JUnit и из лога шага. Одного JUnit мало: check.sh --all после
     # воркспейса гоняет canterlot-speech с тем же профилем, и тот перезаписывает junit.xml
     # (упавшие тесты воркспейса тогда видны только в логе).
-    python3 -I - "$junit" "$log_dir/check.log" <<'PY'
+    local junit=$1 log=$2
+    python3 -I - "$junit" "$log" <<'PY'
 import os
 import re
 import sys
@@ -745,7 +817,7 @@ PY
 }
 
 # --- состояние прогона ---------------------------------------------------------
-declare -a state_lines=() check_ids=() deploy_ids=() all_failures=() flaky_ids=()
+declare -a state_lines=() check_ids=() stress_ids=() deploy_ids=() all_failures=() flaky_ids=()
 state_add() { state_lines+=("$1"$'\t'"$2"); }
 write_state() {
     local tmp="$log_dir/state.tsv.$$"
@@ -786,9 +858,28 @@ if [[ "$check_action" != skip ]]; then
     run_gate_step check "$step_check" "$check_action" "$check_sel" >"$log_dir/check.log" 2>&1 || check_status=$?
     check_s=$((SECONDS - s))
     printf '    check.sh --all --no-web: %ds, код %s\n' "$check_s" "$check_status"
-    mapfile -t check_ids < <(rust_failures)
+    mapfile -t check_ids < <(rust_failures "$junit" "$log_dir/check.log")
 else
     printf '\n==> scripts/check.sh --all --no-web: переиспользован прошедший шаг\n'
+fi
+
+# --- нагрузочный профиль nextest: минорный или мажорный выпуск, либо --stress ---
+if [[ "$stress_action" == skip ]]; then
+    if ((stress_needed)); then
+        printf '\n==> nextest --profile stress: переиспользован прошедший шаг\n'
+    else
+        printf '\n==> nextest --profile stress: skipped (патч-выпуск без --stress)\n'
+    fi
+else
+    printf '\n==> nextest --profile stress (%s)\n' "$stress_action"
+    s=$SECONDS
+    stress_exit=0
+    # Чужой отчёт прежнего прогона не должен сойти за отчёт этого.
+    rm -f "$stress_junit"
+    run_gate_step stress "$step_stress" "$stress_action" "$stress_sel" >"$log_dir/stress.log" 2>&1 || stress_exit=$?
+    stress_s=$((SECONDS - s))
+    printf '    nextest --profile stress: %ds, код %s\n' "$stress_s" "$stress_exit"
+    mapfile -t stress_ids < <(rust_failures "$stress_junit" "$log_dir/stress.log")
 fi
 
 # --- наборы scripts/deploy: отдельным шагом, не вместе с веб-половиной ---
@@ -827,7 +918,7 @@ else
 fi
 
 # --- состояние и отчёт о нестабильных тестах ---
-all_failures=("${check_ids[@]}" "${deploy_ids[@]}")
+all_failures=("${check_ids[@]}" "${stress_ids[@]}" "${deploy_ids[@]}")
 if [[ -n "$prev_started" ]]; then
     state_add started "$prev_started"
     state_add rerun_of "$prev_started"
@@ -855,6 +946,11 @@ state_add check_exit "$check_status"
 state_add check_duration_s "$check_s"
 state_add check_failed "$(step_failure_kind "$check_status" "${check_ids[@]}")"
 for id in "${check_ids[@]}"; do state_add rust_fail "$id"; done
+state_add stress_required "$stress_needed"
+state_add stress_exit "$stress_exit"
+state_add stress_duration_s "$stress_s"
+state_add stress_failed "$(step_failure_kind "$stress_exit" "${stress_ids[@]}")"
+for id in "${stress_ids[@]}"; do state_add stress_fail "$id"; done
 state_add deploy_exit "$deploy_exit"
 state_add deploy_duration_s "$deploy_s"
 state_add deploy_failed "$(step_failure_kind "$deploy_exit" "${deploy_ids[@]}")"
@@ -879,26 +975,36 @@ write_state
 # Сводка в формате прежнего result.txt: коды и времена, затем nextest
 # и первые упавшие тесты.
 mapfile -t rust_summary < <(grep -E 'Summary \[' "$log_dir/check.log" || true)
-mapfile -t failed_rust < <(grep -E '^ +FAIL \[' "$log_dir/check.log" | head || true)
+mapfile -t stress_summary < <(grep -E 'Summary \[' "$log_dir/stress.log" 2>/dev/null || true)
+mapfile -t failed_rust < <(grep -hE '^ +FAIL \[' "$log_dir/check.log" "$log_dir/stress.log" 2>/dev/null | head || true)
 
 {
-    printf '%s npm=%s check=%s %ss deploy=%s %ss web=%s %ss\n' \
-        "$short" "$npm_status" "$check_status" "$check_s" "$deploy_exit" "$deploy_s" "$web_status" "$web_s"
+    printf '%s npm=%s check=%s %ss stress=%s %ss deploy=%s %ss web=%s %ss\n' \
+        "$short" "$npm_status" "$check_status" "$check_s" "$stress_exit" "$stress_s" \
+        "$deploy_exit" "$deploy_s" "$web_status" "$web_s"
     ((${#rust_summary[@]})) && printf '%s\n' "${rust_summary[@]}"
+    ((${#stress_summary[@]})) && printf '%s\n' "${stress_summary[@]}"
     ((${#failed_rust[@]})) && printf '%s\n' "${failed_rust[@]}"
     true
 } >"$log_dir/result.txt"
 cat "$log_dir/result.txt"
 if ((${#all_failures[@]})); then
     {
-        printf '\n==> причины падений (%s)\n' "$log_dir/check.log"
-        failure_reasons "$log_dir/check.log" "$log_dir/deploy" 5 12 "${all_failures[@]}"
+        printf '\n==> причины падений (%s)\n' "$log_dir"
+        if ((${#check_ids[@]} + ${#deploy_ids[@]})); then
+            failure_reasons "$log_dir/check.log" "$log_dir/deploy" 5 12 \
+                "${check_ids[@]}" "${deploy_ids[@]}"
+        fi
+        if ((${#stress_ids[@]})); then
+            failure_reasons "$log_dir/stress.log" "$log_dir/deploy" 5 12 "${stress_ids[@]}"
+        fi
     } | tee "$log_dir/failures.txt"
 fi
 total_s=$((SECONDS - started))
 printf 'гейт %s за %ds\n' "$short" "$total_s"
 
 if ((npm_status != 0 || check_status != 0 || web_status != 0)) \
+    || [[ "$stress_exit" != 0 && "$stress_exit" != skipped ]] \
     || [[ "$deploy_exit" != 0 && "$deploy_exit" != skipped ]]; then
     printf 'гейт: провал, аттестация не пишется; логи в %s\n' "$log_dir" >&2
     exit 1
@@ -910,8 +1016,10 @@ if ((rerun)); then
         for id in "${flaky_ids[@]}"; do
             printf '  %s\n' "$id"
             if [[ -n "${flaky_pass[$id]:-}" ]]; then
-                printf '    лог прохода, где тест упал: %s\n' "$log_dir/${flaky_pass[$id]}/check.log"
-                failure_reasons "$log_dir/${flaky_pass[$id]}/check.log" "$log_dir/${flaky_pass[$id]}/deploy" 1 12 "$id" | tail -n +2
+                failed_log=check.log
+                in_array "$id" "${prev_stress[@]}" && failed_log=stress.log
+                printf '    лог прохода, где тест упал: %s\n' "$log_dir/${flaky_pass[$id]}/$failed_log"
+                failure_reasons "$log_dir/${flaky_pass[$id]}/$failed_log" "$log_dir/${flaky_pass[$id]}/deploy" 1 12 "$id" | tail -n +2
             else
                 printf '    лог прохода, где тест упал, не записан (состояние старого формата)\n'
             fi
@@ -956,6 +1064,8 @@ tmp="$attestation.tmp.$$"
     printf 'npm_ci_duration_s=%s\n' "$npm_s"
     printf 'check_exit=%s\n' "$check_status"
     printf 'check_duration_s=%s\n' "$check_s"
+    printf 'stress_exit=%s\n' "$stress_exit"
+    printf 'stress_duration_s=%s\n' "$stress_s"
     printf 'deploy_exit=%s\n' "$deploy_exit"
     printf 'deploy_duration_s=%s\n' "$deploy_s"
     printf 'web_exit=%s\n' "$web_status"

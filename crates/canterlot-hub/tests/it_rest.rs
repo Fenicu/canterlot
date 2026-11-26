@@ -79,3 +79,19 @@ mod singleton_regressions;
 mod snooze;
 #[path = "it/tx_rollback.rs"]
 mod tx_rollback;
+
+/// Число кругов нагрузочного теста: полное в профиле `stress`, короткое в обычном
+/// гейте. `CANTERLOT_STRESS_ROUNDS` перекрывает оба значения.
+fn stress_rounds(full: u32) -> u32 {
+    if let Some(rounds) = std::env::var("CANTERLOT_STRESS_ROUNDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        return rounds;
+    }
+    if std::env::var("NEXTEST_PROFILE").as_deref() == Ok("stress") {
+        full
+    } else {
+        10
+    }
+}

@@ -535,7 +535,11 @@ preconditions() {
         if [[ $key == test_seams || $key == *_seam* ]]; then
             refuse "the gate attestation $att was produced with test seams ($key=$value): run a real gate without CANTERLOT_GATE_STEP_* overrides"
         fi
-        if [[ $key == *_exit && $value != 0 && ! ($key == deploy_exit && $value == skipped) ]]; then refuse "the gate attestation $att records $key=$value"; fi
+        if [[ $key == *_exit && $value != 0 \
+            && ! ($key == deploy_exit && $value == skipped) \
+            && ! ($key == stress_exit && $value == skipped) ]]; then
+            refuse "the gate attestation $att records $key=$value"
+        fi
     done <"$att"
     while IFS='=' read -r key value; do
         if [[ $key == SITE_ORIGIN ]]; then SITE_ORIGIN_EFF=$value; fi

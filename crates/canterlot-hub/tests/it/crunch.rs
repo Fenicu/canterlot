@@ -2209,11 +2209,53 @@ async fn create_racing_reserve_entry_always_ends_held() {
     let weekly_reset = base + TimeDelta::days(5);
     env.observe("claude", Window::Weekly, 500, Some(weekly_reset), base)
         .await;
-    let (mut initial, mut by_rule) = (0, 0);
-    for round in 0..100i64 {
+    // Разговор, созданный до появления резерва, получает удержание на следующем тике.
+    // Этот порядок проверяется явно: на коротком прогоне он иначе мог не выпасть, и
+    // тест падал на вероятности, а не на поведении.
+    sqlx::query("update provider_limits set weekly_reserve_active=false,weekly_reserve_resets_at=null,weekly_used_permille=500,weekly_low_count=0,weekly_low_at=null where provider='claude'")
+        .execute(&pool).await.unwrap();
+    let before_rule = conversations::create(
+        &pool,
+        "race-before-rule",
+        new_conversation(&env, false),
+        &env.config,
+        Uuid::now_v7(),
+        &env.registry,
+    )
+    .await
+    .unwrap()
+    .conversation_id;
+    let observed_at = base + TimeDelta::minutes(1);
+    env.observe(
+        "claude",
+        Window::Weekly,
+        960,
+        Some(weekly_reset),
+        observed_at,
+    )
+    .await;
+    env.tick(observed_at).await;
+    assert!(has_weekly(&holds(&pool, before_rule).await, "claude"));
+    let created: Value = sqlx::query_scalar(
+        "select payload from events where kind='conversation_created' and conversation_id=$1",
+    )
+    .bind(before_rule)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !created["queue"]["hold_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["reason"] == "weekly_reserve"),
+        "the conversation was created before the reserve"
+    );
+    let (mut initial, mut by_rule) = (0, 1);
+    for round in 0..i64::from(crate::stress_rounds(100)) {
         sqlx::query("update provider_limits set weekly_reserve_active=false,weekly_reserve_resets_at=null,weekly_used_permille=500,weekly_low_count=0,weekly_low_at=null where provider='claude'")
             .execute(&pool).await.unwrap();
-        let at = base + TimeDelta::minutes(round + 1);
+        let at = base + TimeDelta::minutes(round + 2);
         let jitter = Uuid::now_v7().as_u128() as u64;
         let (early, late) = (jitter % 800, 2000 + (jitter >> 16) % 4000);
         let (observe_delay, create_delay) = if round % 2 == 0 {
@@ -3110,7 +3152,7 @@ async fn lock_order_has_no_deadlocks_across_ingest_dispatch_scheduler_and_http()
     };
     let machine_ms = Utc::now().timestamp_millis();
     let before = deadlocks(&pool).await;
-    for round in 0..100i64 {
+    for round in 0..i64::from(crate::stress_rounds(100)) {
         sqlx::query("update provider_limits set weekly_reserve_active=false,weekly_reserve_resets_at=null,weekly_used_permille=900,weekly_low_count=0 where provider='claude'")
             .execute(&pool).await.unwrap();
         sqlx::query("update conversations set crunch_enabled=true where id=$1")

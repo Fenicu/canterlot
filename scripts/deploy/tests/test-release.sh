@@ -164,6 +164,24 @@ assert_eq "$(rres status)/$(rres published)" "done/yes" "result: done, published
 teardown_case
 case_end
 
+case_begin "ship accepts an attestation with a skipped stress step"
+setup_release stress-skipped
+ATTEST_STRESS_EXIT=skipped attest_head
+cutover_plan "${HAPPY_PLAN[@]}"
+run_release ship "${RVER}"
+assert_eq "${RREL_RC}" "0" "exit 0"
+assert_eq "$(rres status)/$(rres published)" "done/yes" "result: done, published"
+teardown_case
+case_end
+
+case_begin "ship refuses an attestation with a failed stress step"
+setup_release stress-failed
+ATTEST_STRESS_EXIT=1 attest_head
+run_release ship "${RVER}"
+assert_refused "records stress_exit=1"
+teardown_case
+case_end
+
 case_begin "ship accepts a rerun attestation with rerun_of and flaky lines"
 setup_release rerun-attest
 attest_head

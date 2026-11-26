@@ -28,11 +28,16 @@ export LC_ALL=C
 die() { printf 'runner-gate: %s\n' "$*" >&2; exit 1; }
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
-if (($# != 1)); then
-    echo 'Использование: scripts/gate/runner-gate.sh <полный sha>' >&2
+if (($# < 1 || $# > 2)); then
+    echo 'Использование: scripts/gate/runner-gate.sh <полный sha> [--stress]' >&2
     exit 2
 fi
 sha=$1
+stress_flag=()
+if (($# == 2)); then
+    [[ "$2" == --stress ]] || die "неизвестный аргумент: $2"
+    stress_flag=(--stress)
+fi
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "аргумент не полный sha: $sha"
 sha12=${sha:0:12}
 
@@ -150,7 +155,7 @@ run_args=(
 log "контейнер $name: --cpus $cpus --memory ${mem_mb}m"
 gate_code=0
 "$docker_cmd" run "${run_args[@]}" "$image" \
-    bash /build/in-container.sh --src /src --out /out --sha "$sha12" &
+    bash /build/in-container.sh --src /src --out /out --sha "$sha12" "${stress_flag[@]}" &
 run_pid=$!
 wait "$run_pid" || gate_code=$?
 run_pid=""

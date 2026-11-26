@@ -18,6 +18,20 @@ status-level = "retry"
 final-status-level = "slow"
 failure-output = "immediate-final"
 slow-timeout = { period = "30s", terminate-after = 6 }
+# Гейт не гоняет группу starvation и замер стоимости sj_ingest_cost: это нагрузочные
+# проверки для профиля stress. Круговые тесты ниже остаются здесь с коротким числом
+# кругов (CANTERLOT_STRESS_ROUNDS), полное — в stress.
+default-filter = '''
+not (
+  package(canterlot-worker) & binary(it) & (
+    test(=exec_attachments::large_attachment_does_not_starve_control_session)
+    | test(=exec_media::media_upload_does_not_starve_control_or_sj)
+    | test(=exec_e2e::large_answer_backlog_does_not_starve_control_session)
+    | test(=session::large_command_burst_during_large_replay_keeps_heartbeat_acks_timely)
+  )
+  | test(=final_fix_hub::sj_ingest_cost_does_not_grow_with_block_size)
+)
+'''
 
 [profile.default.junit]
 path = "junit.xml"
@@ -27,6 +41,31 @@ store-success-output = false
 [profile.fast]
 inherits = "default"
 fail-fast = true
+
+# Нагрузочный прогон перед минорным или мажорным выпуском (scripts/gate.sh --stress
+# или версия X.Y.0): ровно эти тесты и с полным числом кругов. Круги задаёт
+# CANTERLOT_STRESS_ROUNDS, а профиль stress подставляет полное значение; в гейте
+# те же круговые тесты идут с коротким числом кругов по умолчанию.
+[profile.stress]
+inherits = "default"
+default-filter = '''
+(
+  package(canterlot-hub) & binary(it_rest) & (
+    test(=crunch::lock_order_has_no_deadlocks_across_ingest_dispatch_scheduler_and_http)
+    | test(=crunch::create_racing_reserve_entry_always_ends_held)
+    | test(=attachments_gc::gc_never_removes_blob_under_concurrent_link)
+    | test(=final_fix_hub::sj_ingest_cost_does_not_grow_with_block_size)
+  )
+)
+| (
+  package(canterlot-worker) & binary(it) & (
+    test(=exec_attachments::large_attachment_does_not_starve_control_session)
+    | test(=exec_media::media_upload_does_not_starve_control_or_sj)
+    | test(=exec_e2e::large_answer_backlog_does_not_starve_control_session)
+    | test(=session::large_command_burst_during_large_replay_keeps_heartbeat_acks_timely)
+  )
+)
+'''
 
 # Первое совпавшее правило задаёт параметр: сначала узкие правила, потом общие.
 [[profile.default.overrides]]

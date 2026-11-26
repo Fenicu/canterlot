@@ -259,8 +259,77 @@ async fn gc_never_removes_blob_under_concurrent_link() {
     let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let mut conversation = f.conversation;
-    let (mut linked, mut refused) = (0, 0);
-    for round in 0..200u32 {
+    // Оба исхода проверяются явно: на коротком прогоне гонка под нагрузкой могла дать
+    // только один, и тест падал на вероятности, а не на поведении.
+    let data = content(256, 0xfe);
+    let linked_id = f
+        .ready_in(
+            conversation,
+            "linked.bin",
+            "application/octet-stream",
+            &data,
+        )
+        .await;
+    conversations::submit_message(
+        &f.pool,
+        SubmitMessage {
+            owner_id: f.owner,
+            conversation_id: conversation,
+            key: "race_linked".into(),
+            content: vec![ContentBlock::Text { text: "t".into() }],
+            attachment_ids: vec![linked_id],
+            retry_of: None,
+            received_at: Utc::now(),
+        },
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    gc::run_once(&f.pool, f.blobs(), Utc::now(), Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(f.state_of(linked_id).await, "ready");
+    assert_eq!(
+        std::fs::read(f.blob_path(linked_id)).unwrap(),
+        data,
+        "the GC does not remove a linked blob"
+    );
+
+    let data = content(256, 0xff);
+    let released_id = f
+        .ready_in(
+            conversation,
+            "released.bin",
+            "application/octet-stream",
+            &data,
+        )
+        .await;
+    gc::run_once(&f.pool, f.blobs(), Utc::now(), Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(f.state_of(released_id).await, "released");
+    assert!(matches!(
+        conversations::submit_message(
+            &f.pool,
+            SubmitMessage {
+                owner_id: f.owner,
+                conversation_id: conversation,
+                key: "race_released".into(),
+                content: vec![ContentBlock::Text { text: "t".into() }],
+                attachment_ids: vec![released_id],
+                retry_of: None,
+                received_at: Utc::now(),
+            },
+            Uuid::now_v7(),
+        )
+        .await,
+        Err(SubmitError::Attachment(
+            attachments::AttachmentError::NotReady
+        ))
+    ));
+
+    let (mut linked, mut refused) = (1, 1);
+    for round in 0..crate::stress_rounds(200) {
         if round % 50 == 49 {
             conversation = f.conversation().await;
         }
