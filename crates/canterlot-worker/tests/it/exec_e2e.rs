@@ -1875,7 +1875,9 @@ async fn lost_owner_returns_with_buffered_journal_and_queued_input() {
     let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
-    let mut steps = vec![json!({"delta":"a"}), json!({"delay_ms":1500})];
+    // Остаток ответа ждёт затвор и пишется, когда владелец уже потерян.
+    let gate = fixture.root.path().join("gate");
+    let mut steps = vec![json!({"delta":"a"}), json!({"wait_file":gate})];
     let mut expected = String::from("a");
     for index in 0..60 {
         let delta = format!("b{index:02}|");
@@ -1886,6 +1888,7 @@ async fn lost_owner_returns_with_buffered_journal_and_queued_input() {
     let first = fixture.submit(json!({"synthetic":steps}).to_string()).await;
     fixture.wait_deltas(1).await;
     let spec = fixture.lose_owner_to_a_bad_spec().await;
+    open_gate(&gate);
     let queued = fixture
         .submit(json!({"synthetic":[{"delta":"queued"},{"hang":true}]}).to_string())
         .await;
@@ -2033,7 +2036,9 @@ async fn wave_w_d3_exit_during_outage_reattaches_draining_supervisor() {
     let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
-    let mut steps = vec![json!({"delta":"a"}), json!({"delay_ms":1500})];
+    // Остаток хода ждёт затвор: он открывается, когда хаба и управляющей службы уже нет.
+    let gate = fixture.root.path().join("gate");
+    let mut steps = vec![json!({"delta":"a"}), json!({"wait_file":gate})];
     for index in 0..40 {
         steps.push(json!({"delta":format!("b{index:02}| ")}));
         steps.push(json!({"delay_ms":20}));
@@ -2048,6 +2053,7 @@ async fn wave_w_d3_exit_during_outage_reattaches_draining_supervisor() {
     hub.shutdown.send(()).unwrap();
     timeout(WAIT, hub.join).await.unwrap().unwrap().unwrap();
     fixture.stop_worker().await;
+    open_gate(&gate);
     until("local journal closed", async || {
         fixture
             .sj()
