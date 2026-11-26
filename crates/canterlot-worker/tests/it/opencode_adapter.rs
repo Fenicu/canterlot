@@ -6244,107 +6244,116 @@ fn reset_in(fact: &LimitFact, wait: u64) -> bool {
     at.abs_diff(now + wait) < 60_000
 }
 
+// Отказы хода на общем стенде: предел, чужая ошибка, протухший вход и переполнение.
 #[tokio::test]
-async fn go_quota_is_a_reached_limit_recorded_inside_the_turn() {
-    let (mut bench, events) = failed_turn(json!({
-        "type": "provider.quota", "message": "Go usage limit reached", "status": 429,
-        "retryAfterMs": 3_600_000}))
-    .await;
+async fn failed_turns_name_their_cause() {
+    let mut bench = bench_with_turns(vec![
+        (
+            None,
+            TurnEnd::Failed(json!({
+                "type": "provider.quota", "message": "Go usage limit reached", "status": 429,
+                "retryAfterMs": 3_600_000})),
+        ),
+        (
+            None,
+            TurnEnd::Failed(json!({
+                "type": "provider.go-limit",
+                "message": "OpenCode Go usage limit reached. Switch to a free model, or turn on Extra Usage on the Go page in OpenCode Console to keep going.",
+                "status": 429, "retryAfterMs": 3_600_000})),
+        ),
+        (
+            None,
+            TurnEnd::Failed(json!({
+                "type": "provider.free-limit", "message": "Free usage limit reached",
+                "status": 429, "retryAfterMs": 80_814_000})),
+        ),
+        (
+            None,
+            TurnEnd::Failed(json!({
+                "type": "provider.internal", "message": "секрет провайдера"})),
+        ),
+        (
+            None,
+            TurnEnd::Failed(json!({
+                "type": "provider.auth", "message": "invalid api key", "status": 401})),
+        ),
+        (
+            None,
+            TurnEnd::Failed(json!({
+                "type": "provider.invalid-request", "message": "prompt is too long", "status": 400})),
+        ),
+    ]);
+    bench.start_ok().await;
+
+    // Квота Go — достигнутый предел на пять часов.
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
     let fact = limit_of(&events).expect("limit fact");
     assert!(matches!(
         fact,
-        LimitFact::Reached {
-            window: LimitWindow::FiveHour,
-            ..
-        }
+        LimitFact::Reached { window: LimitWindow::FiveHour, .. }
     ));
     assert!(reset_in(&fact, 3_600_000), "{fact:?}");
     assert_eq!(text_of(&events, "Error").len(), 1);
-    bench.close(CloseMode::Graceful).await;
-}
 
-// Тот же отказ Go в 2.2.5 и 2.2.6: свой тип вместо `provider.quota` (живой кадр 09.11.2026).
-#[tokio::test]
-async fn go_limit_of_newer_servers_is_the_same_reached_limit() {
-    let (mut bench, events) = failed_turn(json!({
-        "type": "provider.go-limit",
-        "message": "OpenCode Go usage limit reached. Switch to a free model, or turn on Extra Usage on the Go page in OpenCode Console to keep going.",
-        "status": 429, "retryAfterMs": 3_600_000}))
-    .await;
+    // Тот же отказ Go в 2.2.5 и 2.2.6: свой тип вместо `provider.quota` (живой кадр).
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
     let fact = limit_of(&events).expect("limit fact");
     assert!(reset_in(&fact, 3_600_000), "{fact:?}");
     assert_eq!(text_of(&events, "Error").len(), 1);
-    bench.close(CloseMode::Graceful).await;
-}
 
-#[tokio::test]
-async fn free_limit_waits_in_the_long_window() {
-    let (mut bench, events) = failed_turn(json!({
-        "type": "provider.free-limit", "message": "Free usage limit reached",
-        "status": 429, "retryAfterMs": 80_814_000}))
-    .await;
+    // Бесплатный предел ждёт в длинном окне.
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
     assert!(matches!(
         limit_of(&events),
-        Some(LimitFact::Reached {
-            window: LimitWindow::Weekly,
-            ..
-        })
+        Some(LimitFact::Reached { window: LimitWindow::Weekly, .. })
     ));
-    bench.close(CloseMode::Graceful).await;
-}
 
-#[tokio::test]
-async fn other_failures_are_no_limit_and_name_only_their_kind() {
-    let (mut bench, events) = failed_turn(json!({
-        "type": "provider.internal", "message": "секрет провайдера"}))
-    .await;
+    // Чужой сбой не предел и называет только свой вид.
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
     assert_eq!(limit_of(&events), None);
     let more = bench
         .until(|event| matches!(event, AdapterEvent::Diagnostic { kind, .. } if *kind == "provider_failure"))
         .await;
-    let Some(AdapterEvent::Diagnostic {
-        event_type,
-        required,
-        ..
-    }) = more.last()
-    else {
+    let Some(AdapterEvent::Diagnostic { event_type, required, .. }) = more.last() else {
         panic!("diagnostic");
     };
     assert_eq!(event_type, "provider.internal");
     assert!(!required);
-    bench.close(CloseMode::Graceful).await;
-}
 
-#[tokio::test]
-async fn rejected_credentials_stop_the_session_with_their_reason() {
-    let (mut bench, events) = failed_turn(json!({
-        "type": "provider.auth", "message": "invalid api key", "status": 401}))
-    .await;
-    assert_eq!(
-        text_of(&events, "Error").len(),
-        1,
-        "the owner sees the text"
-    );
+    // Протухший вход останавливает сессию со своей причиной.
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    assert_eq!(text_of(&events, "Error").len(), 1, "the owner sees the text");
     let more = bench
         .until(|event| matches!(event, AdapterEvent::Diagnostic { kind, .. } if *kind == "auth_required"))
         .await;
-    assert!(matches!(
-        more.last(),
-        Some(AdapterEvent::Diagnostic { required: true, .. })
-    ));
-    bench.close(CloseMode::Graceful).await;
-}
+    assert!(matches!(more.last(), Some(AdapterEvent::Diagnostic { required: true, .. })));
 
-#[tokio::test]
-async fn overflow_the_server_could_not_recover_is_context_exhausted() {
-    let (mut bench, _) = failed_turn(json!({
-        "type": "provider.invalid-request", "message": "prompt is too long", "status": 400}))
-    .await;
+    // Переполнение, которое сервер не смог отыграть, исчерпывает контекст.
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
     bench
         .until(|event| matches!(event, AdapterEvent::ContextExhausted))
         .await;
     bench.close(CloseMode::Graceful).await;
 }
+
+
+// Тот же отказ Go в 2.2.5 и 2.2.6: свой тип вместо `provider.quota` (живой кадр 09.11.2026).
+
+
+
+
 
 #[tokio::test]
 async fn failed_compaction_with_an_overflow_exhausts_the_context_after_the_turn() {
