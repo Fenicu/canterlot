@@ -148,8 +148,9 @@ fn snapshot(tokens: i64) -> ProtoGoalState {
     }
 }
 
-#[sqlx::test]
-async fn owner_command_goes_to_the_worker_and_adapter_event_updates_all_devices(pool: PgPool) {
+#[tokio::test]
+async fn owner_command_goes_to_the_worker_and_adapter_event_updates_all_devices() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = F::new(pool, &["goals_v1"]).await;
     let response = f
         .post_goal(

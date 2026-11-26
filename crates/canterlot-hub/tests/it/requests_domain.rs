@@ -14,7 +14,6 @@ use uuid::Uuid;
 
 use crate::support::cases::{Snapshot, restore, run_cases};
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn migration_0018_creates_requests_table_with_constraints(
     pool: PgPool,
 ) -> Result<(), sqlx::Error> {
@@ -718,5 +717,6 @@ async fn requests_domain_cases() {
         decision_on_closed_request_returns_already_closed_conflict,
         decision_with_stale_generation_returns_stale_generation,
         spawn_approval_request_is_stored_and_read_back,
+        migration_0018_creates_requests_table_with_constraints,
     );
 }

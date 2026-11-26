@@ -474,7 +474,6 @@ async fn missed_notice_is_repaired_by_the_lag_sweep(pool: PgPool) {
     task.await.unwrap();
 }
 
-#[sqlx::test(migrations = "./migrations")]
 async fn refresh_upserts_the_derived_row_for_conversations_that_predate_the_migration(
     pool: PgPool,
 ) {
@@ -756,7 +755,6 @@ async fn preview_is_the_plain_last_answer_of_the_finished_turn_in_event_and_list
     assert_eq!(listed_preview(&pool, &s).await.as_deref(), Some(fresh));
 }
 
-#[sqlx::test(migrations = "./migrations")]
 async fn sweep_fills_the_preview_of_conversations_finished_before_the_migration(pool: PgPool) {
     let s = testkit::seed(&pool).await;
     let execution = Uuid::now_v7();
@@ -970,5 +968,7 @@ async fn derived_notice_cases() {
         preview_backfill_goes_in_bounded_batches_without_events,
         idle_evidence_carries_process_alive_from_fresh_metrics,
         idle_evidence_without_metrics_omits_process_alive,
+        refresh_upserts_the_derived_row_for_conversations_that_predate_the_migration,
+        sweep_fills_the_preview_of_conversations_finished_before_the_migration,
     );
 }
