@@ -15,6 +15,17 @@ use tempfile::TempDir;
 
 pub const ALIAS: &str = "runner-a";
 
+/// Кладёт бинарник воркера в корень раннера заранее, жёсткой ссылкой (или копией на другой ФС):
+/// носитель видит совпавший sha и не гонит по SSH 80 МБ. Для тестов, где установка не проверяется.
+#[allow(dead_code)]
+pub fn preinstall_worker(root: &Path, worker: &Path) {
+    let target = root.join("bin/canterlot-worker");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::hard_link(worker, &target)
+        .or_else(|_| fs::copy(worker, &target).map(drop))
+        .unwrap();
+}
+
 pub struct TestSshd {
     pub dir: TempDir,
     /// `ssh_config` с псевдонимом [`ALIAS`]; передаётся носителю как `-F`.

@@ -230,6 +230,8 @@ async fn an_owner_job_with_source_and_outputs_runs_on_the_runner_end_to_end() {
     .await;
     let sshd = TestSshd::start();
     let root = sshd.path().join("runner-a");
+    // Установку бинарника проверяет первый тест модуля; здесь он уже на раннере.
+    crate::sshd::preinstall_worker(&root, std::path::Path::new(WORKER));
     let owner = hub.installation.owner_id;
     let carrier = machines::add(&pool, owner, "carrier").await.unwrap();
     machines::set_carrier(&pool, carrier.machine_id, true)

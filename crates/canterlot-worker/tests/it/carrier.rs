@@ -150,6 +150,9 @@ struct Options {
     assigned: bool,
     /// Хаб отказывает в токене с кодом `revoked`.
     refuse: bool,
+    /// Бинарник воркера уже лежит на раннере (жёсткая ссылка на локальный): носитель видит
+    /// совпавший sha и не гонит по SSH 80 МБ. Установку и замену проверяют свои тесты.
+    preinstalled: bool,
 }
 
 impl Default for Options {
@@ -159,6 +162,7 @@ impl Default for Options {
             worker_binary: None,
             assigned: true,
             refuse: false,
+            preinstalled: true,
         }
     }
 }
@@ -170,6 +174,7 @@ impl Fixture {
             worker_binary,
             assigned,
             refuse,
+            preinstalled,
         } = options;
         let token = format!("carrier-secret-{}", Uuid::now_v7());
         behavior.token = token.clone();
@@ -182,6 +187,9 @@ impl Fixture {
         drop(store);
         let sshd = TestSshd::start();
         let root = sshd.path().join(RUNNER);
+        if preinstalled && worker_binary.is_none() {
+            crate::sshd::preinstall_worker(&root, Path::new(WORKER));
+        }
         let control = Arc::new(FakeControl {
             machine_id: Uuid::now_v7(),
             installation_id: hub.config.installation_id,
@@ -402,7 +410,11 @@ fn mode(path: &Path) -> u32 {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn forward_install_token_and_config_bring_a_runner_worker_to_the_hub() {
-    let fixture = Fixture::start(Options::default()).await;
+    let fixture = Fixture::start(Options {
+        preinstalled: false,
+        ..Options::default()
+    })
+    .await;
     fixture.wait_hellos(1).await;
     // Хаб увидел воркера под идентификатором из ответа на запрос токена.
     assert_eq!(
@@ -544,7 +556,10 @@ async fn a_cut_binary_upload_keeps_the_old_binary_and_the_next_round_retries() {
     );
     let scratch = tempfile::tempdir_in("/tmp").unwrap();
     let newer = scratch.path().join("canterlot-worker");
+    // Объявленный хэш не совпадёт ни с чем, так что запускаться «новому» бинарнику не нужно:
+    // мегабайт вместо 80 МБ, которые иначе шли бы по SSH на каждом круге.
     let mut bytes = fs::read(WORKER).unwrap();
+    bytes.truncate(1 << 20);
     bytes.extend_from_slice(b"\0carrier-cut-marker");
     fs::write(&newer, &bytes).unwrap();
     fs::set_permissions(&newer, fs::Permissions::from_mode(0o755)).unwrap();
