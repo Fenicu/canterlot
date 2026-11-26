@@ -7,6 +7,9 @@ use serde_json::json;
 use tokio::{sync::Barrier, task::JoinSet, time::timeout};
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+use sqlx::PgPool;
+
 fn new_event(scope: Scope) -> NewEvent {
     NewEvent {
         scope,
@@ -33,9 +36,7 @@ fn sequences(result: ReadAfter) -> Vec<i64> {
     events(result).iter().map(|event| event.scope_seq).collect()
 }
 
-#[tokio::test]
-async fn seq_is_contiguous_per_scope() -> Result<(), sqlx::Error> {
-    let pool = canterlot_hub::testkit::db().await;
+async fn seq_is_contiguous_per_scope(pool: PgPool) -> Result<(), sqlx::Error> {
     let owner_id = Uuid::now_v7();
     let conversation_id = Uuid::now_v7();
     let execution_id = Uuid::now_v7();
@@ -117,9 +118,7 @@ async fn seq_is_contiguous_per_scope() -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-#[tokio::test]
-async fn rolled_back_append_leaves_no_gap() -> Result<(), sqlx::Error> {
-    let pool = canterlot_hub::testkit::db().await;
+async fn rolled_back_append_leaves_no_gap(pool: PgPool) -> Result<(), sqlx::Error> {
     let id = Uuid::now_v7();
     let scope = Scope::Conversation { id };
     let mut tx = pool.begin().await?;
@@ -158,9 +157,7 @@ async fn rolled_back_append_leaves_no_gap() -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-#[tokio::test]
-async fn snapshot_boundary_has_no_lost_event() -> Result<(), sqlx::Error> {
-    let pool = canterlot_hub::testkit::db().await;
+async fn snapshot_boundary_has_no_lost_event(pool: PgPool) -> Result<(), sqlx::Error> {
     timeout(Duration::from_secs(30), async {
         let id = Uuid::now_v7();
         let scope = Scope::Conversation { id };
@@ -240,9 +237,7 @@ async fn snapshot_boundary_has_no_lost_event() -> Result<(), sqlx::Error> {
     .expect("concurrent event test timed out")
 }
 
-#[tokio::test]
-async fn stale_cursor_requires_resync() -> Result<(), sqlx::Error> {
-    let pool = canterlot_hub::testkit::db().await;
+async fn stale_cursor_requires_resync(pool: PgPool) -> Result<(), sqlx::Error> {
     let id = Uuid::now_v7();
     let scope = Scope::Conversation { id };
     let other_id = Uuid::now_v7();
@@ -292,9 +287,7 @@ async fn stale_cursor_requires_resync() -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-#[tokio::test]
-async fn read_after_rejects_invalid_arguments() -> Result<(), sqlx::Error> {
-    let pool = canterlot_hub::testkit::db().await;
+async fn read_after_rejects_invalid_arguments(pool: PgPool) -> Result<(), sqlx::Error> {
     let scope = Scope::Conversation { id: Uuid::now_v7() };
     for (after_seq, limit) in [(-1, 100), (0, 0), (0, -1)] {
         assert!(matches!(
@@ -303,4 +296,19 @@ async fn read_after_rejects_invalid_arguments() -> Result<(), sqlx::Error> {
         ));
     }
     Ok(())
+}
+
+/// Журнал событий: непрерывный номер в области, откат без дыры, граница снимка.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn events_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        seq_is_contiguous_per_scope,
+        rolled_back_append_leaves_no_gap,
+        snapshot_boundary_has_no_lost_event,
+        stale_cursor_requires_resync,
+        read_after_rejects_invalid_arguments,
+    );
 }
