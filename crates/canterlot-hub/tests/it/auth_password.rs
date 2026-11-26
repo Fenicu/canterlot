@@ -11,6 +11,8 @@ use sqlx::PgPool;
 
 use crate::support::auth::{AuthHub, PASSWORD, error_code, set_cookie};
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 fn normalized(response: &TestResponse) -> (u16, Value) {
     let mut body: Value = response.json();
     body["error"]["correlation_id"] = Value::Null;
@@ -31,9 +33,7 @@ fn retry_after(response: &TestResponse) -> u64 {
         .expect("retry_after_seconds")
 }
 
-#[tokio::test]
-async fn auth_password_sign_in_sets_host_cookies_and_returns_the_session() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_password_sign_in_sets_host_cookies_and_returns_the_session(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let client = hub.anonymous(Some("203.0.113.9")).with_header(
@@ -97,9 +97,7 @@ async fn auth_password_sign_in_sets_host_cookies_and_returns_the_session() {
     assert!(set_cookie(&me, SESSION_COOKIE).is_none());
 }
 
-#[tokio::test]
-async fn auth_password_wrong_login_wrong_password_and_no_password_look_the_same() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_password_wrong_login_wrong_password_and_no_password_look_the_same(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let client = hub.anonymous(Some("203.0.113.10"));
     let none = hub.sign_in_owner(&client).await;
@@ -125,9 +123,7 @@ async fn auth_password_wrong_login_wrong_password_and_no_password_look_the_same(
     assert_eq!(left, 0);
 }
 
-#[tokio::test]
-async fn auth_password_bucket_locks_after_five_failures_and_doubles() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_password_bucket_locks_after_five_failures_and_doubles(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let attacker = hub.anonymous(Some("203.0.113.20"));
@@ -197,9 +193,7 @@ async fn auth_password_bucket_locks_after_five_failures_and_doubles() {
     assert_eq!(hub.sign_in_owner(&attacker).await.status, 200);
 }
 
-#[tokio::test]
-async fn auth_password_ipv6_addresses_share_their_64_and_mapped_ipv4_is_ipv4() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_password_ipv6_addresses_share_their_64_and_mapped_ipv4_is_ipv4(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     for host in 1..=5 {
@@ -228,9 +222,7 @@ async fn auth_password_ipv6_addresses_share_their_64_and_mapped_ipv4_is_ipv4() {
     );
 }
 
-#[tokio::test]
-async fn auth_password_parallel_attempts_cannot_exceed_the_bucket() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_password_parallel_attempts_cannot_exceed_the_bucket(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let client = hub.anonymous(Some("203.0.113.30"));
@@ -263,9 +255,7 @@ async fn auth_password_parallel_attempts_cannot_exceed_the_bucket() {
     assert_eq!(failures(&hub.pool).await, 5);
 }
 
-#[tokio::test]
-async fn auth_password_global_lock_spares_known_devices_and_other_methods() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_password_global_lock_spares_known_devices_and_other_methods(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     sqlx::query("insert into push_settings(singleton,waiting,turn_finished,failures) values(true,true,true,true)")
@@ -330,9 +320,7 @@ async fn auth_password_global_lock_spares_known_devices_and_other_methods() {
     assert_eq!(recovered.status, 200);
 }
 
-#[tokio::test]
-async fn auth_password_known_device_has_its_own_bucket() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_password_known_device_has_its_own_bucket(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let first = hub
@@ -371,9 +359,7 @@ async fn auth_password_known_device_has_its_own_bucket() {
     );
 }
 
-#[tokio::test]
-async fn auth_password_permit_timeout_answers_429_without_counting() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_password_permit_timeout_answers_429_without_counting(pool: PgPool) {
     let passwords = Passwords::new(8, 1, 1, 1, Duration::from_millis(100));
     let hub = AuthHub::build(pool, |_| {}, true, Some(passwords)).await;
     hub.set_password(PASSWORD).await;
@@ -398,9 +384,7 @@ async fn auth_password_permit_timeout_answers_429_without_counting() {
     );
 }
 
-#[tokio::test]
-async fn auth_password_wrong_current_password_counts_as_failure() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_password_wrong_current_password_counts_as_failure(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let owner = hub.owner();
@@ -503,9 +487,7 @@ async fn auth_password_change_is_all_or_nothing() {
     );
 }
 
-#[tokio::test]
-async fn auth_password_client_ip_needs_a_matched_secret_and_one_valid_header() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_password_client_ip_needs_a_matched_secret_and_one_valid_header(pool: PgPool) {
     let without_secret = AuthHub::with(pool.clone(), |_| {}, false).await;
     without_secret.set_password(PASSWORD).await;
     let response = without_secret
@@ -556,9 +538,7 @@ async fn auth_password_client_ip_needs_a_matched_secret_and_one_valid_header() {
     );
 }
 
-#[tokio::test]
-async fn auth_password_endpoints_keep_csrf_and_methods_reports_a_password() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_password_endpoints_keep_csrf_and_methods_reports_a_password(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let methods = hub
         .anonymous(None)
@@ -780,4 +760,27 @@ mod races {
             .await;
         assert_eq!(ok.status, 200, "{:?}", ok.body);
     }
+}
+
+/// Вход и смена пароля: cookie, одинаковые ответы на ошибки, корзины блокировок,
+/// IPv6, параллельные попытки, глобальная блокировка, тайм-аут разрешения, адрес
+/// клиента за прокси, CSRF.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn password_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        auth_password_sign_in_sets_host_cookies_and_returns_the_session,
+        auth_password_wrong_login_wrong_password_and_no_password_look_the_same,
+        auth_password_bucket_locks_after_five_failures_and_doubles,
+        auth_password_ipv6_addresses_share_their_64_and_mapped_ipv4_is_ipv4,
+        auth_password_parallel_attempts_cannot_exceed_the_bucket,
+        auth_password_global_lock_spares_known_devices_and_other_methods,
+        auth_password_known_device_has_its_own_bucket,
+        auth_password_permit_timeout_answers_429_without_counting,
+        auth_password_wrong_current_password_counts_as_failure,
+        auth_password_client_ip_needs_a_matched_secret_and_one_valid_header,
+        auth_password_endpoints_keep_csrf_and_methods_reports_a_password,
+    );
 }
