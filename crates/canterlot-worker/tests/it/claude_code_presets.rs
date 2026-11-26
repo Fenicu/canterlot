@@ -13,7 +13,7 @@ use canterlot_worker::{
             settings_json, write_instructions_file,
         },
     },
-    config::ClaudeCodeConfig,
+    config::{ClaudeCodeConfig, ClaudeCodeTimers},
     containment::TreeContainment,
 };
 use serde_json::{Value, json};
@@ -1237,6 +1237,13 @@ for line in sys.stdin:
         exec_dir: dir.path().join("exec"),
         claude_code: Some(ClaudeCodeConfig {
             executable: exe,
+            // Боевые 5 с на выход после EOF и 2 с после SIGTERM: двойник нарочно их пересиживает,
+            // тесту хватает долей секунды, порядок EOF, SIGTERM, SIGKILL тот же.
+            timers: ClaudeCodeTimers {
+                restart_after_eof: Duration::from_millis(500),
+                restart_after_term: Duration::from_millis(500),
+                ..Default::default()
+            },
             ..Default::default()
         }),
         codex: None,

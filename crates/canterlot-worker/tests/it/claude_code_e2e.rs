@@ -7,7 +7,7 @@ use canterlot_worker::{
         InstructionMode, InstructionSpec, SettingsChange, StartSpec, Transmission, TransmitOutcome,
         claude_code::version::CliVersion,
     },
-    config::ClaudeCodeConfig,
+    config::{ClaudeCodeConfig, ClaudeCodeTimers},
     containment::TreeContainment,
 };
 use serde_json::{Value, json};
@@ -94,7 +94,10 @@ impl Fake {
             exec_dir: dir.path().join("exec"),
             claude_code: Some(ClaudeCodeConfig {
                 executable: exe,
-                control_timeout: CONTROL,
+                timers: ClaudeCodeTimers {
+                    control: CONTROL,
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             codex: None,

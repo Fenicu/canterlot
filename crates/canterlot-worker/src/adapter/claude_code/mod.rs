@@ -742,8 +742,8 @@ impl ClaudeCodeAdapter {
     }
 
     /// Остановить старый CLI для перезапуска между ходами: stdin EOF, до 5 с
-    /// ожидания с чтением stdout через разбор, затем SIGTERM группе процесса
-    /// и до 2 с, затем SIGKILL. После SIGKILL дочитывание stdout и ожидание
+    /// (`restart_after_eof`) ожидания с чтением stdout через разбор, затем SIGTERM группе
+    /// процесса и до 2 с (`restart_after_term`), затем SIGKILL. После SIGKILL дочитывание stdout и ожидание
     /// выхода ограничены: вывод может держать процесс вне группы CLI (инструмент
     /// ведёт свою группу), а сам CLI может застрять в непрерываемом сне; тогда
     /// остатки дерева исполнения гасит контейнер. Открытые запросы закрываются
@@ -753,9 +753,10 @@ impl ClaudeCodeAdapter {
             return;
         };
         cli.close_stdin();
-        if !drain_until_exit(cli, &mut self.drained, Duration::from_secs(5)).await {
+        let timers = &self.cfg.timers;
+        if !drain_until_exit(cli, &mut self.drained, timers.restart_after_eof).await {
             signal_group(cli.pid, process::Signal::Term);
-            if !drain_until_exit(cli, &mut self.drained, Duration::from_secs(2)).await {
+            if !drain_until_exit(cli, &mut self.drained, timers.restart_after_term).await {
                 signal_group(cli.pid, process::Signal::Kill);
                 let drained = timeout(KILL_DRAIN, drain_to_eof(cli, &mut self.drained))
                     .await
@@ -1656,7 +1657,7 @@ impl Adapter for ClaudeCodeAdapter {
                 effort: spec.effort.clone(),
                 permission_mode: spec.permission_mode.clone(),
             })
-            .with_control_timeout(self.cfg.control_timeout),
+            .with_control_timeout(self.cfg.timers.control),
         );
         self.limits.set_model(&spec.model);
         let cli = CliProcess::spawn(&launch, &self.cfg, group)

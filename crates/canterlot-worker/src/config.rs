@@ -721,10 +721,30 @@ pub struct ClaudeCodeConfig {
     /// Учётная запись, которой принадлежат лимиты харнесса.
     #[serde(default = "default_account", skip_serializing_if = "is_owner_account")]
     pub account: String,
-    /// Срок ответа CLI на управляющий запрос (прерывание, смена настроек), после него —
-    /// запасной путь. Не читается из worker.toml и не пишется в спеку: короче задают тесты.
-    #[serde(skip, default = "default_control_timeout")]
-    pub control_timeout: Duration,
+    /// Сроки адаптера. Не читаются из worker.toml и не пишутся в спеку: короче задают тесты.
+    #[serde(skip)]
+    pub timers: ClaudeCodeTimers,
+}
+
+/// Сроки адаптера Claude Code; боевые значения — `Default`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaudeCodeTimers {
+    /// Ответ CLI на управляющий запрос (прерывание, смена настроек), после него — запасной путь.
+    pub control: Duration,
+    /// Перезапуск между ходами: выход старого CLI после EOF stdin, затем SIGTERM группе.
+    pub restart_after_eof: Duration,
+    /// Выход после SIGTERM при перезапуске, затем SIGKILL.
+    pub restart_after_term: Duration,
+}
+
+impl Default for ClaudeCodeTimers {
+    fn default() -> Self {
+        Self {
+            control: crate::adapter::claude_code::input::CONTROL_TIMEOUT,
+            restart_after_eof: Duration::from_secs(5),
+            restart_after_term: Duration::from_secs(2),
+        }
+    }
 }
 
 impl Default for ClaudeCodeConfig {
@@ -734,13 +754,9 @@ impl Default for ClaudeCodeConfig {
             allow_paid_model_poll: false,
             owner_user_config: None,
             account: default_account(),
-            control_timeout: default_control_timeout(),
+            timers: ClaudeCodeTimers::default(),
         }
     }
-}
-
-fn default_control_timeout() -> Duration {
-    crate::adapter::claude_code::input::CONTROL_TIMEOUT
 }
 
 /// Учётная запись по умолчанию: лимиты единственной подписки владельца.
@@ -957,21 +973,28 @@ mod tests {
             ]
         );
         assert_eq!(
-            ClaudeCodeConfig::default().control_timeout,
-            Duration::from_secs(10)
+            ClaudeCodeTimers::default(),
+            ClaudeCodeTimers {
+                control: Duration::from_secs(10),
+                restart_after_eof: Duration::from_secs(5),
+                restart_after_term: Duration::from_secs(2),
+            }
         );
     }
 
     #[test]
-    fn claude_control_timeout_is_neither_read_nor_written() {
+    fn claude_timers_are_neither_read_nor_written() {
         let parsed: ClaudeCodeConfig = toml::from_str("executable = \"claude\"").unwrap();
-        assert_eq!(parsed.control_timeout, Duration::from_secs(10));
-        assert!(toml::from_str::<ClaudeCodeConfig>("control_timeout = \"1s\"").is_err());
+        assert_eq!(parsed.timers, ClaudeCodeTimers::default());
+        assert!(toml::from_str::<ClaudeCodeConfig>("[timers]\ncontrol = \"1s\"").is_err());
         let short = ClaudeCodeConfig {
-            control_timeout: Duration::from_millis(1),
+            timers: ClaudeCodeTimers {
+                control: Duration::from_millis(1),
+                ..ClaudeCodeTimers::default()
+            },
             ..ClaudeCodeConfig::default()
         };
-        assert!(!toml::to_string(&short).unwrap().contains("control_timeout"));
+        assert!(!toml::to_string(&short).unwrap().contains("timers"));
     }
 
     #[test]
