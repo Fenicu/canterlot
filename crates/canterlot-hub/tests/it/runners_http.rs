@@ -95,9 +95,9 @@ impl Api {
 }
 
 #[tokio::test]
-async fn machines_expose_role_parent_rank_labels_and_carrier() {
+async fn machines_expose_roles_and_a_runners_availability_follows_the_rule() {
     let pool = canterlot_hub::testkit::db().await;
-    let api = Api::new(pool).await;
+    let mut api = Api::new(pool).await;
     let runner = api.machine(api.runner).await;
     assert_eq!(runner["role"], "runner");
     assert_eq!(runner["parent_machine_id"], api.carrier.to_string());
@@ -133,12 +133,8 @@ async fn machines_expose_role_parent_rank_labels_and_carrier() {
         .expect("the runner is listed");
     assert_eq!(listed["role"], "runner");
     assert_eq!(listed["rank"], 20);
-}
 
-#[tokio::test]
-async fn a_runners_availability_follows_the_spec_rule() {
-    let pool = canterlot_hub::testkit::db().await;
-    let mut api = Api::new(pool).await;
+    // ── Доступность раннера по правилу спецификации ──
     // Ничего не известно.
     let runner = api.machine(api.runner).await;
     assert_eq!(runner["availability"], "unknown");
@@ -191,7 +187,7 @@ async fn a_runners_availability_follows_the_spec_rule() {
 }
 
 #[tokio::test]
-async fn the_new_session_route_refuses_a_runner() {
+async fn the_session_and_execution_routes_refuse_a_runner() {
     let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool).await;
     // Каталог раннеру не нужен: отказ раньше любой проверки каталога и возможностей.
@@ -234,12 +230,8 @@ async fn the_new_session_route_refuses_a_runner() {
             .await
             .unwrap();
     assert_eq!(on_runner, 0);
-}
 
-#[tokio::test]
-async fn an_execution_on_a_runner_is_refused() {
-    let pool = canterlot_hub::testkit::db().await;
-    let api = Api::new(pool).await;
+    // ── Запуск исполнения на раннере тоже запрещён ──
     // Беседа, оказавшаяся на раннере в обход маршрута создания (например, до смены роли).
     let conversation = testkit::seed_conversation(&api.pool, api.owner, api.runner).await;
     let error = api
