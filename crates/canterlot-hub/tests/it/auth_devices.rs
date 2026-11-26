@@ -346,7 +346,9 @@ async fn device_cases() {
         auth_devices_qr_sign_in_gets_no_device_cookie,
         auth_devices_follow_the_session_of_their_last_sign_in,
         auth_devices_are_forgotten_by_revoke_all_and_set_password,
+        #[cfg(feature = "fault-injection")]
         auth_devices_a_failure_after_the_session_commit_revokes_it,
+        #[cfg(feature = "fault-injection")]
         auth_devices_a_failed_sign_in_does_not_forget_a_known_device,
     );
 }

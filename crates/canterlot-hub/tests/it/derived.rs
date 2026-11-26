@@ -960,6 +960,7 @@ async fn derived_notice_cases() {
     Snapshot::take(&pool).await;
     run_cases!(pool.clone(), before = restore;
         event_append_publishes_the_notice_in_process_and_pg_notify_only_in_multi_process_mode,
+        #[cfg(feature = "fault-injection")]
         missed_notice_is_repaired_by_the_lag_sweep,
         derived_changed_carries_queue_summary_and_last_activity_and_copies_it_to_conversations,
         settings_crunch_or_queue_change_alone_emits_derived_changed_in_both_scopes,

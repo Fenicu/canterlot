@@ -1298,6 +1298,7 @@ async fn start_and_resume_cases() {
         the_single_action_clears_an_exited_process_and_keeps_the_context,
         resume_without_a_recorded_turn_starts_a_new_native_conversation,
         resume_skips_a_newer_execution_that_never_ran_a_turn,
+        #[cfg(feature = "fault-injection")]
         resume_and_continue_is_one_transaction,
         retry_of_must_reference_an_unconfirmed_input_of_the_same_conversation,
     );

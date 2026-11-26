@@ -412,6 +412,7 @@ async fn security_cases() {
         security_slow_body_expires_and_capacity_returns,
         security_connection_cap_rejects_immediately_and_recovers,
         security_keep_alive_idle_connection_expires,
+        #[cfg(feature = "fault-injection")]
         security_upgraded_connection_outlives_body_deadline,
     );
 }

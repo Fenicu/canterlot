@@ -1720,6 +1720,7 @@ async fn media_gc_and_quota_cases() {
     Snapshot::take(&pool).await;
     run_cases!(pool.clone(), before = restore;
         gc_keeps_referenced_media_and_removes_unreferenced_after_grace,
+        #[cfg(feature = "fault-injection")]
         media_uploads_are_limited_per_machine_and_one_body_per_id,
         media_quota_is_per_machine_and_freed_by_deletion,
         media_quota_is_off_by_default,

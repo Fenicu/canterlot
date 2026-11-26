@@ -101,6 +101,7 @@ async fn auth_ws_cases() {
     Snapshot::take(&pool).await;
     run_cases!(pool.clone(), before = restore;
         auth_ws_revocation_closes_the_socket_within_two_seconds,
+        #[cfg(feature = "fault-injection")]
         auth_ws_lost_notice_is_caught_by_the_periodic_check,
         auth_ws_idle_expiry_closes_the_socket_on_the_periodic_check,
     );

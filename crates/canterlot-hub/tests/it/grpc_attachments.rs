@@ -864,6 +864,7 @@ async fn readiness_cases() {
         attachment_records_ignore_stale_attempts_and_unlinked_files,
         attachments_hold_until_every_link_is_ready,
         attachment_records_of_another_machine_are_ignored,
+        #[cfg(feature = "fault-injection")]
         hub_shutdown_ends_open_fetch_streams_with_unavailable,
         new_execution_attempt_resets_attachment_readiness_atomically,
         new_attempt_clears_attachment_failure_reason_and_retryability,

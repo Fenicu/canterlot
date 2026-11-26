@@ -35,18 +35,20 @@ impl<E: std::fmt::Debug> Outcome for Result<(), E> {
 
 /// `run_cases!(pool.clone(); a, b)` вызывает `a(pool.clone()).await`, затем `b`.
 /// `run_cases!(pool.clone(), before = clean; a, b)` перед каждым случаем ждёт
-/// `clean(pool.clone())`. Упавший случай называет себя в выводе.
+/// `clean(pool.clone())`. Упавший случай называет себя в выводе. Случай под
+/// `#[cfg(feature = "…")]` помечается тем же атрибутом и в таблице: сборка без фич
+/// (`cargo check --workspace --all-targets` в полном `check.sh`) его не видит.
 // Поддержка общая для всех бинарников хаба, а таблицы есть не в каждом.
 #[allow(unused_macros)]
 macro_rules! run_cases {
-    ($fx:expr; $($case:ident),+ $(,)?) => {
-        $({
+    ($fx:expr; $($(#[$attr:meta])* $case:ident),+ $(,)?) => {
+        $($(#[$attr])* {
             let _case = $crate::support::cases::Case(stringify!($case));
             $crate::support::cases::Outcome::check($case($fx).await, stringify!($case));
         })+
     };
-    ($fx:expr, before = $before:path; $($case:ident),+ $(,)?) => {
-        $({
+    ($fx:expr, before = $before:path; $($(#[$attr:meta])* $case:ident),+ $(,)?) => {
+        $($(#[$attr])* {
             let _case = $crate::support::cases::Case(stringify!($case));
             $before($fx).await;
             $crate::support::cases::Outcome::check($case($fx).await, stringify!($case));
