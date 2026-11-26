@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 struct Fx {
     pool: PgPool,
     context: ToolContext,
@@ -220,9 +222,7 @@ fn routing() -> Value {
         {"harness":"claude_code","model":"sonnet[1m]"}],"expected_minutes":30}}})
 }
 
-#[tokio::test]
-async fn routing_proposal_allow_applies_with_events_and_note() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn routing_proposal_allow_applies_with_events_and_note(pool: PgPool) {
     let f = Fx::new(pool).await;
     let before_revision: i64 =
         sqlx::query_scalar("select routing_policy_revision from owners where id=$1")
@@ -310,9 +310,7 @@ async fn routing_proposal_allow_applies_with_events_and_note() {
     assert!(notes[0].contains("allowed"), "{}", notes[0]);
 }
 
-#[tokio::test]
-async fn agent_cannot_decide_a_settings_proposal() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn agent_cannot_decide_a_settings_proposal(pool: PgPool) {
     let f = Fx::new(pool).await;
     let (request, _) = f
         .proposal(
@@ -361,9 +359,7 @@ fn whitelist_args(model: &str) -> Value {
 /// Зациклившийся агент предлагает одну и ту же настройку раз за разом, слегка меняя значение.
 /// Пока владелец не решил первую карточку, вторая по той же настройке не заводится: ни
 /// запроса, ни пуша.
-#[tokio::test]
-async fn a_setting_has_one_open_proposal_per_conversation() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_setting_has_one_open_proposal_per_conversation(pool: PgPool) {
     let f = Fx::new(pool).await;
     let (first, _) = f
         .proposal("settings.propose_whitelist", whitelist_args("haiku"))
@@ -396,9 +392,7 @@ async fn a_setting_has_one_open_proposal_per_conversation() {
 
 /// Текст пресета от агента проходит детектор секретов уже при предложении: карточка с
 /// паролем владельцу не уходит.
-#[tokio::test]
-async fn a_preset_proposal_with_a_secret_is_refused() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_preset_proposal_with_a_secret_is_refused(pool: PgPool) {
     let f = Fx::new(pool).await;
     let preset = f.new_preset().await;
     let error = f
@@ -419,9 +413,7 @@ async fn a_preset_proposal_with_a_secret_is_refused() {
 }
 
 /// Часовой предел карточек настроек на разговор: решённые карточки тоже в счёте.
-#[tokio::test]
-async fn settings_proposals_are_capped_per_hour() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn settings_proposals_are_capped_per_hour(pool: PgPool) {
     let f = Fx::new(pool).await;
     for n in 0..5 {
         let (request, _) = f
@@ -454,4 +446,20 @@ async fn settings_proposals_are_capped_per_hour() {
         .unwrap();
     f.proposal("settings.propose_whitelist", whitelist_args("one-more"))
         .await;
+}
+
+/// Предложения настроек от агента: одобрение маршрутизации, агент не решает сам, одно
+/// открытое предложение, секрет в пресете, предел в час.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn settings_change_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        routing_proposal_allow_applies_with_events_and_note,
+        agent_cannot_decide_a_settings_proposal,
+        a_setting_has_one_open_proposal_per_conversation,
+        a_preset_proposal_with_a_secret_is_refused,
+        settings_proposals_are_capped_per_hour,
+    );
 }
