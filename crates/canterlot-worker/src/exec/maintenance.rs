@@ -135,7 +135,9 @@ pub(crate) fn ensure_test_runtime_allowed(runtime_dir: Option<&Path>) -> io::Res
         };
         let temp = std::path::absolute(std::env::temp_dir())?;
         let runtime = std::path::absolute(runtime_dir)?;
-        if runtime.starts_with(&temp) {
+        // /tmp тоже свой: тесты кладут runtime в /tmp ради короткого пути сокета, а TMPDIR
+        // гейта лежит в /dev/shm. Общий каталог сокетов ($XDG_RUNTIME_DIR) не там и не там.
+        if runtime.starts_with(&temp) || runtime.starts_with("/tmp") {
             return Ok(());
         }
         Err(io::Error::new(

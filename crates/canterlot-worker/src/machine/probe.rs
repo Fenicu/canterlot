@@ -282,8 +282,10 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{MetadataExt, symlink};
 
+    /// Ровно /tmp, а не TMPDIR: гейт кладёт TMPDIR в /dev/shm, а проба отказывает во всём,
+    /// что лежит под /dev.
     fn dir() -> tempfile::TempDir {
-        tempfile::tempdir().unwrap()
+        tempfile::tempdir_in("/tmp").unwrap()
     }
 
     fn roots(root: &Path) -> Vec<PathBuf> {

@@ -23,6 +23,11 @@ trap 'rm -rf /tmp/canterlot-gate-test' EXIT
 # --runner prefer — значение по умолчанию: без фикстуры конфига раннеров нет, гейт
 # идёт локально. Тесты не должны читать настоящий конфиг воркера владельца.
 export CANTERLOT_WORKER_CONFIG="$tmp/worker.toml"
+# Локальный гейт кладёт TMPDIR в каталог под /dev/shm; в тестах корень — свой каталог,
+# чтобы ни один прогон не писал в настоящий /dev/shm.
+shm="$tmp/shm"
+mkdir -p "$shm"
+export CANTERLOT_GATE_SHM="$shm"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 out="$tmp/log"
@@ -636,6 +641,85 @@ printf 'garbage' >"$scratch/.git/index"
 run 1 env CANTERLOT_LEASE_DRY=1 bash "$scratch/scripts/gate.sh"
 grep -q 'грязная' "$out" || { cat "$out" >&2; fail 'битый индекс не остановил гейт'; }
 
+# --- TMPDIR локального гейта: каталог в памяти, запасной /tmp и явное значение ---
+# Подмена check записывает TMPDIR, который видит шаг, и проверяет, что каталог существует.
+gt="$tmp/gt"
+new_gate_repo "$gt"
+seen="$tmp/tmpdir-seen"
+# shellcheck disable=SC2016
+fake_check_tmp='
+printf "%s\n" "$TMPDIR" >"$GATE_TMP_SEEN"
+[[ -d "$TMPDIR" ]] || exit 3
+mkdir -p target/nextest/default
+printf "%s\n" "<testsuites><testsuite name=\"crate-a\"><testcase name=\"mod::ok\"/></testsuite></testsuites>" >target/nextest/default/junit.xml
+exit "${FAKE_TMP_EXIT:-0}"
+'
+tmp_env=(
+    env CANTERLOT_NO_LEASE=1 CANTERLOT_GATE_DEPLOY_NEEDED=0 GATE_TMP_SEEN="$seen"
+    CANTERLOT_GATE_STEP_NPM="$fake_npm" CANTERLOT_GATE_STEP_CHECK="$fake_check_tmp"
+    CANTERLOT_GATE_STEP_DEPLOY="$fake_deploy" CANTERLOT_GATE_STEP_WEB="$fake_web"
+)
+shm_free_kb=$(df -Pk "$shm" | awk 'NR == 2 { print $4 }')
+if ((shm_free_kb >= 4 * 1024 * 1024)); then
+    rm -f "$seen"
+    run 0 "${tmp_env[@]}" bash "$gt/scripts/gate.sh" --runner local --no-attest
+    got=$(cat "$seen")
+    [[ "$got" =~ ^$shm/cg-[A-Za-z0-9]{6}$ ]] || { cat "$out" >&2; fail "TMPDIR гейта не каталог в памяти: $got"; }
+    grep -qF "TMPDIR=$got" "$out" || { cat "$out" >&2; fail 'гейт не назвал свой TMPDIR'; }
+    [[ ! -e "$got" ]] || fail "каталог в памяти остался после гейта: $got"
+    # Провал шага не оставляет каталог: его убирает ловушка EXIT.
+    rm -f "$seen"
+    run 1 "${tmp_env[@]}" FAKE_TMP_EXIT=1 bash "$gt/scripts/gate.sh" --runner local --no-attest
+    got=$(cat "$seen")
+    [[ "$got" =~ ^$shm/cg- ]] || { cat "$out" >&2; fail "TMPDIR упавшего гейта не каталог в памяти: $got"; }
+    [[ ! -e "$got" ]] || fail "каталог в памяти остался после упавшего гейта: $got"
+else
+    printf 'пропуск: в %s меньше 4 ГБ, каталог в памяти не проверен\n' "$shm"
+fi
+# Корня нет — обычный /tmp и причина в выводе.
+rm -f "$seen"
+run 0 "${tmp_env[@]}" CANTERLOT_GATE_SHM="$tmp/no-shm" bash "$gt/scripts/gate.sh" --runner local --no-attest
+[[ "$(cat "$seen")" == /tmp ]] || { cat "$out" >&2; fail "без корня в памяти TMPDIR не /tmp: $(cat "$seen")"; }
+grep -q 'TMPDIR=/tmp (.*не пишется)' "$out" || { cat "$out" >&2; fail 'нет причины перехода на /tmp'; }
+[[ ! -e "$tmp/no-shm" ]] || fail 'гейт создал отсутствующий корень'
+# CANTERLOT_GATE_TMPDIR перекрывает выбор и не трогается при уборке.
+mkdir -p "$tmp/explicit-tmp"
+rm -f "$seen"
+run 0 "${tmp_env[@]}" CANTERLOT_GATE_TMPDIR="$tmp/explicit-tmp" bash "$gt/scripts/gate.sh" --runner local --no-attest
+[[ "$(cat "$seen")" == "$tmp/explicit-tmp" ]] || fail "CANTERLOT_GATE_TMPDIR не перекрыл выбор: $(cat "$seen")"
+[[ -d "$tmp/explicit-tmp" ]] || fail 'гейт удалил каталог из CANTERLOT_GATE_TMPDIR'
+# noexec и нехватка места проверяются на настоящем tmpfs в отдельном пространстве монтирования.
+if unshare -rm true 2>/dev/null; then
+    mkdir -p "$tmp/shm-noexec" "$tmp/shm-small"
+    # shellcheck disable=SC2016 # раскрывается во внутреннем bash
+    tmp_ns='
+set -u
+mount -t tmpfs -o noexec,size=8g tmpfs "$1" || { echo NS_FAILED; exit 0; }
+mount -t tmpfs -o size=1m tmpfs "$2" || { echo NS_FAILED; exit 0; }
+shift 2
+"$@" CANTERLOT_GATE_SHM="$NS_SHM_NOEXEC" bash "$NS_GATE" --runner local --no-attest || echo "RC=$?"
+printf "noexec %s\n" "$(cat "$GATE_TMP_SEEN")"
+[ -z "$(ls -A "$NS_SHM_NOEXEC")" ] && echo NOEXEC_EMPTY
+"$@" CANTERLOT_GATE_SHM="$NS_SHM_SMALL" bash "$NS_GATE" --runner local --no-attest || echo "RC=$?"
+printf "small %s\n" "$(cat "$GATE_TMP_SEEN")"
+[ -z "$(ls -A "$NS_SHM_SMALL")" ] && echo SMALL_EMPTY
+exit 0
+'
+    run 0 env NS_SHM_NOEXEC="$tmp/shm-noexec" NS_SHM_SMALL="$tmp/shm-small" NS_GATE="$gt/scripts/gate.sh" GATE_TMP_SEEN="$seen" \
+        unshare -rm bash -c "$tmp_ns" ns "$tmp/shm-noexec" "$tmp/shm-small" "${tmp_env[@]}"
+    if ! grep -q NS_FAILED "$out"; then
+        if grep -q '^RC=' "$out"; then cat "$out" >&2; fail 'гейт в пространстве монтирования упал'; fi
+        grep -qx 'noexec /tmp' "$out" || { cat "$out" >&2; fail 'на noexec TMPDIR гейта не /tmp'; }
+        grep -q 'не даёт запускать файлы' "$out" || { cat "$out" >&2; fail 'нет причины noexec'; }
+        grep -qx NOEXEC_EMPTY "$out" || { cat "$out" >&2; fail 'проба noexec оставила каталог'; }
+        grep -qx 'small /tmp' "$out" || { cat "$out" >&2; fail 'при нехватке места TMPDIR гейта не /tmp'; }
+        grep -q 'свободно .* КБ, нужно не меньше' "$out" || { cat "$out" >&2; fail 'нет причины нехватки места'; }
+        grep -qx SMALL_EMPTY "$out" || { cat "$out" >&2; fail 'при нехватке места создан каталог'; }
+    fi
+else
+    printf 'пропуск: unshare -rm недоступен, noexec и нехватка места для TMPDIR гейта не проверены\n'
+fi
+
 # --- scripts/gate.sh --runner: гейт на раннере ---
 # Подмена canterlot-worker (CANTERLOT_WORKER_BIN) отвечает на `job run` и кладёт
 # «собранные» result.txt и state.tsv; настоящих задач, docker и сети нет.
@@ -923,11 +1007,10 @@ grep -qF -- "-v $rwt/scripts/gate/in-container.sh:/build/in-container.sh:ro" <<<
 grep -qE -- "canterlot-gate:[0-9a-f]{12} bash /build/in-container.sh --src /src --out /out --sha ${rsha:0:12}" <<<"$run_line" \
     || fail "runner-gate: не та команда в контейнере: $run_line"
 grep -qF -- ' -e CANTERLOT_GATE_CONTAINER=1 ' <<<"$run_line" || fail "runner-gate: контейнер не получил метку CANTERLOT_GATE_CONTAINER: $run_line"
-# /tmp контейнера — свой пустой каталог этого прогона, после прогона его нет.
-tmp_line=$(grep '^tmp ' "$FAKE_DOCKER_CALLS") || fail 'runner-gate: /tmp не смонтирован'
-[[ "$tmp_line" =~ ^tmp\ $rr/cache/tmp/run-${rsha:0:12}-[0-9a-f]{8}\ empty$ ]] || fail "runner-gate: /tmp не свой пустой каталог прогона: $tmp_line"
-tmp_host=${tmp_line#tmp }; tmp_host=${tmp_host% empty}
-[[ ! -e "$tmp_host" ]] || fail "runner-gate: каталог /tmp прогона остался: $tmp_host"
+# /tmp контейнера — свой tmpfs с exec и явным размером, а не каталог хоста.
+grep -qE '^tmpfs /tmp:exec,size=[0-9]+[kmg]$' "$FAKE_DOCKER_CALLS" \
+    || { cat "$FAKE_DOCKER_CALLS" >&2; fail 'runner-gate: /tmp не tmpfs с exec и размером'; }
+if grep -q '^tmp ' "$FAKE_DOCKER_CALLS"; then fail 'runner-gate: на /tmp смонтирован каталог хоста'; fi
 if grep -q '^build ' "$FAKE_DOCKER_CALLS"; then fail 'runner-gate: образ пересобран, хотя он есть'; fi
 grep -qx 'runner	runner-a' "$rwt/.gate-out/state.tsv" || fail 'runner-gate: имя раннера не дописано в state.tsv'
 [[ -s "$rwt/.gate-out/result.txt" ]] || fail 'runner-gate: нет result.txt в .gate-out'
@@ -1017,10 +1100,12 @@ src_host=$(sed -n 's/.* -v \([^ ]*\):\/src .*/\1/p' <<<"$run_line")
 [[ "$src_host" == "$common"/canterlot-gate/src-* ]] || fail "gate-remote --local: рабочая копия не там: $src_host"
 grep -qF -- " -v $common:$common:ro " <<<"$run_line" || fail "gate-remote --local: общий каталог git не смонтирован только на чтение: $run_line"
 grep -qF -- ' -e CANTERLOT_GATE_CONTAINER=1 ' <<<"$run_line" || fail "gate-remote --local: контейнер не получил метку CANTERLOT_GATE_CONTAINER: $run_line"
-tmp_line=$(grep '^tmp ' "$FAKE_DOCKER_CALLS") || fail 'gate-remote --local: /tmp не смонтирован'
-[[ "$tmp_line" =~ ^tmp\ $tmp/gr-cache/tmp/run-[0-9a-f]{12}-[0-9a-f]{8}\ empty$ ]] || fail "gate-remote --local: /tmp не свой пустой каталог прогона: $tmp_line"
-tmp_host=${tmp_line#tmp }; tmp_host=${tmp_host% empty}
-[[ ! -e "$tmp_host" ]] || fail "gate-remote --local: каталог /tmp прогона остался: $tmp_host"
+grep -qE '^tmpfs /tmp:exec,size=[0-9]+[kmg]$' "$FAKE_DOCKER_CALLS" \
+    || { cat "$FAKE_DOCKER_CALLS" >&2; fail 'gate-remote --local: /tmp не tmpfs с exec и размером'; }
+if grep -q '^tmp ' "$FAKE_DOCKER_CALLS"; then fail 'gate-remote --local: на /tmp смонтирован каталог хоста'; fi
+
+# Каждый локальный гейт этого файла убрал свой каталог в памяти.
+[[ -z "$(ls -A "$shm")" ]] || { ls -la "$shm" >&2; fail "в корне каталогов в памяти остались каталоги гейтов"; }
 
 if command -v shellcheck >/dev/null 2>&1; then
     shellcheck scripts/gate.sh scripts/gate-coverage.sh scripts/gate-remote.sh \

@@ -31,8 +31,11 @@
 #   CANTERLOT_TEST_PG_PORT  порт тестовой PostgreSQL (по умолчанию 55441);
 #   CANTERLOT_WORKER_BIN    бинарник воркера для аренды (по умолчанию установка
 #                           воркера в $HOME/.local/opt/canterlot/current/bin);
-#   CANTERLOT_GATE_TMPDIR   временный каталог гейта (по умолчанию /tmp: сокет
-#                           исполнения не влезает в SUN_LEN при длинном пути);
+#   CANTERLOT_GATE_TMPDIR   временный каталог гейта; по умолчанию локальный гейт берёт
+#                           свой каталог /dev/shm/cg-XXXXXX, иначе /tmp (см. «временный
+#                           каталог в памяти»); путь должен быть коротким: сокет
+#                           исполнения не влезает в SUN_LEN при длинном пути;
+#   CANTERLOT_GATE_SHM      корень каталога в памяти (по умолчанию /dev/shm; шов для тестов);
 #   CANTERLOT_NO_LEASE=1    идти без аренды (отладка).
 #   CANTERLOT_WORKER_CONFIG конфиг воркера для prefer (по умолчанию
 #                           $HOME/.config/canterlot/worker.toml);
@@ -106,8 +109,8 @@ export CANTERLOT_WORKER_BIN="${CANTERLOT_WORKER_BIN:-$HOME/.local/opt/canterlot/
 export CANTERLOT_TEST_PG_PORT="${CANTERLOT_TEST_PG_PORT:-55441}"
 # Сокет исполнения — <TMPDIR>/canterlot/<uuid>.sock, а supervisor::ipc отвергает
 # путь длиннее 107 байт: длинный TMPDIR сессии роняет тесты хаба, супервизоров и
-# адаптеров. Как и контейнерный гейт, берём короткий /tmp; свой путь — в
-# CANTERLOT_GATE_TMPDIR.
+# адаптеров. До аренды и для гейта на раннере берём короткий /tmp; локальный гейт после
+# аренды переходит в каталог в памяти (ниже); свой путь — в CANTERLOT_GATE_TMPDIR.
 export TMPDIR="${CANTERLOT_GATE_TMPDIR:-/tmp}"
 
 # Тестовые швы: подмена шагов и выбора наборов выката. В обычном прогоне пусто;
@@ -393,6 +396,62 @@ source scripts/lease.sh
 lease_self_wrap gate "gate.sh${original_args[*]:+ ${original_args[*]}}" \
     bash "$PWD/scripts/gate.sh" "${original_args[@]}"
 
+# --- временный каталог в памяти ----------------------------------------------------
+# e2e-тест воркера делает 90–160 fsync, а /tmp машины лежит на диске, который делят сборки
+# других сессий: один fsync занимал от 2 до 470 мс, opencode_e2e шёл 55 с на /tmp и 34 с на
+# tmpfs. Поэтому локальный гейт после аренды (каталог создаёт уже процесс под арендой, и
+# ловушка EXIT принадлежит ему) берёт свой каталог /dev/shm/cg-XXXXXX: путь короткий, сокет
+# <TMPDIR>/<каталог теста>/canterlot/<uuid>.sock остаётся далеко от 107 байт. Обратно на /tmp,
+# если корня нет или он не пишется, смонтирован noexec (тесты запускают из TMPDIR двойники
+# CLI, проверяем запуском пробы, а не по опциям монтирования) или свободно меньше
+# gate_shm_min_kb. CANTERLOT_GATE_TMPDIR перекрывает выбор; контейнерный гейт задаёт его сам.
+# Тесты, которым нужен путь вне /dev (share_file и проба пути отказывают в /dev), берут /tmp
+# сами. Порог 4 ГБ: пик TMPDIR полного прогона на 36 потоках — 0,14 ГБ, запас в разы
+# покрывает всплески между замерами и профиль stress, а меньше 4 ГБ свободного в /dev/shm
+# значит, что память машины уже занята, и диск надёжнее.
+gate_shm_root="${CANTERLOT_GATE_SHM:-/dev/shm}"
+gate_shm_min_kb=$((4 * 1024 * 1024))
+gate_tmp=""
+remove_gate_tmp() {
+    # Точный путь, созданный этим прогоном; ни шаблонов, ни родительского каталога.
+    if [[ -n "$gate_tmp" ]]; then
+        rm -rf -- "$gate_tmp"
+        gate_tmp=""
+    fi
+}
+use_memory_tmpdir() {
+    local free_kb
+    if [[ ! -d "$gate_shm_root" || ! -w "$gate_shm_root" ]]; then
+        tmp_why="$gate_shm_root нет или он не пишется"
+        return 1
+    fi
+    free_kb=$(df -Pk -- "$gate_shm_root" 2>/dev/null | awk 'NR == 2 { print $4 }') || free_kb=""
+    if [[ ! "$free_kb" =~ ^[0-9]+$ ]] || ((free_kb < gate_shm_min_kb)); then
+        tmp_why="в $gate_shm_root свободно ${free_kb:-?} КБ, нужно не меньше $gate_shm_min_kb"
+        return 1
+    fi
+    trap remove_gate_tmp EXIT
+    gate_tmp=$(mktemp -d "$gate_shm_root/cg-XXXXXX") || {
+        gate_tmp=""
+        tmp_why="не удалось создать каталог в $gate_shm_root"
+        return 1
+    }
+    printf '#!/bin/sh\nexit 0\n' >"$gate_tmp/exec-probe" && chmod 0700 "$gate_tmp/exec-probe"
+    if ! "$gate_tmp/exec-probe" 2>/dev/null; then
+        remove_gate_tmp
+        tmp_why="$gate_shm_root не даёт запускать файлы (noexec)"
+        return 1
+    fi
+    rm -f -- "$gate_tmp/exec-probe"
+    export TMPDIR=$gate_tmp
+}
+tmp_why=""
+if [[ -n "${CANTERLOT_GATE_TMPDIR:-}" ]]; then
+    tmp_why="задан CANTERLOT_GATE_TMPDIR"
+elif ! use_memory_tmpdir; then
+    export TMPDIR=/tmp
+fi
+
 if [[ -n "${CANTERLOT_GATE_DEPLOY_NEEDED:-}" ]]; then
     deploy_needed() { [[ "${CANTERLOT_GATE_DEPLOY_NEEDED}" == 1 ]]; }
 else
@@ -421,6 +480,7 @@ tree_clean=1
 clean_tree || tree_clean=0
 
 printf 'гейт %s: pg=127.0.0.1:%s, логи %s\n' "$short" "$CANTERLOT_TEST_PG_PORT" "$log_dir"
+printf 'гейт %s: TMPDIR=%s%s\n' "$short" "$TMPDIR" "${tmp_why:+ ($tmp_why)}"
 
 # --- чтение состояния предыдущего прогона -------------------------------------
 state_value() { awk -F '\t' -v k="$2" '$1==k{print $2;exit}' "$1"; }

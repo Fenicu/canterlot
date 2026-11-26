@@ -18,8 +18,8 @@
 #                     gate.log с его выводом;
 #   /cache/cargo      CARGO_HOME;
 #   /cache/npm        npm_config_cache;
-#   /tmp              свой пустой каталог этого прогона на ФС хоста (база, сокеты,
-#                     временные каталоги тестов), снаружи создаётся и убирается.
+#   /tmp              свой tmpfs этого прогона с exec (база, сокеты, временные каталоги
+#                     тестов): пустой при старте, уходит вместе с контейнером.
 #
 # Формат result.txt и state.tsv — как у scripts/gate.sh: строка с кодами возврата и
 # временами, затем сводка nextest и первые упавшие тесты.
@@ -58,11 +58,12 @@ done
 # Дерево с чужим HEAD гейт бы не заметил, поэтому sha проверяется до любой записи.
 [[ "$(git -C "$src" rev-parse --short=12 HEAD)" == "$want_sha" ]] \
     || { echo "FATAL: HEAD в $src не $want_sha" >&2; exit 1; }
-# /tmp — свой пустой каталог этого прогона: его создают и убирают gate-remote.sh и
-# runner-gate.sh. Скрипт его не чистит (прежняя чистка на общем /tmp снесла бы файлы выката и
-# сессий машины), а непустой /tmp — значит, контейнер получил чужой каталог: отказ.
+# /tmp — свой tmpfs этого прогона: его монтируют gate-remote.sh и runner-gate.sh, и он
+# уходит вместе с контейнером. Скрипт его не чистит (прежняя чистка на общем /tmp снесла
+# бы файлы выката и сессий машины), а непустой /tmp — значит, контейнер получил чужой
+# каталог: отказ.
 [[ -z "$(ls -A /tmp)" ]] \
-    || { echo "FATAL: /tmp не пуст: контейнеру гейта нужен свой пустой /tmp (его создают gate-remote.sh и runner-gate.sh)" >&2; exit 1; }
+    || { echo "FATAL: /tmp не пуст: контейнеру гейта нужен свой пустой /tmp (его монтируют gate-remote.sh и runner-gate.sh)" >&2; exit 1; }
 
 port=${CANTERLOT_TEST_PG_PORT:-55441}
 export CANTERLOT_TEST_PG_PORT="$port"
@@ -74,6 +75,9 @@ export npm_config_cache=${npm_config_cache:-$HOME/.npm}
 # а не подкаталог: tests/it/exec.rs создаёт runtime через tempdir_in("/tmp"), а
 # уборка в maintenance пускает её только внутри std::env::temp_dir().
 export TMPDIR=/tmp
+# scripts/gate.sh сам выбрал бы каталог в /dev/shm, а в контейнере это --shm-size=2g:
+# TMPDIR гейта здесь задаётся явно и остаётся /tmp.
+export CANTERLOT_GATE_TMPDIR=/tmp
 
 # uid приходит снаружи (--user), записи о нём в /etc/passwd контейнера нет.
 # libnss-wrapper подставляет запись из файла: она нужна не только initdb и postgres,

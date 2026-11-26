@@ -208,6 +208,15 @@ async fn media_is_referenced_only_after_durable_publish() {
     until(async || files_in(&f.exec_dir().join("media")).is_empty()).await;
 }
 
+/// Каталог для файлов share_file: ровно /tmp, а не корень фикстуры в TMPDIR. Гейт кладёт
+/// TMPDIR в /dev/shm, а share_file отказывает во всём, что лежит под /dev.
+fn share_dir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("cl-share-")
+        .tempdir_in("/tmp")
+        .unwrap()
+}
+
 #[tokio::test]
 async fn shared_file_is_published_with_the_supervisor_block_id() {
     let pool = canterlot_hub::testkit::db().await;
@@ -215,7 +224,8 @@ async fn shared_file_is_published_with_the_supervisor_block_id() {
     // иначе хаб отвергает её без UUID.
     let f = Fixture::new(&pool).await;
     let bytes = b"owner document";
-    let path = f.root.path().join("doc.txt");
+    let shared = share_dir();
+    let path = shared.path().join("doc.txt");
     fs::write(&path, bytes).unwrap();
     let input = f
         .submit(
@@ -289,8 +299,9 @@ async fn empty_shared_file_reaches_the_owner_as_a_zero_byte_file() {
     // Пустой файл: копия нулевой длины, SHA-256 пустого ввода, хаб публикует пустой blob.
     // Расширение видео не делает пустой файл видео: он уходит обычным файлом.
     let f = Fixture::new(&pool).await;
-    let text = f.root.path().join("empty.txt");
-    let clip = f.root.path().join("clip.mp4");
+    let shared = share_dir();
+    let text = shared.path().join("empty.txt");
+    let clip = shared.path().join("clip.mp4");
     fs::write(&text, b"").unwrap();
     fs::write(&clip, b"").unwrap();
     let input = f

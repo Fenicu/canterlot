@@ -1841,8 +1841,13 @@ async fn path_probe_answers_with_the_same_protection_as_share_file() {
         ..Default::default()
     })
     .await;
-    let root = hub.config.data_dir.join("root");
-    fs::create_dir_all(&root).unwrap();
+    // Ровно /tmp, а не каталог данных в TMPDIR: гейт кладёт TMPDIR в /dev/shm, а проба
+    // отказывает во всём, что лежит под /dev.
+    let root_dir = tempfile::Builder::new()
+        .prefix("cl-probe-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let root = root_dir.path().to_path_buf();
     fs::write(root.join("gate.rc"), b"0\n").unwrap();
     fs::write(root.join(".env"), b"TOKEN=1").unwrap();
     hub.config.execution.allowed_workdir_roots = vec![root.clone()];
@@ -2000,8 +2005,13 @@ async fn concurrent_path_probes_are_all_answered_or_explicitly_busy() {
         ..Default::default()
     })
     .await;
-    let root = hub.config.data_dir.join("root");
-    fs::create_dir_all(&root).unwrap();
+    // Ровно /tmp, а не каталог данных в TMPDIR: гейт кладёт TMPDIR в /dev/shm, а проба
+    // отказывает во всём, что лежит под /dev.
+    let root_dir = tempfile::Builder::new()
+        .prefix("cl-probe-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let root = root_dir.path().to_path_buf();
     fs::write(root.join("gate.rc"), b"0\n").unwrap();
     hub.config.execution.allowed_workdir_roots = vec![root.clone()];
     let (stop, _, join) = start(hub.config.clone(), store);

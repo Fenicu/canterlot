@@ -12,8 +12,8 @@
 #   2. собирает образ canterlot-gate:<hash Dockerfile + rust-toolchain.toml> или
 #      переиспользует готовый;
 #   3. запускает контейнер canterlot-gate-<sha12>-<случайное> с --cpus и --memory от
-#      nproc и free (хосту остаются 2 ядра и 4 ГБ) и кэшами <корень>/cache/{cargo,
-#      target,npm,tmp}; по TERM и INT контейнер убивается по имени;
+#      nproc и free (хосту остаются 2 ядра и 4 ГБ), кэшами <корень>/cache/{cargo,
+#      target,npm} и своим tmpfs на /tmp; по TERM и INT контейнер убивается по имени;
 #   4. кладёт result.txt, state.tsv и логи в ./.gate-out (его собирает носитель) и
 #      дописывает в state.tsv строку «runner<TAB>имя»: имя из CANTERLOT_RUNNER_NAME,
 #      иначе имя хоста.
@@ -87,8 +87,10 @@ cpus=$(($(nproc) - 2))
 ((cpus >= 1)) || cpus=1
 mem_mb=$(($(free -m | awk '/^Mem:/{print $2}') - 4096))
 ((mem_mb >= 2048)) || mem_mb=2048
+# Размер tmpfs на /tmp — как в scripts/gate-remote.sh (там же замер).
+tmpfs_size=8g
 cache="$root/cache"
-mkdir -p "$cache/cargo" "$cache/target" "$cache/npm" "$cache/tmp"
+mkdir -p "$cache/cargo" "$cache/target" "$cache/npm"
 out="$wt/.gate-out"
 mkdir -p "$out"
 [[ -z "$(ls -A "$out")" ]] || die "каталог $out не пуст"
@@ -105,12 +107,7 @@ fi
 
 run_id="$sha12-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 name="canterlot-gate-$run_id"
-# Свой пустой /tmp на каждый контейнер: каталог создаётся здесь заново и убирается после
-# прогона, поэтому in-container.sh ничего не чистит и чужих файлов не видит.
-run_tmp="$cache/tmp/run-$run_id"
-mkdir "$run_tmp"
 run_pid=""
-remove_run_tmp() { rm -rf "$run_tmp"; }
 # Прерывание (задачу отменили или вышел таймаут): контейнер не должен пережить скрипт.
 on_signal() {
     local code=$1
@@ -118,7 +115,6 @@ on_signal() {
     log "сигнал: убираю контейнер $name"
     "$docker_cmd" kill "$name" >/dev/null 2>&1 || true
     [[ -z "$run_pid" ]] || wait "$run_pid" 2>/dev/null || true
-    remove_run_tmp
     exit "$code"
 }
 trap 'on_signal 130' INT
@@ -137,7 +133,9 @@ run_args=(
     --cpus "$cpus" --memory "${mem_mb}m" --pids-limit 8192
     --shm-size=2g
     --cap-add SYS_PTRACE
-    -v "$run_tmp:/tmp"
+    # Свой tmpfs на /tmp, exec и размер — как в scripts/gate-remote.sh: пустой при старте,
+    # уходит вместе с контейнером, поэтому in-container.sh ничего не чистит.
+    --tmpfs "/tmp:exec,size=$tmpfs_size"
     -v "$wt:/src"
     -v "$git_common:$git_common:ro"
     -v "$cache/cargo:/cache/cargo"
@@ -159,7 +157,6 @@ gate_code=0
 run_pid=$!
 wait "$run_pid" || gate_code=$?
 run_pid=""
-remove_run_tmp
 log "гейт завершился с кодом $gate_code"
 
 if [[ -f "$out/state.tsv" ]]; then

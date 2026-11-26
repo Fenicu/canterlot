@@ -95,21 +95,13 @@ script_path="$in_container"
 cache_root=""
 worktree_parent=""
 git_common=""
-run_tmp=""
 cleaned=0
 
-# Уборка повторяется и на выходе по ошибке: рабочая копия, ref и /tmp прогона не должны
-# пережить упавший прогон. На хосте git и rm только своего каталога /tmp этого прогона.
+# Уборка повторяется и на выходе по ошибке: рабочая копия и ref не должны пережить
+# упавший прогон. /tmp контейнера — tmpfs, он уходит вместе с контейнером (--rm).
 cleanup() {
     if ((cleaned)); then return 0; fi
     cleaned=1
-    if [[ -n "$run_tmp" ]]; then
-        if [[ "$mode" == remote ]]; then
-            remote "rm -rf $(q "$run_tmp")" || log "ВНИМАНИЕ: не удалось убрать $run_tmp на $host"
-        else
-            rm -rf "$run_tmp" || log "ВНИМАНИЕ: не удалось убрать $run_tmp"
-        fi
-    fi
     if [[ -z "$src" ]]; then return 0; fi
     if [[ "$mode" == remote ]]; then
         # shellcheck disable=SC2016 # пути раскрывает удалённый shell
@@ -191,10 +183,8 @@ phase_done "рабочая копия"
 
 # --- образ ---
 phase "образ гейта"
-# Свой /tmp этого прогона: имя уникально, каталог создаётся пустым и убирается в cleanup.
-run_tmp="$cache_root/tmp/run-$sha12-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 if [[ "$mode" == remote ]]; then
-    remote "mkdir -p $(q "$remote_tools") $(q "$cache_root/cargo") $(q "$cache_root/target") $(q "$cache_root/npm") $(q "$cache_root/tmp") && mkdir $(q "$run_tmp")" \
+    remote "mkdir -p $(q "$remote_tools") $(q "$cache_root/cargo") $(q "$cache_root/target") $(q "$cache_root/npm")" \
         || die "не удалось создать $remote_tools и кэши"
     # Dockerfile и in-container.sh берутся из ЭТОЙ рабочей копии: коммит может быть
     # старше самого гейта.
@@ -212,8 +202,7 @@ if [[ "$mode" == remote ]]; then
         remote "$cmd" || die "не удалось собрать образ на $host"
     fi
 else
-    mkdir -p "$cache_root/cargo" "$cache_root/target" "$cache_root/npm" "$cache_root/tmp"
-    mkdir "$run_tmp"
+    mkdir -p "$cache_root/cargo" "$cache_root/target" "$cache_root/npm"
     if "$docker_cmd" image inspect "$image" >/dev/null 2>&1; then
         log "образ уже есть на этой машине"
     else
@@ -233,6 +222,9 @@ phase_done "образ"
 # pids-limit. --cap-add SYS_PTRACE — тесты долговечности каталогов запускают
 # strace, а профиль seccomp docker без этой возможности ptrace запрещает.
 phase "гейт в контейнере"
+# Размер tmpfs на /tmp: пик TMPDIR полного прогона — 0,14 ГБ, база в /tmp — клон шаблона
+# около 13 МБ на поток плюс WAL, вместе меньше 2 ГБ; 8 ГБ — запас в разы внутри --memory.
+tmpfs_size=8g
 run_args=(
     --rm --init
     --user "${uid}:${gid}"
@@ -241,11 +233,13 @@ run_args=(
     # даёт всего 64 МБ.
     --shm-size=2g
     --cap-add SYS_PTRACE
-    # /tmp — свой пустой каталог на обычной ФС хоста для каждого прогона, а не overlay
-    # контейнера и не tmpfs: на tmpfs запуск двойников CLI в Rust-тестах растягивается до
-    # таймаута, а overlayfs мешает параллельным тестам. Каталог создаётся заново перед
-    # запуском и убирается в cleanup, поэтому in-container.sh ничего не чистит.
-    -v "$run_tmp:/tmp"
+    # /tmp — свой tmpfs прогона: пустой при старте, уходит вместе с контейнером, поэтому
+    # in-container.sh ничего не чистит. exec обязателен: --tmpfs по умолчанию noexec, а
+    # тесты запускают из TMPDIR двойники CLI. На noexec они не стартуют, и тест ждёт до
+    # таймаута — так выглядела прежняя пометка «на tmpfs двойники растягиваются до
+    # таймаута». Размер ограничен явно: страницы tmpfs входят в --memory контейнера.
+    # overlay контейнера на /tmp не годится: он мешает параллельным тестам.
+    --tmpfs "/tmp:exec,size=$tmpfs_size"
     -v "$src:/src"
     # Рабочая копия — связанный worktree: её .git — файл, указывающий в общий каталог git
     # (bare-репозиторий на сборочной машине или .git этой копии). Контейнеру он нужен по
