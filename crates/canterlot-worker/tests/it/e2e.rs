@@ -669,6 +669,9 @@ async fn lost_acks_do_not_duplicate_facts() {
     let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let mut fixture = Fixture::new(&pool, &hub).await;
+    // Все подтверждения теряются: повтор диапазона и пересоздание сеанса идут по сроку
+    // подтверждения, и с 3 с тест высиживал их по два раза.
+    fixture.config.timers.range_ack = Duration::from_secs(1);
     hub.faults.drop_next_acks(usize::MAX);
     let mut worker = fixture.start();
     for count in 1..=3 {
