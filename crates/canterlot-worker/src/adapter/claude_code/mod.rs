@@ -970,12 +970,15 @@ impl ClaudeCodeAdapter {
 
     /// Перезапуск оборвал бы фоновую работу или ход, который CLI начал сам. Задача только что
     /// закончилась: её пробуждающий ход начнётся через миллисекунды, кадра ещё может не быть.
+    /// Список задач должен не меняться `restart_settle` (2 с), прежде чем останавливать CLI:
+    /// между концом задачи и `system/init` её пробуждающего хода в записанных сессиях
+    /// проходило меньше 50 мс.
     fn background_busy(&self) -> bool {
         self.parser.background_running() > 0
             || self.parser.wake_turn_open()
             || self
                 .background_changed
-                .is_some_and(|at| at.elapsed() < RESTART_SETTLE)
+                .is_some_and(|at| at.elapsed() < self.cfg.timers.restart_settle)
     }
 
     /// Запомнить смену до конца фоновой работы. Новая смена поверх отложенной: поля новой главнее,
@@ -1243,10 +1246,6 @@ impl ClaudeCodeAdapter {
 
 /// Предел дочитывания stdout и ожидания выхода после SIGKILL при перезапуске.
 const KILL_DRAIN: Duration = Duration::from_secs(1);
-
-/// Сколько список задач должен не меняться, прежде чем останавливать CLI: между концом задачи
-/// и `system/init` её пробуждающего хода в записанных сессиях проходило меньше 50 мс.
-const RESTART_SETTLE: Duration = Duration::from_secs(2);
 
 const DEFERRED_NOTICE: &str = "Смена инструкций ждёт конца фоновой работы: перезапуск агента её бы остановил. Новые инструкции подействуют, как только задачи закончатся.";
 const DEFERRED_FAILED: &str =

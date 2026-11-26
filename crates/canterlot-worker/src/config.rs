@@ -735,6 +735,8 @@ pub struct ClaudeCodeTimers {
     pub restart_after_eof: Duration,
     /// Выход после SIGTERM при перезапуске, затем SIGKILL.
     pub restart_after_term: Duration,
+    /// Сколько список фоновых задач не меняется, прежде чем отложенный перезапуск идёт.
+    pub restart_settle: Duration,
 }
 
 impl Default for ClaudeCodeTimers {
@@ -743,6 +745,7 @@ impl Default for ClaudeCodeTimers {
             control: crate::adapter::claude_code::input::CONTROL_TIMEOUT,
             restart_after_eof: Duration::from_secs(5),
             restart_after_term: Duration::from_secs(2),
+            restart_settle: Duration::from_secs(2),
         }
     }
 }
@@ -978,6 +981,7 @@ mod tests {
                 control: Duration::from_secs(10),
                 restart_after_eof: Duration::from_secs(5),
                 restart_after_term: Duration::from_secs(2),
+                restart_settle: Duration::from_secs(2),
             }
         );
     }

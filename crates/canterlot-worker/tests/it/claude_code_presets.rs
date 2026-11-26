@@ -29,6 +29,9 @@ use uuid::Uuid;
 use crate::fake_exec;
 
 const WAIT: Duration = Duration::from_secs(20);
+/// Окно тишины списка фоновых задач перед отложенным перезапуском. Боевое — 2 с, и тесты
+/// отложенной смены высиживали его; двойник пишет кадры подряд, ему хватает 300 мс.
+const SETTLE: Duration = Duration::from_millis(300);
 
 fn owner_spec() -> InstructionSpec {
     InstructionSpec {
@@ -495,6 +498,10 @@ impl RestartHarness {
             exec_dir: dir.path().join("exec"),
             claude_code: Some(ClaudeCodeConfig {
                 executable: exe,
+                timers: ClaudeCodeTimers {
+                    restart_settle: SETTLE,
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             codex: None,
@@ -709,7 +716,8 @@ async fn deferred_restart_waits_for_a_manual_compaction() {
             .unwrap(),
         canterlot_worker::adapter::CompactOutcome::Accepted
     ));
-    let quiet = Instant::now() + Duration::from_millis(3_000);
+    // Тишина втрое дольше окна перед перезапуском: без защиты сжатия перезапуск пришёл бы в ней.
+    let quiet = Instant::now() + SETTLE * 3;
     while let Ok(event) = tokio::time::timeout_at(quiet, h.adapter.next_event()).await {
         assert!(
             !matches!(event, AdapterEvent::DeferredRestartDue),
@@ -801,7 +809,7 @@ async fn end_background_work(h: &mut RestartHarness) {
         TransmitOutcome::Accepted(_)
     ));
     h.until_finished().await;
-    tokio::time::sleep(Duration::from_millis(2_200)).await;
+    tokio::time::sleep(SETTLE + Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
