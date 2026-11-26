@@ -10,6 +10,8 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 async fn claude_seed(pool: &PgPool) -> Seed {
     let seed = testkit::seed(pool).await;
     sqlx::query("update conversations set harness = 'claude_code' where id = $1")
@@ -45,9 +47,7 @@ async fn start_command(pool: &PgPool, seed: &Seed) -> (executions::StartedExecut
     (execution, payload)
 }
 
-#[tokio::test]
-async fn owner_toggle_round_trip() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn owner_toggle_round_trip(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     let mut conn = pool.acquire().await.unwrap();
     assert_eq!(
@@ -91,9 +91,7 @@ async fn owner_toggle_round_trip() {
     );
 }
 
-#[tokio::test]
-async fn start_execution_carries_flag_only_for_capable_workers() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn start_execution_carries_flag_only_for_capable_workers(pool: PgPool) {
     let seed = claude_seed(&pool).await;
     put(&pool, seed.owner_id, ClaudeAutoMemory::Off).await;
     let (execution, payload) = start_command(&pool, &seed).await;
@@ -131,20 +129,31 @@ async fn start_execution_carries_flag_only_for_capable_workers() {
     }
 }
 
-#[tokio::test]
-async fn default_setting_sends_no_flag() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn default_setting_sends_no_flag(pool: PgPool) {
     let seed = claude_seed(&pool).await;
     let (_, payload) = start_command(&pool, &seed).await;
     assert!(payload.get("disable_claude_auto_memory").is_none());
 }
 
-#[tokio::test]
-async fn non_claude_harness_never_gets_the_flag() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn non_claude_harness_never_gets_the_flag(pool: PgPool) {
     // Синтетический харнес сида — не Claude Code.
     let seed = testkit::seed(&pool).await;
     put(&pool, seed.owner_id, ClaudeAutoMemory::Off).await;
     let (_, payload) = start_command(&pool, &seed).await;
     assert!(payload.get("disable_claude_auto_memory").is_none());
+}
+
+/// Переключатель памяти владельца и флаг запуска: только для способных воркеров и
+/// только для Claude Code.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn memory_settings_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        owner_toggle_round_trip,
+        start_execution_carries_flag_only_for_capable_workers,
+        default_setting_sends_no_flag,
+        non_claude_harness_never_gets_the_flag,
+    );
 }
