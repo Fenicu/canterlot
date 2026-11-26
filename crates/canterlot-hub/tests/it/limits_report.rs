@@ -13,6 +13,8 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 fn context(pool: &PgPool) -> ToolContext {
     ToolContext {
         memory: Default::default(),
@@ -38,9 +40,7 @@ fn context(pool: &PgPool) -> ToolContext {
     }
 }
 
-#[tokio::test]
-async fn limits_report_lists_every_provider_with_windows_and_freshness() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn limits_report_lists_every_provider_with_windows_and_freshness(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     for provider in ["claude", "codex", "opencode"] {
         testkit::offer_provider(&pool, seed.machine_id, provider).await;
@@ -171,9 +171,7 @@ async fn insert_weekly_with_forecast(
 
 /// Провайдер без харнесса в каталоге машин владельца скрыт и в PWA, и в инструменте,
 /// включая строку `Observed:`; видимые провайдеры описаны как прежде.
-#[tokio::test]
-async fn limits_report_hides_providers_the_pwa_hides() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn limits_report_hides_providers_the_pwa_hides(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "claude").await;
     testkit::offer_provider(&pool, seed.machine_id, "codex").await;
@@ -220,9 +218,7 @@ async fn limits_report_hides_providers_the_pwa_hides() {
 }
 
 /// Ни одного провайдера в каталоге: инструмент говорит, что данных нет, как пустая полоса PWA.
-#[tokio::test]
-async fn limits_report_without_offered_providers_says_no_data() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn limits_report_without_offered_providers_says_no_data(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     sqlx::query(
         "insert into provider_limits(provider,weekly_used_permille,weekly_resets_at,weekly_observed_at)
@@ -240,9 +236,7 @@ async fn limits_report_without_offered_providers_says_no_data() {
 
 /// Сброс окна уже прошёл: инструмент говорит, что данные устарели, не обещает сброс
 /// «меньше чем через минуту» и не даёт прогноз; окно без прошедшего сброса не меняется.
-#[tokio::test]
-async fn limits_report_marks_a_passed_reset_as_stale() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn limits_report_marks_a_passed_reset_as_stale(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "codex").await;
     let now = Utc::now();
@@ -279,9 +273,7 @@ async fn limits_report_marks_a_passed_reset_as_stale() {
 
 /// Прогноз есть у свежего окна и пропадает у окна, чьи данные старше `limits.stale_after`
 /// или чей сброс уже прошёл.
-#[tokio::test]
-async fn limits_report_suppresses_the_forecast_for_stale_windows() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn limits_report_suppresses_the_forecast_for_stale_windows(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     for provider in ["claude", "codex", "opencode"] {
         testkit::offer_provider(&pool, seed.machine_id, provider).await;
@@ -368,9 +360,7 @@ async fn limits_report_suppresses_the_forecast_for_stale_windows() {
     assert_eq!(find("opencode")["forecast"], serde_json::Value::Null);
 }
 
-#[tokio::test]
-async fn limits_report_includes_the_countdown_and_the_forecast() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn limits_report_includes_the_countdown_and_the_forecast(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "claude").await;
     testkit::offer_provider(&pool, seed.machine_id, "codex").await;
@@ -485,9 +475,9 @@ async fn second_account_machine(pool: &PgPool, owner: Uuid, name: &str, account:
     id
 }
 
-#[tokio::test]
-async fn limits_report_prints_a_line_per_account_and_names_it_only_when_there_are_several() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn limits_report_prints_a_line_per_account_and_names_it_only_when_there_are_several(
+    pool: PgPool,
+) {
     let seed = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "opencode").await;
     let now = Utc::now();
@@ -548,9 +538,9 @@ async fn limits_report_prints_a_line_per_account_and_names_it_only_when_there_ar
     assert!(text.contains("Observed: opencode b-opencode"), "{text}");
 }
 
-#[tokio::test]
-async fn credentials_and_credits_are_listed_per_machine_and_never_mixed_across_accounts() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn credentials_and_credits_are_listed_per_machine_and_never_mixed_across_accounts(
+    pool: PgPool,
+) {
     use canterlot_proto::worker::v1::{ProviderCredits, ResetCredit};
     let seed = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "opencode").await;
@@ -666,9 +656,7 @@ async fn credentials_and_credits_are_listed_per_machine_and_never_mixed_across_a
     assert_eq!(payload["machine_credits"][0]["reset_count"], 1);
 }
 
-#[tokio::test]
-async fn limits_report_without_data_says_so() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn limits_report_without_data_says_so(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     let caller = Caller {
         owner_id: seed.owner_id,
@@ -682,4 +670,24 @@ async fn limits_report_without_data_says_so() {
         .unwrap();
     assert_eq!(report["providers"].as_array().unwrap().len(), 0);
     assert_eq!(report["text"], "no limit data yet in this session");
+}
+
+/// Отчёт лимитов: провайдеры и окна, скрытые провайдеры, нет данных, устаревший сброс,
+/// прогноз и обратный отсчёт, строка на учётную запись, кредиты по машинам.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn limits_report_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        limits_report_lists_every_provider_with_windows_and_freshness,
+        limits_report_hides_providers_the_pwa_hides,
+        limits_report_without_offered_providers_says_no_data,
+        limits_report_marks_a_passed_reset_as_stale,
+        limits_report_suppresses_the_forecast_for_stale_windows,
+        limits_report_includes_the_countdown_and_the_forecast,
+        limits_report_prints_a_line_per_account_and_names_it_only_when_there_are_several,
+        credentials_and_credits_are_listed_per_machine_and_never_mixed_across_accounts,
+        limits_report_without_data_says_so,
+    );
 }
