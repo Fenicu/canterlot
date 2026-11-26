@@ -86,6 +86,22 @@ pub fn lists_own_server(list: &Value) -> bool {
         })
 }
 
+/// Чужой включённый сервер ещё запускается. С 2.4.1 локальный сервер доходит до
+/// `connected` секундами: старт ждёт его в пределах срока, иначе первый ход не
+/// увидел бы его инструменты. Отказ, `disabled` и оставленные делегату старт не держат.
+pub fn has_pending_foreign(list: &Value, allowed: &[String]) -> bool {
+    list.get("data")
+        .and_then(Value::as_array)
+        .is_some_and(|servers| {
+            servers.iter().any(|server| {
+                let name = server.get("name").and_then(Value::as_str);
+                name != Some(SERVER_NAME)
+                    && !name.is_some_and(|name| allowed.iter().any(|allowed| allowed == name))
+                    && server.pointer("/status/status").and_then(Value::as_str) == Some("pending")
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +171,42 @@ mod tests {
             ("canterlot", "connected"),
             ("nanokvm", "disabled")
         ])));
+    }
+
+    fn has_pending_foreign_none(list: &Value) -> bool {
+        has_pending_foreign(list, &[])
+    }
+
+    #[test]
+    fn only_a_pending_foreign_server_holds_the_start() {
+        let list = |entries: &[(&str, &str)]| json!({"data": entries.iter().map(|(name, status)| json!({"name": name, "status": {"status": status}})).collect::<Vec<_>>()});
+        // 2.4.1 запускает локальные серверы секундами: `pending` ждёт срока.
+        assert!(has_pending_foreign_none(&list(&[
+            ("canterlot", "connected"),
+            ("ask", "pending")
+        ])));
+        // Всё остальное старт не держит: отказ, выключенный и свой сервер.
+        assert!(!has_pending_foreign_none(&list(&[
+            ("canterlot", "connected"),
+            ("ask", "connected")
+        ])));
+        assert!(!has_pending_foreign_none(&list(&[
+            ("canterlot", "connected"),
+            ("ask", "failed")
+        ])));
+        assert!(!has_pending_foreign_none(&list(&[
+            ("canterlot", "connected"),
+            ("ask", "disabled")
+        ])));
+        assert!(!has_pending_foreign_none(&list(&[(
+            "canterlot",
+            "connected"
+        )])));
+        assert!(!has_pending_foreign_none(&json!({"data": []})));
+        // Оставленный делегату сервер не чужой.
+        assert!(!has_pending_foreign(
+            &list(&[("canterlot", "connected"), ("ask", "pending")]),
+            &["ask".to_owned()],
+        ));
     }
 }

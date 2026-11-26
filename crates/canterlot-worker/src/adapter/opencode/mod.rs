@@ -1056,24 +1056,31 @@ impl OpenCodeAdapter {
                 self.ready_wait
             };
         let (state, proven) = loop {
-            let (state, proven) = match self.http()?.get("/api/mcp", REQUEST_WAIT).await {
-                Ok(list)
-                    if self.isolate_mcp
-                        && mcp::has_foreign_server(&list, &self.delegate_mcp_kept) =>
-                {
-                    return Err(AdapterError::StartFailed("mcp_isolation_failed"));
-                }
-                Ok(list) => (mcp::state_of(&list), mcp::lists_own_server(&list)),
-                Err(HttpError::Lost) => {
-                    return Err(AdapterError::StartFailed("server_unreachable"));
-                }
-                Err(_) => (McpState::Pending, false),
-            };
+            let (state, proven, foreign_pending) =
+                match self.http()?.get("/api/mcp", REQUEST_WAIT).await {
+                    Ok(list)
+                        if self.isolate_mcp
+                            && mcp::has_foreign_server(&list, &self.delegate_mcp_kept) =>
+                    {
+                        return Err(AdapterError::StartFailed("mcp_isolation_failed"));
+                    }
+                    Ok(list) => {
+                        let foreign = !self.isolate_mcp
+                            && mcp::has_pending_foreign(&list, &self.delegate_mcp_kept);
+                        (mcp::state_of(&list), mcp::lists_own_server(&list), foreign)
+                    }
+                    Err(HttpError::Lost) => {
+                        return Err(AdapterError::StartFailed("server_unreachable"));
+                    }
+                    Err(_) => (McpState::Pending, false, false),
+                };
             // Наш сервер сообщил об отказе: дальнейшее ожидание ничего не изменит.
             if self.isolate_mcp && state == McpState::Failed {
                 return Err(AdapterError::StartFailed("mcp_not_ready"));
             }
-            if state != McpState::Pending || Instant::now() >= limit {
+            // Чужой сервер ещё запускается (с 2.4.1 секундами): первый ход без
+            // ожидания не увидел бы его инструменты. Срок общий, отказ не держит.
+            if (state != McpState::Pending && !foreign_pending) || Instant::now() >= limit {
                 break (state, proven);
             }
             tokio::time::sleep(POLL_EVERY).await;
