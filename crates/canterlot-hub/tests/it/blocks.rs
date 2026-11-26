@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 struct Run {
@@ -128,9 +130,7 @@ async fn events(pool: &PgPool, id: Uuid) -> Vec<(String, i64, Value)> {
     sqlx::query_as("select kind, scope_seq, payload from events where payload->>'block_id' = $1 order by scope_seq").bind(id.to_string()).fetch_all(pool).await.unwrap()
 }
 
-#[tokio::test]
-async fn block_lifecycle_materializes_text() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn block_lifecycle_materializes_text(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     run.send(vec![
@@ -162,9 +162,7 @@ async fn block_lifecycle_materializes_text() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn duplicate_and_stale_deltas_do_not_change_text() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn duplicate_and_stale_deltas_do_not_change_text(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     run.send(vec![
@@ -193,9 +191,7 @@ async fn duplicate_and_stale_deltas_do_not_change_text() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn late_delta_after_final_is_ignored() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn late_delta_after_final_is_ignored(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     run.send(vec![
@@ -222,9 +218,7 @@ async fn late_delta_after_final_is_ignored() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn final_checksum_mismatch_final_wins_with_diagnostic() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn final_checksum_mismatch_final_wins_with_diagnostic(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     run.send(vec![
@@ -260,9 +254,7 @@ async fn final_checksum_mismatch_final_wins_with_diagnostic() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn inline_final_without_deltas_raises_no_checksum_mismatch() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn inline_final_without_deltas_raises_no_checksum_mismatch(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     run.send(vec![start(id), final_fact(id, 1, "целиком в финале")])
@@ -274,9 +266,9 @@ async fn inline_final_without_deltas_raises_no_checksum_mismatch() -> TestResult
 }
 
 // Супервизор открывает блок ревизией 1, поэтому ревизия не говорит, были ли дельты.
-#[tokio::test]
-async fn inline_final_after_a_supervisor_start_raises_no_checksum_mismatch() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn inline_final_after_a_supervisor_start_raises_no_checksum_mismatch(
+    pool: PgPool,
+) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     let Body::BlockStarted(mut opened) = start(id) else {
@@ -298,9 +290,7 @@ async fn inline_final_after_a_supervisor_start_raises_no_checksum_mismatch() -> 
     Ok(())
 }
 
-#[tokio::test]
-async fn oversized_final_uses_checksum_only_and_hub_verifies() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn oversized_final_uses_checksum_only_and_hub_verifies(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     let piece = "я".repeat(8192);
@@ -374,9 +364,9 @@ fn kinds(events: &[(String, i64, Value)]) -> Vec<&str> {
     events.iter().map(|event| event.0.as_str()).collect()
 }
 
-#[tokio::test]
-async fn nul_in_deltas_and_final_is_replaced_and_keeps_the_checksum_valid() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn nul_in_deltas_and_final_is_replaced_and_keeps_the_checksum_valid(
+    pool: PgPool,
+) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     let (head, tail) = NUL_TEXT.split_at(2);
@@ -408,9 +398,7 @@ async fn nul_in_deltas_and_final_is_replaced_and_keeps_the_checksum_valid() -> T
     Ok(())
 }
 
-#[tokio::test]
-async fn nul_in_a_final_without_deltas_is_replaced() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn nul_in_a_final_without_deltas_is_replaced(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     run.send(vec![start(id), final_fact(id, 1, NUL_TEXT)]).await;
@@ -424,9 +412,9 @@ async fn nul_in_a_final_without_deltas_is_replaced() -> TestResult {
 }
 
 // Текст крупнее финала хаб знает только по дельтам, а воркер считал сумму по оригиналу.
-#[tokio::test]
-async fn omitted_final_of_nul_deltas_is_verified_against_the_original_text() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn omitted_final_of_nul_deltas_is_verified_against_the_original_text(
+    pool: PgPool,
+) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     run.send(vec![
@@ -450,9 +438,7 @@ async fn omitted_final_of_nul_deltas_is_verified_against_the_original_text() -> 
     Ok(())
 }
 
-#[tokio::test]
-async fn wrong_checksum_over_nul_text_is_still_a_mismatch() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn wrong_checksum_over_nul_text_is_still_a_mismatch(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let inline = Uuid::now_v7();
     let Body::BlockFinal(mut fact) = final_fact(inline, 2, NUL_TEXT) else {
@@ -481,9 +467,7 @@ async fn wrong_checksum_over_nul_text_is_still_a_mismatch() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn repeated_final_of_nul_text_is_recognised_as_the_same_final() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn repeated_final_of_nul_text_is_recognised_as_the_same_final(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let inline = Uuid::now_v7();
     run.send(vec![
@@ -509,9 +493,9 @@ async fn repeated_final_of_nul_text_is_recognised_as_the_same_final() -> TestRes
     Ok(())
 }
 
-#[tokio::test]
-async fn journal_closed_marks_streaming_blocks_incomplete_and_late_final_wins() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn journal_closed_marks_streaming_blocks_incomplete_and_late_final_wins(
+    pool: PgPool,
+) -> TestResult {
     let mut run = Run::new(&pool).await;
     let a = Uuid::now_v7();
     let b = Uuid::now_v7();
@@ -591,9 +575,7 @@ async fn journal_closed_marks_streaming_blocks_incomplete_and_late_final_wins() 
     Ok(())
 }
 
-#[tokio::test]
-async fn blocks_of_one_machine_never_affect_another() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn blocks_of_one_machine_never_affect_another(pool: PgPool) -> TestResult {
     let mut victim = Run::new(&pool).await;
     let mut attacker = Run::new(&pool).await;
     let id = Uuid::now_v7();
@@ -636,9 +618,7 @@ fn checksum_is_sha256_of_utf8() {
     assert_eq!(canterlot_hub::blocks::checksum("ёж"), hash("ёж"));
 }
 
-#[tokio::test]
-async fn sj_record_bounds_are_checked_before_applying_any_record() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn sj_record_bounds_are_checked_before_applying_any_record(pool: PgPool) -> TestResult {
     use canterlot_hub::ingest::IngestError;
     use canterlot_proto::limits::{
         BLOCK_FINAL_INLINE_MAX_BYTES, MAX_BLOCK_DELTA_BYTES, MAX_SJ_BATCH_RECORDS,
@@ -715,9 +695,7 @@ fn start_approved(id: Uuid) -> Body {
     })
 }
 
-#[tokio::test]
-async fn cli_policy_mark_survives_ingest_to_block_json() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn cli_policy_mark_survives_ingest_to_block_json(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     run.send(vec![start_approved(id)]).await;
@@ -752,9 +730,7 @@ async fn cli_policy_mark_survives_ingest_to_block_json() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn unknown_approved_by_mark_is_not_stored_or_broadcast() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn unknown_approved_by_mark_is_not_stored_or_broadcast(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     run.send(vec![Body::BlockStarted(BlockStarted {
@@ -789,9 +765,7 @@ async fn unknown_approved_by_mark_is_not_stored_or_broadcast() -> TestResult {
 
 // После падения новое исполнение читает хвост истории и шлёт те же идентификаторы. Хаб их не
 // задваивает, а результат инструмента садится под вызов прежнего исполнения: разговор один.
-#[tokio::test]
-async fn resumed_execution_repeats_nothing_and_closes_the_old_call() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn resumed_execution_repeats_nothing_and_closes_the_old_call(pool: PgPool) -> TestResult {
     let mut first = Run::new(&pool).await;
     let text = Uuid::now_v7();
     let call = Uuid::now_v7();
@@ -888,9 +862,7 @@ async fn chunks(pool: &PgPool, id: Uuid) -> i64 {
 }
 
 // Дельты нужны, только пока блок пишется: потом текст лежит в blocks.content.
-#[tokio::test]
-async fn sealed_blocks_keep_no_chunks() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn sealed_blocks_keep_no_chunks(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let [done, omitted, broken, open] = [(); 4].map(|_| Uuid::now_v7());
     run.send(vec![
@@ -924,9 +896,7 @@ async fn sealed_blocks_keep_no_chunks() -> TestResult {
 }
 
 // Сумму оригинала с NUL хаб помнит и без дельт: поздний финал после обрыва проверяется по ней.
-#[tokio::test]
-async fn omitted_nul_final_after_incomplete_is_verified_without_chunks() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn omitted_nul_final_after_incomplete_is_verified_without_chunks(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     run.send(vec![
@@ -948,9 +918,7 @@ async fn omitted_nul_final_after_incomplete_is_verified_without_chunks() -> Test
 }
 
 // Дельты блоков, закрытых до исправления, убираются пачками; пишущийся блок не трогается.
-#[tokio::test]
-async fn purge_sealed_chunks_removes_leftovers_in_batches() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn purge_sealed_chunks_removes_leftovers_in_batches(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let [plain, nul, open] = [(); 3].map(|_| Uuid::now_v7());
     run.send(vec![
@@ -996,9 +964,7 @@ async fn purge_sealed_chunks_removes_leftovers_in_batches() -> TestResult {
 
 /// Блок в 1 МБ закрывается: индекс поиска берёт только первые 32768 символов, и
 /// `to_tsvector` не упирается в свой предел 1 МБ внутри транзакции закрытия.
-#[tokio::test]
-async fn megabyte_text_block_finalizes_and_is_indexed() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn megabyte_text_block_finalizes_and_is_indexed(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     let piece = "слово word ".repeat(1000);
@@ -1048,9 +1014,7 @@ async fn megabyte_text_block_finalizes_and_is_indexed() -> TestResult {
 
 /// Размышление без видимого текста закрывается пустым итогом: блок становится `final`,
 /// а не висит `streaming` до конца хода.
-#[tokio::test]
-async fn an_empty_reasoning_final_closes_the_block() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn an_empty_reasoning_final_closes_the_block(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     run.send(vec![
@@ -1070,4 +1034,60 @@ async fn an_empty_reasoning_final_closes_the_block() -> TestResult {
     );
     assert!(kinds(&events(&pool, id).await).contains(&"block_final"));
     Ok(())
+}
+
+/// Блоки ответа: жизненный цикл текста, дубли и устаревшие дельты, поздняя дельта,
+/// расхождение контрольной суммы, большой финал, NUL в дельтах.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn block_text_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        block_lifecycle_materializes_text,
+        duplicate_and_stale_deltas_do_not_change_text,
+        late_delta_after_final_is_ignored,
+        final_checksum_mismatch_final_wins_with_diagnostic,
+        inline_final_without_deltas_raises_no_checksum_mismatch,
+        inline_final_after_a_supervisor_start_raises_no_checksum_mismatch,
+        oversized_final_uses_checksum_only_and_hub_verifies,
+        nul_in_deltas_and_final_is_replaced_and_keeps_the_checksum_valid,
+    );
+}
+
+/// NUL в финале без дельт и пропущенный финал, закрытый журнал, чужая машина,
+/// границы записи SJ, метка политики CLI.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn block_nul_and_bounds_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        nul_in_a_final_without_deltas_is_replaced,
+        omitted_final_of_nul_deltas_is_verified_against_the_original_text,
+        wrong_checksum_over_nul_text_is_still_a_mismatch,
+        repeated_final_of_nul_text_is_recognised_as_the_same_final,
+        journal_closed_marks_streaming_blocks_incomplete_and_late_final_wins,
+        blocks_of_one_machine_never_affect_another,
+        sj_record_bounds_are_checked_before_applying_any_record,
+        cli_policy_mark_survives_ingest_to_block_json,
+    );
+}
+
+/// Неизвестная метка одобрения, продолжение исполнения, запечатанные блоки и их
+/// куски, мегабайтный блок, пустой финал рассуждения.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn block_resume_and_purge_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        unknown_approved_by_mark_is_not_stored_or_broadcast,
+        resumed_execution_repeats_nothing_and_closes_the_old_call,
+        sealed_blocks_keep_no_chunks,
+        omitted_nul_final_after_incomplete_is_verified_without_chunks,
+        purge_sealed_chunks_removes_leftovers_in_batches,
+        megabyte_text_block_finalizes_and_is_indexed,
+        an_empty_reasoning_final_closes_the_block,
+    );
 }
