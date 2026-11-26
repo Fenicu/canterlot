@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod cases;
 pub mod fake_yandex;
 pub mod mmdb;
 #[cfg(feature = "fault-injection")]

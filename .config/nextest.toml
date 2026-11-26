@@ -58,6 +58,10 @@ default-filter = '''
   )
 )
 | (
+  package(canterlot-hub) & binary(it_sessions)
+  & test(=session_subs::deleting_a_subscriber_during_refresh_does_not_deadlock)
+)
+| (
   package(canterlot-worker) & binary(it) & (
     test(=exec_attachments::large_attachment_does_not_starve_control_session)
     | test(=exec_media::media_upload_does_not_starve_control_or_sj)
