@@ -15,6 +15,11 @@ use crate::activity::{self, Activity, ActivityState, Evidence, QueueFacts};
 /// Отпечаток события об удалении: цель исчезла, повторно оно не возникнет.
 const DELETED: &str = "deleted";
 
+/// Повторный взвод без отпечатка (`session_send`, `session_spawn`) обнуляет отпечаток, чтобы
+/// следующий итог пришёл, даже если совпадёт с прошлым. Упавшую или остановленную цель
+/// ввод не будит: он ждёт возобновления владельцем, а пока состояние то же. Поэтому у
+/// такой цели уже сообщённый отпечаток остаётся, иначе тот же сбой пришёл бы второй раз,
+/// и уже с новым окном, в котором нет ни одного хода.
 async fn upsert(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -27,7 +32,12 @@ async fn upsert(
         "insert into session_subscriptions(id,owner_id,subscriber_id,target_id,chain_depth,last_fingerprint)
          values($1,$2,$3,$4,$5,$6)
          on conflict(subscriber_id,target_id) do update set
-           chain_depth=excluded.chain_depth,last_fingerprint=excluded.last_fingerprint,
+           chain_depth=excluded.chain_depth,
+           last_fingerprint=coalesce(excluded.last_fingerprint,
+             case when exists(select 1 from conversation_derived d
+                              where d.conversation_id=excluded.target_id
+                                and d.activity_state in ('failed','stopped'))
+                  then session_subscriptions.last_fingerprint end),
            armed_at=clock_timestamp(),closed_at=null,closed_reason=null",
     )
     .bind(Uuid::now_v7())

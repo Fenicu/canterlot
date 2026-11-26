@@ -1064,6 +1064,69 @@ async fn stopped_target_with_a_queued_input_keeps_the_subscription(pool: PgPool)
     );
 }
 
+/// `session_send` упавшей цели только ставит ввод в очередь: сбой уже назван, и второе
+/// «is now failed» с новым окном (без единого хода) подписчику не приходит.
+async fn send_to_a_failed_target_does_not_repeat_the_failure(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    subscribe(&pool, &p).await;
+    for (state, outcome) in [
+        (ExecutionState::Stopping, None),
+        (ExecutionState::Failed, Some("crashed")),
+    ] {
+        executions::set_state(
+            &pool,
+            execution.execution_id,
+            state,
+            outcome,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+    }
+    refresh_at(&pool, p.target, Utc::now()).await;
+    let fired = jobs(&pool, p.subscriber).await;
+    assert_eq!(fired.len(), 1, "the subscriber hears about the crash");
+    assert_eq!(fired[0]["state"], "failed");
+    let reported = subscription(&pool, p.subscriber, p.target).await["last_fingerprint"].clone();
+
+    // session_send: ввод и повторный взвод подписки в одной транзакции.
+    let mut tx = pool.begin().await.unwrap();
+    canterlot_hub::delivery::submit_input_in_tx(
+        &mut tx,
+        &SubmitInput {
+            owner_id: p.owner,
+            conversation_id: p.target,
+            idempotency_key: "after-crash".into(),
+            content: vec![ContentBlock::Text {
+                text: "carry on".into(),
+            }],
+            received_at: Utc::now(),
+            correlation_id: Uuid::now_v7(),
+            origin: None,
+        },
+    )
+    .await
+    .unwrap();
+    subs::subscribe_in_tx(&mut tx, p.owner, p.subscriber, p.target, 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    refresh_at(&pool, p.target, Utc::now()).await;
+    refresh_at(&pool, p.target, Utc::now() + TimeDelta::seconds(10)).await;
+    assert_eq!(
+        jobs(&pool, p.subscriber).await.len(),
+        1,
+        "the same failure is not reported twice"
+    );
+    let rearmed = subscription(&pool, p.subscriber, p.target).await;
+    assert!(
+        rearmed["closed_at"].is_null(),
+        "the queued input runs after a resume"
+    );
+    assert_eq!(rearmed["last_fingerprint"], reported);
+}
+
 async fn lost(pool: &PgPool, p: &Pair, execution: Uuid) {
     executions::set_state(
         pool,
@@ -2552,6 +2615,7 @@ async fn stall_and_stop_cases() {
         stalled_is_not_repeated_when_the_state_flaps_in_the_same_phase,
         stopped_target_fires,
         stopped_target_with_a_queued_input_keeps_the_subscription,
+        send_to_a_failed_target_does_not_repeat_the_failure,
     );
 }
 
