@@ -55,6 +55,7 @@ default-filter = '''
     | test(=crunch::create_racing_reserve_entry_always_ends_held)
     | test(=attachments_gc::gc_never_removes_blob_under_concurrent_link)
     | test(=sj_ingest::sj_ingest_cost_does_not_grow_with_block_size)
+    | test(=sj_ingest::wave2_n2_sj_batch_and_stop_share_lock_order)
   )
 )
 | (

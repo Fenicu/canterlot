@@ -133,7 +133,9 @@ async fn wave2_n2_sj_batch_and_stop_share_lock_order() -> TestResult {
     sqlx::raw_sql("create function gate_stop_event() returns trigger language plpgsql as $$ begin perform pg_advisory_xact_lock(20927); return new; end $$;
         create trigger gate_stop_event before update on queue_state for each row execute function gate_stop_event()")
         .execute(&pool).await?;
-    for round in 0..50 {
+    // Чередование задано замками и одинаково в каждом круге: гейту хватает короткого
+    // числа кругов, полные 50 идут в профиле stress.
+    for round in 0..u64::from(crate::stress_rounds(50)) {
         sqlx::query("update queue_state set pause_reasons = '[]' where conversation_id = $1")
             .bind(run.seed.conversation_id)
             .execute(&pool)
