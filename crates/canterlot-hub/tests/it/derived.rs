@@ -14,6 +14,8 @@ use support::*;
 use tokio::sync::watch;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 #[sqlx::test(migrations = false)]
 async fn migration_and_startup_project_old_terminal_conversations_without_events(pool: PgPool) {
     for migration in canterlot_hub::db::MIGRATOR
@@ -54,9 +56,7 @@ async fn migration_and_startup_project_old_terminal_conversations_without_events
     task.await.unwrap();
 }
 
-#[tokio::test]
-async fn refresh_writes_row_and_emits_one_event_per_change_in_both_scopes() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn refresh_writes_row_and_emits_one_event_per_change_in_both_scopes(pool: PgPool) {
     let s = testkit::seed(&pool).await;
     assert_eq!(refresh(&pool, s.conversation_id).await, Refresh::Changed);
     let ev: Vec<(String, Value)> = sqlx::query_as(
@@ -83,9 +83,7 @@ async fn refresh_writes_row_and_emits_one_event_per_change_in_both_scopes() {
     );
 }
 
-#[tokio::test]
-async fn refresh_without_change_emits_nothing() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn refresh_without_change_emits_nothing(pool: PgPool) {
     let s = testkit::seed(&pool).await;
     refresh(&pool, s.conversation_id).await;
     let before = row(&pool, s.conversation_id).await;
@@ -101,9 +99,7 @@ async fn refresh_without_change_emits_nothing() {
     );
 }
 
-#[tokio::test]
-async fn a_new_turn_in_the_same_phase_rebases_the_activity_clocks() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_new_turn_in_the_same_phase_rebases_the_activity_clocks(pool: PgPool) {
     let s = testkit::seed(&pool).await;
     // Прошлый ход закончился, но исполнение живо и стоит в прежней фазе:
     // отметка фазы осталась от него, а не от нового хода.
@@ -184,9 +180,7 @@ async fn projector(
     (stop, task, bus)
 }
 
-#[tokio::test]
-async fn stalled_is_detected_by_the_tick_without_any_event() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn stalled_is_detected_by_the_tick_without_any_event(pool: PgPool) {
     let (s, e) = running(&pool).await;
     sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,clock_timestamp(),1,1,100,100,50,0,0,0,'[]',$2)")
         .bind(s.machine_id).bind(json!([{"execution_id":e,"alive":true,"cpu_permille":0,"descendants":0}]))
@@ -217,9 +211,7 @@ async fn stalled_is_detected_by_the_tick_without_any_event() {
     task.await.unwrap();
 }
 
-#[tokio::test]
-async fn stalled_never_changes_execution_queue_or_commands() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn stalled_never_changes_execution_queue_or_commands(pool: PgPool) {
     let (s, e) = running(&pool).await;
     // Живой потомок исключает новый verdict «завис в генерации»: проверяем,
     // что обычный щедрый `stalled` по-прежнему ничего не меняет в очередях.
@@ -237,9 +229,7 @@ async fn stalled_never_changes_execution_queue_or_commands() {
     assert_eq!(before, after);
 }
 
-#[tokio::test]
-async fn projector_ignores_deltas_and_its_own_events() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn projector_ignores_deltas_and_its_own_events(pool: PgPool) {
     let s = testkit::seed(&pool).await;
     refresh(&pool, s.conversation_id).await;
     let config = ActivityConfig {
@@ -275,9 +265,7 @@ async fn projector_ignores_deltas_and_its_own_events() {
     task.await.unwrap();
 }
 
-#[tokio::test]
-async fn unread_counts_text_warning_and_error_blocks_after_the_read_marker() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn unread_counts_text_warning_and_error_blocks_after_the_read_marker(pool: PgPool) {
     let (s, e) = running(&pool).await;
     for (n, kind, state) in [
         (1, "text", "final"),
@@ -300,9 +288,7 @@ async fn unread_counts_text_warning_and_error_blocks_after_the_read_marker() {
     assert_eq!(row(&pool, s.conversation_id).await["unread_count"], 1);
 }
 
-#[tokio::test]
-async fn process_evidence_comes_only_from_fresh_metrics() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn process_evidence_comes_only_from_fresh_metrics(pool: PgPool) {
     let (s, e) = running(&pool).await;
     let now = Utc::now();
     sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,$2,1,1,100,100,50,0,0,0,'[]',$3)").bind(s.machine_id).bind(now).bind(json!([{"execution_id":e,"alive":true,"cpu_permille":0,"descendants":0}])).execute(&pool).await.unwrap();
@@ -331,9 +317,7 @@ async fn process_evidence_comes_only_from_fresh_metrics() {
     }
 }
 
-#[tokio::test]
-async fn live_tool_descendants_keep_a_silent_tool_working() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn live_tool_descendants_keep_a_silent_tool_working(pool: PgPool) {
     let (s, e) = running(&pool).await;
     sqlx::query("update executions set phase='running_tool',phase_at=clock_timestamp()-interval '2 hours',last_event_at=clock_timestamp()-interval '2 hours' where id=$1")
         .bind(e)
@@ -380,9 +364,9 @@ async fn live_tool_descendants_keep_a_silent_tool_working() {
     );
 }
 
-#[tokio::test]
-async fn event_append_publishes_the_notice_in_process_and_pg_notify_only_in_multi_process_mode() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn event_append_publishes_the_notice_in_process_and_pg_notify_only_in_multi_process_mode(
+    pool: PgPool,
+) {
     let s = testkit::seed(&pool).await;
     let (stop, rx) = watch::channel(false);
     let mut listener = PgListener::connect_with(&pool).await.unwrap();
@@ -438,9 +422,7 @@ async fn event_append_publishes_the_notice_in_process_and_pg_notify_only_in_mult
 }
 
 #[cfg(feature = "fault-injection")]
-#[tokio::test]
-async fn missed_notice_is_repaired_by_the_lag_sweep() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn missed_notice_is_repaired_by_the_lag_sweep(pool: PgPool) {
     let (s, e) = running(&pool).await;
     sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,clock_timestamp(),1,1,100,100,50,0,0,0,'[]',$2)")
         .bind(s.machine_id).bind(json!([{"execution_id":e,"alive":true,"cpu_permille":0,"descendants":0}]))
@@ -509,9 +491,9 @@ async fn refresh_upserts_the_derived_row_for_conversations_that_predate_the_migr
     );
 }
 
-#[tokio::test]
-async fn derived_changed_carries_queue_summary_and_last_activity_and_copies_it_to_conversations() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn derived_changed_carries_queue_summary_and_last_activity_and_copies_it_to_conversations(
+    pool: PgPool,
+) {
     let s = testkit::seed(&pool).await;
     input(&pool, &s, "one").await;
     refresh(&pool, s.conversation_id).await;
@@ -544,9 +526,7 @@ async fn derived_changed_carries_queue_summary_and_last_activity_and_copies_it_t
     assert_eq!(payload["working_ms"], json!(0));
 }
 
-#[tokio::test]
-async fn settings_crunch_or_queue_change_alone_emits_derived_changed_in_both_scopes() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn settings_crunch_or_queue_change_alone_emits_derived_changed_in_both_scopes(pool: PgPool) {
     let s = testkit::seed(&pool).await;
     refresh(&pool, s.conversation_id).await;
     sqlx::query("update queue_state set pause_reasons='[{\"reason\":\"user_stop\"}]' where conversation_id=$1").bind(s.conversation_id).execute(&pool).await.unwrap();
@@ -566,9 +546,9 @@ async fn settings_crunch_or_queue_change_alone_emits_derived_changed_in_both_sco
     );
 }
 
-#[tokio::test]
-async fn last_activity_is_truncated_to_the_minute_and_streaming_emits_no_list_event_for_it() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn last_activity_is_truncated_to_the_minute_and_streaming_emits_no_list_event_for_it(
+    pool: PgPool,
+) {
     let (s, e) = running(&pool).await;
     let block = Uuid::now_v7();
     let at = Utc::now()
@@ -661,9 +641,7 @@ async fn listed_preview(pool: &PgPool, s: &testkit::Seed) -> Option<String> {
         .preview
 }
 
-#[tokio::test]
-async fn preview_is_the_plain_last_answer_of_the_finished_turn_in_event_and_list() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn preview_is_the_plain_last_answer_of_the_finished_turn_in_event_and_list(pool: PgPool) {
     let s = testkit::seed(&pool).await;
     refresh(&pool, s.conversation_id).await;
     assert_eq!(last_preview(&pool, &s).await, Value::Null);
@@ -836,9 +814,7 @@ async fn sweep_fills_the_preview_of_conversations_finished_before_the_migration(
     );
 }
 
-#[tokio::test]
-async fn preview_backfill_goes_in_bounded_batches_without_events() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn preview_backfill_goes_in_bounded_batches_without_events(pool: PgPool) {
     let s = testkit::seed(&pool).await;
     let other = testkit::Seed {
         owner_id: s.owner_id,
@@ -903,9 +879,7 @@ async fn preview_backfill_goes_in_bounded_batches_without_events() {
 
 /// Простой с живым процессом и после его смерти различим в строке списка и в событии:
 /// `process_alive` берётся из свежих метрик машины и попадает в `activity.evidence`.
-#[tokio::test]
-async fn idle_evidence_carries_process_alive_from_fresh_metrics() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn idle_evidence_carries_process_alive_from_fresh_metrics(pool: PgPool) {
     let (s, e) = running(&pool).await;
     sqlx::query(
         "update queue_state set run_slot='free',run_slot_input_id=null where conversation_id=$1",
@@ -941,9 +915,7 @@ async fn idle_evidence_carries_process_alive_from_fresh_metrics() {
 }
 
 /// Без метрик машины (старый воркер) поле не пишется: клиент судит по-старому.
-#[tokio::test]
-async fn idle_evidence_without_metrics_omits_process_alive() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn idle_evidence_without_metrics_omits_process_alive(pool: PgPool) {
     let (s, _) = running(&pool).await;
     sqlx::query(
         "update queue_state set run_slot='free',run_slot_input_id=null where conversation_id=$1",
@@ -958,5 +930,45 @@ async fn idle_evidence_without_metrics_omits_process_alive() {
     assert!(
         derived["activity_evidence"].get("process_alive").is_none(),
         "{derived}"
+    );
+}
+
+/// Производные строки: событие на изменение в обеих областях, такт без событий,
+/// часы активности, зависание по такту, непрочитанное, свидетельство процесса.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn derived_refresh_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        refresh_writes_row_and_emits_one_event_per_change_in_both_scopes,
+        refresh_without_change_emits_nothing,
+        a_new_turn_in_the_same_phase_rebases_the_activity_clocks,
+        stalled_is_detected_by_the_tick_without_any_event,
+        stalled_never_changes_execution_queue_or_commands,
+        projector_ignores_deltas_and_its_own_events,
+        unread_counts_text_warning_and_error_blocks_after_the_read_marker,
+        process_evidence_comes_only_from_fresh_metrics,
+        live_tool_descendants_keep_a_silent_tool_working,
+    );
+}
+
+/// Уведомление о событиях и починка пропуска, сводка очереди и последняя активность,
+/// изменения настроек, обрезка до минуты, превью.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn derived_notice_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        event_append_publishes_the_notice_in_process_and_pg_notify_only_in_multi_process_mode,
+        missed_notice_is_repaired_by_the_lag_sweep,
+        derived_changed_carries_queue_summary_and_last_activity_and_copies_it_to_conversations,
+        settings_crunch_or_queue_change_alone_emits_derived_changed_in_both_scopes,
+        last_activity_is_truncated_to_the_minute_and_streaming_emits_no_list_event_for_it,
+        preview_is_the_plain_last_answer_of_the_finished_turn_in_event_and_list,
+        preview_backfill_goes_in_bounded_batches_without_events,
+        idle_evidence_carries_process_alive_from_fresh_metrics,
+        idle_evidence_without_metrics_omits_process_alive,
     );
 }
