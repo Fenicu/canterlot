@@ -979,14 +979,26 @@ fn detail_section(detail: &Detail) -> String {
             window.as_deref().unwrap_or("unknown"),
             until.map_or_else(|| "unknown".to_owned(), instant)
         ),
+        Detail::Stopped { outcome } if outcome == MACHINE_SHUTDOWN => format!(
+            "Outcome: {outcome}. The machine was shutting down, so canterlot stopped the session; a message continues it once the machine is back.\n"
+        ),
         Detail::Stopped { outcome } => format!("Outcome: {outcome}.\n"),
     }
 }
+
+/// Остановка перед выключением машины: сессию продолжает следующее сообщение, владелец
+/// для этого не нужен (`hibernate::wake_in_tx`).
+const MACHINE_SHUTDOWN: &str = "machine_shutdown";
 
 fn footer(state: &str, detail: &Detail) -> Option<&'static str> {
     if matches!(detail, Detail::Failed { reason } if reason == OWNER_LOST) {
         return Some(
             "Next: wait for the next [canterlot] message, or session_accept to give up on it.",
+        );
+    }
+    if matches!(detail, Detail::Stopped { outcome } if outcome == MACHINE_SHUTDOWN) {
+        return Some(
+            "Next: session_send continues it after the machine boots, or session_accept to clean up.",
         );
     }
     match state {

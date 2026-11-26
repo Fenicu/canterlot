@@ -4,7 +4,8 @@
 //! со свежей телеметрией живого процесса, без фоновых работ и без всех остальных
 //! оснований держать CLI запущенным. Усыпление — обычная остановка с причиной
 //! `hibernated`, а не сбой; следующее сообщение будит сессию новым исполнением с тем же
-//! нативным id. Так же будит и остановка перезагрузкой машины (`machine_rebooted`):
+//! нативным id. Так же будит и остановка перезагрузкой машины (`machine_rebooted`) или
+//! перед её выключением (`machine_shutdown`):
 //! остальные причины остановки ждут владельца. Никаких уведомлений владельцу усыпление
 //! не посылает.
 
@@ -378,10 +379,15 @@ pub async fn wake_in_tx(
     .fetch_optional(&mut *conn)
     .await?;
     let hibernated = pauses.0.contains(&PauseReason::Hibernated);
-    // Остановку перезагрузкой записывает воркер при следующем старте: разговор, как и
-    // усыплённый, просыпается следующим вводом, а не сам по себе.
+    // Остановку перезагрузкой записывает воркер при следующем старте, остановку перед
+    // выключением — сопровождение до него: разговор, как и усыплённый, просыпается
+    // следующим вводом, а не сам по себе.
     let rebooted = latest.as_ref().is_some_and(|(state, outcome, _)| {
-        state == "stopped" && outcome.as_deref() == Some("machine_rebooted")
+        state == "stopped"
+            && matches!(
+                outcome.as_deref(),
+                Some("machine_rebooted" | "machine_shutdown")
+            )
     });
     let hibernate_requested = latest.as_ref().is_some_and(|(_, _, requested)| *requested);
     if !hibernated && !hibernate_requested && !rebooted {

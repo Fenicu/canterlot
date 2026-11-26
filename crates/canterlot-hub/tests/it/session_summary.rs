@@ -614,12 +614,64 @@ async fn crash_after_a_finished_turn_adds_the_interrupted_facts(pool: PgPool) {
     assert_eq!(whole_minutes(&whole_minutes(&text, "12"), "16"), expected);
 }
 
+/// Выключение машины посреди хода: итог прямо говорит, что сессию остановило выключение
+/// и что продолжит её следующее сообщение, а не владелец.
+async fn shutdown_mid_turn_says_a_message_continues_it(pool: PgPool) {
+    let f = fixture(&pool).await;
+    set_worktree(&pool, &f).await;
+    open_run(&pool, &f, 12).await;
+    for (state, outcome) in [
+        (ExecutionState::Stopping, None),
+        (ExecutionState::Stopped, Some("machine_shutdown")),
+    ] {
+        executions::set_state(
+            &pool,
+            f.execution.execution_id,
+            state,
+            outcome,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+    }
+    derive(
+        &pool,
+        &f,
+        "stopped",
+        &Evidence::Stopped {
+            outcome: "machine_shutdown".into(),
+        },
+    )
+    .await;
+
+    let text = text_for(
+        &pool,
+        &f,
+        "stopped",
+        Some(Utc::now() - TimeDelta::minutes(20)),
+    )
+    .await;
+    assert!(
+        text.contains(
+            "Outcome: machine_shutdown. The machine was shutting down, so canterlot stopped the session; a message continues it once the machine is back.\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(
+            "Next: session_send continues it after the machine boots, or session_accept to clean up."
+        ),
+        "{text}"
+    );
+}
+
 /// Итог сессии, которая упала, зависла или потерялась посреди хода: каждый случай
 /// заводит свою цель на общей базе.
 #[tokio::test]
 async fn unfinished_turn_cases() {
     let pool = canterlot_hub::testkit::db().await;
     run_cases!(pool.clone();
+        shutdown_mid_turn_says_a_message_continues_it,
         crash_mid_first_turn_reports_the_interrupted_turn,
         stall_mid_turn_reports_the_running_turn,
         owner_lost_mid_turn_reports_the_lost_turn,

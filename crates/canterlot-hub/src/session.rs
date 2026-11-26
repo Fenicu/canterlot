@@ -66,6 +66,10 @@ pub const CAPABILITY_SCHEDULE_PRECHECK_V1: &str = "schedule_precheck_v1";
 /// шлёт наблюдения. Хаб принимает эти сообщения только на соединении с этой возможностью и
 /// только от машины `worker` с флагом `is_carrier`.
 pub const CAPABILITY_RUNNERS_V1: &str = "runners_v1";
+/// Хаб принимает `stopped(machine_shutdown)` и будит такую сессию вводом. Без неё воркер
+/// не берёт задержку выключения у logind, и всё идёт как раньше: `machine_rebooted`
+/// после загрузки.
+pub const CAPABILITY_SHUTDOWN_STOP_V1: &str = "shutdown_stop_v1";
 
 /// Параллельных предпроверок на машину: одна попытка на расписание.
 pub const MAX_PRECHECKS_PER_MACHINE: usize = 4;

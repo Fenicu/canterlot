@@ -724,7 +724,8 @@ fn legal_transition(from: ExecutionState, to: ExecutionState, outcome: Option<&s
                         | "normal_exit"
                         | "start_cancelled"
                         | "force_stopped"
-                        | "hibernated",
+                        | "hibernated"
+                        | "machine_shutdown",
                 )
             )
             | (

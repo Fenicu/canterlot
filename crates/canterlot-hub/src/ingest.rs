@@ -2117,9 +2117,10 @@ async fn apply_execution_fact(
     }
     let wakes_input = to == ExecutionState::Stopped
         && match outcome {
-            // Перезагрузка машины, как и усыпление, не ждёт владельца: отложенный ввод
-            // поднимает сессию сам.
-            Some("machine_rebooted") => true,
+            // Перезагрузка и выключение машины, как и усыпление, не ждут владельца:
+            // отложенный ввод поднимает сессию сам. Старт, пришедший на выключающуюся
+            // машину, воркер придерживает до следующей загрузки.
+            Some("machine_rebooted" | "machine_shutdown") => true,
             _ => sqlx::query_scalar::<_, bool>(
                 "select hibernate_requested from executions where id=$1",
             )

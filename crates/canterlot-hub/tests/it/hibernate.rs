@@ -274,6 +274,69 @@ async fn owner_message_after_a_reboot_stop_wakes_the_session() -> TestResult {
     deliver_once(&pool, &seed, resumed, submitted.input_id).await
 }
 
+/// Остановка перед выключением машины будит сессию так же, как перезагрузка: продолжает её
+/// следующее сообщение, само исполнение не поднимается.
+#[tokio::test]
+async fn owner_message_after_a_shutdown_stop_wakes_the_session() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let seed = testkit::seed(&pool).await;
+    let run = start_running(&pool, &seed).await;
+    stop_by_shutdown(&pool, &seed, &run).await;
+    assert_eq!(live_executions(&pool, seed.conversation_id).await?, 0);
+    assert!(
+        queued_pauses(&pool, seed.conversation_id)
+            .await?
+            .as_array()
+            .is_some_and(|pauses| !pauses.is_empty()),
+        "a shutdown stops the queue"
+    );
+    let submitted = owner_input(&pool, seed.conversation_id, "продолжай").await?;
+    let resumed = resumed_execution(&pool, &seed, &run).await;
+    assert_eq!(queued_pauses(&pool, seed.conversation_id).await?, json!([]));
+    deliver_once(&pool, &seed, resumed, submitted.input_id).await
+}
+
+/// Выключение машины не отменяет остановку владельца, пришедшую раньше.
+#[tokio::test]
+async fn shutdown_does_not_restart_a_session_the_owner_stopped() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let seed = testkit::seed(&pool).await;
+    let run = start_running(&pool, &seed).await;
+    request_stop_execution(
+        &pool,
+        seed.owner_id,
+        seed.conversation_id,
+        false,
+        &Uuid::now_v7().to_string(),
+        Uuid::now_v7(),
+    )
+    .await?;
+    let submitted = owner_input(&pool, seed.conversation_id, "потом").await?;
+    stop_by_shutdown(&pool, &seed, &run).await;
+    assert_eq!(live_executions(&pool, seed.conversation_id).await?, 0);
+    assert_eq!(input_state(&pool, submitted.input_id).await?, "queued");
+    Ok(())
+}
+
+/// Выключение: сопровождение само проходит `stopping` и пишет `stopped(machine_shutdown)`.
+async fn stop_by_shutdown(pool: &PgPool, seed: &Seed, run: &StartedExecution) {
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                Uuid::now_v7(),
+                vec![
+                    execution_fact(run, "stopping", ""),
+                    execution_fact(run, "stopped", "machine_shutdown"),
+                ],
+            ),
+        )
+        .await
+        .expect("machine shutdown facts");
+}
+
 async fn owner_input(
     pool: &PgPool,
     conversation: Uuid,

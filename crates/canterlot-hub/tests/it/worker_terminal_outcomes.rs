@@ -27,6 +27,9 @@ const WORKER_TERMINALS: &[(&[ExecutionState], ExecutionState, &str)] = &[
     (&[Starting, Stopping], Failed, "storage_failure"),
     (&[Starting, Running, Stopping], Failed, "storage_failure"),
     (&[Starting, Stopping], Failed, "crashed"),
+    // Остановка перед выключением машины: сопровождение ещё живо и идёт через `stopping`.
+    (&[Starting, Stopping], Stopped, "machine_shutdown"),
+    (&[Starting, Running, Stopping], Stopped, "machine_shutdown"),
     // exec/manager.rs: отмена до запуска сопровождения.
     (&[], Stopped, "start_cancelled"),
     // exec/lost.rs: исполнение без сопровождения.
