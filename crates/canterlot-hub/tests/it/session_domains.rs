@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 struct Fx {
     pool: PgPool,
     context: ToolContext,
@@ -156,9 +158,7 @@ async fn not_found(f: &Fx, from: Uuid, tool: &str, args: Value) {
     assert_eq!(error.code, Code::SessionNotFound, "{tool}: {error:?}");
 }
 
-#[tokio::test]
-async fn cross_domain_inspect_is_not_found() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn cross_domain_inspect_is_not_found(pool: PgPool) {
     let f = Fx::new(pool).await;
     for (from, to) in f.crossings() {
         not_found(&f, from, "sessions.inspect", json!({"session_id": to})).await;
@@ -170,9 +170,7 @@ async fn cross_domain_inspect_is_not_found() {
         .unwrap();
 }
 
-#[tokio::test]
-async fn cross_domain_history_search_returns_nothing_from_the_other_domain() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn cross_domain_history_search_returns_nothing_from_the_other_domain(pool: PgPool) {
     let f = Fx::new(pool).await;
     for (id, seq) in [(f.work, 1), (f.personal, 2), (f.null, 3)] {
         f.say(id, seq, "частый токен").await;
@@ -202,9 +200,7 @@ async fn cross_domain_history_search_returns_nothing_from_the_other_domain() {
     }
 }
 
-#[tokio::test]
-async fn cross_domain_send_subscribe_wait_spawn_target_adopt_alarm_are_not_found() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn cross_domain_send_subscribe_wait_spawn_target_adopt_alarm_are_not_found(pool: PgPool) {
     let f = Fx::new(pool).await;
     for (from, to) in f.crossings() {
         not_found(
@@ -243,9 +239,7 @@ async fn cross_domain_send_subscribe_wait_spawn_target_adopt_alarm_are_not_found
 
 /// Скрытая цель отвечает на `nudge_set` с путём отчёта так же, как несуществующий ID:
 /// путь не проверяется и воркер не опрашивается.
-#[tokio::test]
-async fn nudge_set_with_report_path_hides_out_of_domain_target() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn nudge_set_with_report_path_hides_out_of_domain_target(pool: PgPool) {
     let f = Fx::new(pool).await;
     let args = |target: Uuid| json!({"session_id": target, "report_file": "/h/report.md"});
     let missing = f
@@ -263,9 +257,7 @@ async fn nudge_set_with_report_path_hides_out_of_domain_target() {
     }
 }
 
-#[tokio::test]
-async fn same_domain_send_still_works() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn same_domain_send_still_works(pool: PgPool) {
     let f = Fx::new(pool).await;
     let other = f.conversation("второй рабочий", Some("work")).await;
     f.call(
@@ -277,9 +269,7 @@ async fn same_domain_send_still_works() {
     .unwrap();
 }
 
-#[tokio::test]
-async fn sessions_list_hides_other_domain_and_null_for_domained_callers() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn sessions_list_hides_other_domain_and_null_for_domained_callers(pool: PgPool) {
     let f = Fx::new(pool).await;
     let listed = f.listed(f.work).await;
     assert!(listed.contains(&f.work));
@@ -291,9 +281,7 @@ async fn sessions_list_hides_other_domain_and_null_for_domained_callers() {
     assert!(!listed.contains(&f.null));
 }
 
-#[tokio::test]
-async fn null_caller_sees_only_itself() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn null_caller_sees_only_itself(pool: PgPool) {
     let f = Fx::new(pool).await;
     let other_null = f.conversation("второй без домена", None).await;
     let listed = f.listed(f.null).await;
@@ -313,9 +301,7 @@ async fn null_caller_sees_only_itself() {
         .unwrap();
 }
 
-#[tokio::test]
-async fn two_null_sessions_cannot_reach_each_other() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn two_null_sessions_cannot_reach_each_other(pool: PgPool) {
     let f = Fx::new(pool).await;
     let other = f.conversation("второй без домена", None).await;
     for (id, seq) in [(f.null, 1), (other, 2)] {
@@ -350,4 +336,23 @@ async fn two_null_sessions_cannot_reach_each_other() {
             .collect();
         assert_eq!(ids, vec![from], "поиск без домена находит только себя");
     }
+}
+
+/// Домены сессий: чужой домен не найден во всех инструментах, поиск по истории,
+/// пинок, тот же домен работает, сессии без домена.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn domain_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        cross_domain_inspect_is_not_found,
+        cross_domain_history_search_returns_nothing_from_the_other_domain,
+        cross_domain_send_subscribe_wait_spawn_target_adopt_alarm_are_not_found,
+        nudge_set_with_report_path_hides_out_of_domain_target,
+        same_domain_send_still_works,
+        sessions_list_hides_other_domain_and_null_for_domained_callers,
+        null_caller_sees_only_itself,
+        two_null_sessions_cannot_reach_each_other,
+    );
 }
