@@ -13,7 +13,7 @@ type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 async fn rotate_cli_preserves_identity_revokes_old_and_resets_only_explicitly(
     pool: PgPool,
 ) -> TestResult {
-    let dir = tempfile::tempdir()?;
+    let dir = canterlot_hub::testkit::scratch_dir()?;
     let installation = installation::init(&pool, &dir.path().join("installation.toml")).await?;
     let machine = machines::add(&pool, installation.owner_id, "rotation").await?;
     let config = dir.path().join("hub.toml");
@@ -85,7 +85,7 @@ async fn rotate_cli_preserves_identity_revokes_old_and_resets_only_explicitly(
 /// несущей, чтобы пометить VM ядром), корень только у раннера и только допустимый.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn machine_set_cli_changes_rank_labels_and_root(pool: PgPool) -> TestResult {
-    let dir = tempfile::tempdir()?;
+    let dir = canterlot_hub::testkit::scratch_dir()?;
     let installation = installation::init(&pool, &dir.path().join("installation.toml")).await?;
     let carrier = machines::add(&pool, installation.owner_id, "carrier").await?;
     let runner = machines::add_runner(
@@ -201,7 +201,7 @@ async fn machine_set_cli_changes_rank_labels_and_root(pool: PgPool) -> TestResul
 async fn serve_applies_pending_migrations_before_listening_and_logs_version(
     pool: PgPool,
 ) -> TestResult {
-    let dir = tempfile::tempdir()?;
+    let dir = canterlot_hub::testkit::scratch_dir()?;
     let old = sqlx::migrate::Migrator {
         migrations: db::MIGRATOR
             .iter()
@@ -272,7 +272,7 @@ async fn serve_applies_pending_migrations_before_listening_and_logs_version(
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn failed_migration_reports_its_kind_and_version(pool: PgPool) -> TestResult {
-    let dir = tempfile::tempdir()?;
+    let dir = canterlot_hub::testkit::scratch_dir()?;
     installation::init(&pool, &dir.path().join("installation.toml")).await?;
     sqlx::query("update _sqlx_migrations set checksum = '\\x00' where version = 23")
         .execute(&pool)

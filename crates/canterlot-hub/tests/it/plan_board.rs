@@ -656,6 +656,10 @@ async fn adopt_refuses_a_source_that_is_still_running() {
 #[tokio::test]
 async fn plan_writes_share_the_lock_order_with_accept_projector_and_delete() {
     let pool = canterlot_hub::testkit::db().await;
+    // Хранилище вложений нужно удалению только как приёмник: одно на все круги, а не
+    // новый каталог с синхронизацией на каждом круге, и в scratch_dir, а не на общем диске.
+    let directory = testkit::scratch_dir().unwrap();
+    let (_, blobs) = testkit::test_blob_store(directory.path());
     for round in 0..8 {
         let f = Fx::new(pool.clone()).await;
         f.add(&["Парсер", "Тесты"]).await;
@@ -671,8 +675,6 @@ async fn plan_writes_share_the_lock_order_with_accept_projector_and_delete() {
             no_git(),
         )
         .await;
-        let directory = tempfile::tempdir().unwrap();
-        let (_, blobs) = testkit::test_blob_store(directory.path());
         let accept = f.call("sessions.accept", json!({"session_id": f.child}));
         let limits = thresholds();
         let refresh = activity::refresh(&f.pool, f.child, now, &limits, Uuid::now_v7());

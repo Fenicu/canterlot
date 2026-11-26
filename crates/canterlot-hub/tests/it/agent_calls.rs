@@ -36,7 +36,7 @@ struct Fx {
 
 impl Fx {
     async fn new(pool: PgPool) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = testkit::scratch_dir().unwrap();
         let installation = installation::init(&pool, &dir.path().join("manifest"))
             .await
             .unwrap();

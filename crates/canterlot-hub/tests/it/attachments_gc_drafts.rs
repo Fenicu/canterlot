@@ -43,7 +43,7 @@ async fn draft_held_attachments_do_not_starve_the_gc() {
     .await
     .unwrap();
 
-    let directory = tempfile::tempdir().unwrap();
+    let directory = testkit::scratch_dir().unwrap();
     let (_, blobs) = testkit::test_blob_store(directory.path());
     let report = gc::run_once(
         &pool,

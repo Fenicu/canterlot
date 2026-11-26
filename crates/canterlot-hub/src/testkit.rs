@@ -87,6 +87,21 @@ pub fn test_http_config() -> crate::config::HttpConfig {
 }
 
 /// Установка с манифестом во временном каталоге; каталог должен жить, пока жив хаб.
+/// Каталог теста с манифестом и хранилищем вложений. Вложения пишут и синхронизируют
+/// файлы, а на общем диске под чужими сборками каждый fsync стоит до секунд: если есть
+/// `/dev/shm`, каталог берётся там, иначе в `TMPDIR`. Удаляется вместе с `TempDir`.
+pub fn scratch_dir() -> std::io::Result<tempfile::TempDir> {
+    let shm = std::path::Path::new("/dev/shm");
+    if shm.is_dir()
+        && let Ok(directory) = tempfile::Builder::new()
+            .prefix("canterlot-test-")
+            .tempdir_in(shm)
+    {
+        return Ok(directory);
+    }
+    tempfile::tempdir()
+}
+
 async fn test_installation(
     pool: &PgPool,
 ) -> (
@@ -95,7 +110,7 @@ async fn test_installation(
     tempfile::TempDir,
 ) {
     use crate::installation;
-    let directory = tempfile::tempdir().expect("test installation directory");
+    let directory = scratch_dir().expect("test installation directory");
     let manifest = directory.path().join("manifest");
     let existing: Option<installation::Installation> =
         sqlx::query_as("select installation_id, restore_generation, owner_id from installation")
