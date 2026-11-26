@@ -1127,10 +1127,13 @@ async fn strict_lease_waits_behind_a_held_gate_and_never_runs_unleased() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn strict_lease_without_a_worker_socket_keeps_waiting_instead_of_running() {
+    // Путь, которого не бывает (каталог — обычный файл): обёртка сразу видит недоступный
+    // воркер, а не высиживает 10 с, повторяя отсутствующий сокет. Тот путь проверяет lease.
     let nowhere = tempfile::tempdir().unwrap();
+    fs::write(nowhere.path().join("file"), "").unwrap();
     let harness = Harness::with(
         JobsConfig::default(),
-        Some(nowhere.path().join("missing.sock")),
+        Some(nowhere.path().join("file/missing.sock")),
         WORKER,
     )
     .await;

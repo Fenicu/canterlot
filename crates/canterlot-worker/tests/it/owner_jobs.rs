@@ -485,11 +485,18 @@ async fn the_client_does_not_find_the_jobs_socket_through_the_lease_socket_env()
 fn the_binary_exposes_job_run_and_refuses_without_a_socket() {
     let binary = env!("CARGO_BIN_EXE_canterlot-worker");
     let (_guard, repo_path, _sha) = repo();
+    // Путь под обычным файлом: сокета там быть не может, и команда отказывает сразу, а не
+    // через 10 с терпения к отсутствующему сокету.
+    let nowhere = tempfile::tempdir().unwrap();
+    std::fs::write(nowhere.path().join("file"), "").unwrap();
     let output = Command::new(binary)
         .args(["job", "run", "--title", "t", "--source"])
         .arg(format!("{}@HEAD", repo_path.display()))
         .args(["--", "true"])
-        .env("CANTERLOT_JOBS_SOCKET", "/nonexistent-dir/jobs.sock")
+        .env(
+            "CANTERLOT_JOBS_SOCKET",
+            nowhere.path().join("file/jobs.sock"),
+        )
         .env_remove("XDG_RUNTIME_DIR")
         .output()
         .unwrap();

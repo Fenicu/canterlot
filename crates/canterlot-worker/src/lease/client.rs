@@ -45,6 +45,10 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 /// аренды. Тест обёртки сокращает срок переменной окружения.
 const FIRST_REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 const FIRST_REPLY_TIMEOUT_ENV: &str = "CANTERLOT_LEASE_REPLY_TIMEOUT_MS";
+/// Только в сборке с fault-injection (боевой воркер собирается без неё): тест обёртки
+/// сокращает `REFUSED_RETRY`, чтобы не высиживать десять секунд недоступного сокета.
+#[cfg(feature = "fault-injection")]
+const REFUSED_RETRY_ENV: &str = "CANTERLOT_LEASE_REFUSED_RETRY_MS";
 
 #[derive(Debug, Clone)]
 pub struct RunArgs {
@@ -128,6 +132,18 @@ impl Notes {
         self.last_retry = Some(now);
         self.line(text);
     }
+}
+
+fn refused_retry() -> Duration {
+    #[cfg(feature = "fault-injection")]
+    if let Some(ms) = std::env::var(REFUSED_RETRY_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+    {
+        return Duration::from_millis(ms);
+    }
+    REFUSED_RETRY
 }
 
 fn first_reply_timeout() -> Duration {
@@ -467,7 +483,7 @@ pub async fn run(args: RunArgs) -> ExitCode {
     let mut last_line = None;
     // Обычный запуск ждёт у живого терминала и сам решает, когда сдаться: объём не режется.
     let mut notes = Notes::unbounded();
-    let mut patience = REFUSED_RETRY;
+    let mut patience = refused_retry();
     // Начало текущего обрыва: 30 с на переподключение считаются от него, а не от запуска.
     let mut lost_since: Option<tokio::time::Instant> = None;
     let mut lost = false;
@@ -753,7 +769,7 @@ pub async fn acquire_strict_with(
     let mut last_line = None;
     let mut refusals = 0;
     let granted = loop {
-        let stream = match connect(&socket, REFUSED_RETRY, true).await {
+        let stream = match connect(&socket, refused_retry(), true).await {
             Connect::Stream(stream) => stream,
             Connect::Unreachable(reason) => {
                 notes.retry(format!("worker unreachable ({reason}), still waiting"));
@@ -1016,6 +1032,16 @@ pub fn render(snapshot: &Snapshot, now_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_socket_patience_is_ten_seconds_without_the_test_override() {
+        assert_eq!(REFUSED_RETRY, Duration::from_secs(10));
+        #[cfg(feature = "fault-injection")]
+        if std::env::var_os(REFUSED_RETRY_ENV).is_some() {
+            return;
+        }
+        assert_eq!(refused_retry(), REFUSED_RETRY);
+    }
 
     #[test]
     fn waiting_line_names_holders() {

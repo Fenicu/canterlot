@@ -24,6 +24,8 @@ struct Fixture {
     server: Option<LeaseServer>,
     slots: u32,
     restore_grace: Duration,
+    /// Терпение обёртки к недоступному сокету (`CANTERLOT_LEASE_REFUSED_RETRY_MS`); `None` — боевое.
+    patience_ms: Option<u64>,
 }
 
 impl Fixture {
@@ -38,6 +40,7 @@ impl Fixture {
             server: None,
             slots,
             restore_grace: lease::server::RESTORE_GRACE,
+            patience_ms: None,
         };
         fixture.start().await;
         fixture
@@ -103,6 +106,9 @@ impl Fixture {
             .env_remove("CANTERLOT_EXECUTION_GROUP")
             .stdin(Stdio::null())
             .stderr(Stdio::piped());
+        if let Some(ms) = self.patience_ms {
+            command.env("CANTERLOT_LEASE_REFUSED_RETRY_MS", ms.to_string());
+        }
         command
     }
 
@@ -464,10 +470,14 @@ fn refusing_socket_is_retried_then_unwrapped() {
     let socket = root.path().join("lease.sock");
     drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
     let started = Instant::now();
-    assert_unleased(output(unleased(Some(&socket))), "worker unreachable");
+    // Боевое терпение 10 с; повтор и выход без аренды видны и на полутора секундах
+    // (последний шаг повтора, 250 мс, обёртка не ждёт).
+    let mut command = unleased(Some(&socket));
+    command.env("CANTERLOT_LEASE_REFUSED_RETRY_MS", "1500");
+    assert_unleased(output(command), "worker unreachable");
     let elapsed = started.elapsed();
     assert!(
-        elapsed >= Duration::from_secs(9) && elapsed < Duration::from_secs(20),
+        elapsed >= Duration::from_millis(1000) && elapsed < Duration::from_secs(10),
         "{elapsed:?}"
     );
 }
@@ -779,6 +789,8 @@ async fn strict_request_waits_behind_a_held_gate_and_never_runs_unleased() {
 async fn strict_request_does_not_fall_back_while_the_worker_is_unreachable() {
     let mut fixture = Fixture::new(1).await;
     fixture.restart().await;
+    // Строгая обёртка пишет «ждёт» после терпения к недоступному сокету: боевые 10 с.
+    fixture.patience_ms = Some(500);
     let mut job = fixture.job_with("build", "no-socket", true);
     // Обычный клиент без сокета ушёл бы без аренды сразу; строгий пишет, что ждёт воркер.
     wait_note(&mut job, "still waiting").await;
