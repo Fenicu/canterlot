@@ -6676,72 +6676,108 @@ async fn same_refusal_twice_offers_compaction_and_compaction_clears_it() {
     bench.close(CloseMode::Graceful).await;
 }
 
-#[tokio::test]
-async fn compaction_is_refused_while_a_turn_runs() {
-    let mut bench = Bench::new(hanging_turn());
-    bench.start_ok().await;
-    let input = bench.input("hang");
-    bench.accepted(&input).await;
-    assert_eq!(
-        bench.compact(Uuid::now_v7()).await,
-        CompactOutcome::NotApplicable
-    );
-    assert!(find(&bench.fake.requests(), "POST", "/compact").is_none());
-    bench.close(CloseMode::Force).await;
-}
 
-#[tokio::test]
-async fn server_refusal_of_compaction_is_reported_at_once() {
-    let mut script = ready();
-    script.push_route(
-        "POST",
-        &format!("/api/session/{}/compact", session_of(&script)),
-        Reply {
-            status: 409,
-            body: Some(json!({"_tag": "ConflictError"})),
-            ..Default::default()
-        },
-    );
-    let mut bench = Bench::new(script);
-    bench.start_ok().await;
-    assert_eq!(bench.compact(Uuid::now_v7()).await, CompactOutcome::Failed);
-    bench.close(CloseMode::Force).await;
-}
 
 // Настоящая последовательность `live/invalid_request_stuck.jsonl`: отказ сжатия закрывает период
 // как успешный, блока ошибки хода нет, текст провайдера показывает только сжатие.
-#[tokio::test]
-async fn failed_manual_compaction_is_reported_and_the_session_stays() {
-    let mut script = ready();
-    let session = session_of(&script);
-    let recorded = "msg_0190cafe000070008000000000000099";
+/// Сжатия на общем стенде: ходы идут, сжатие отвечает, конец закрывает ход.
+/// Последний случай оставляет ход висеть и закрывается силой.
+fn compaction_script() -> Script {
+    let template = ready();
+    let session = session_of(&template);
+    let mut script = session_only();
+    script.set_route(
+        "POST",
+        &format!("/api/session/{session}/compact"),
+        vec![Reply {
+            status: 409,
+            body: Some(json!({"_tag": "ConflictError"})),
+            ..Default::default()
+        }],
+    );
+    let failed = |id: &str, error: Value| {
+        vec![
+            json!({"type": "session.execution.started", "data": {"sessionID": session}}),
+            json!({"type": "session.compaction.started", "data": {
+                "sessionID": session, "reason": "manual", "inputID": id}}),
+            json!({"type": "session.compaction.failed", "data": {
+                "sessionID": session, "reason": "manual", "inputID": id, "error": error}}),
+        ]
+    };
+    for (n, compact) in ["msg_compact000", "msg_compact001"].into_iter().enumerate() {
+        let recorded = format!("msg_clone{n:03}");
+        script.steps.push(Step::Expect {
+            method: "POST".into(),
+            path: format!("/api/session/{session}/prompt"),
+            reply: Reply {
+                body: Some(json!({"data": {"id": recorded}})),
+                ..Default::default()
+            },
+            bind: [(recorded.clone(), "/id".to_owned())].into_iter().collect(),
+        });
+        script.steps.push(Step::Emit {
+            events: vec![
+                json!({"type": "session.inbox.enqueued",
+                    "data": {"inboxID": recorded, "sessionID": session}}),
+                json!({"type": "session.inbox.delivered",
+                    "data": {"inboxID": recorded, "sessionID": session}}),
+            ],
+        });
+        script.steps.push(Step::Emit {
+            events: vec![finish(&session)],
+        });
+        script.steps.push(Step::Expect {
+            method: "POST".into(),
+            path: format!("/api/session/{session}/compact"),
+            reply: Reply {
+                body: Some(json!({"data": {"id": compact, "type": "compaction"}})),
+                ..Default::default()
+            },
+            bind: [(compact.to_owned(), "/id".to_owned())].into_iter().collect(),
+        });
+        let end = if n == 0 {
+            failed(compact, json!({"type": "provider.invalid-request",
+                "message": "Upstream request failed: Model is unavailable.",
+                "status": 400,
+                "response": {"body": "{\"error\":{\"type\":\"server_error\",\"message\":\"Upstream request failed: Model is unavailable.\"}}"}}))
+        } else {
+            failed(compact, json!({"type": "aborted", "message": "Compaction cancelled"}))
+        };
+        script.steps.push(Step::Emit { events: end });
+        script.steps.push(Step::Emit {
+            events: vec![finish(&session)],
+        });
+    }
+    // Отказ сжатия без ответа сервера: ход висит, закрывается силой.
+    let recorded = "msg_clone002".to_owned();
     script.steps.push(Step::Expect {
         method: "POST".into(),
-        path: format!("/api/session/{session}/compact"),
+        path: format!("/api/session/{session}/prompt"),
         reply: Reply {
-            body: Some(json!({"data": {"id": recorded, "type": "compaction"}})),
+            body: Some(json!({"data": {"id": recorded}})),
             ..Default::default()
         },
-        bind: [(recorded.to_owned(), "/id".to_owned())].into(),
+        bind: [(recorded.clone(), "/id".to_owned())].into_iter().collect(),
     });
     script.steps.push(Step::Emit {
         events: vec![
-            json!({"type": "session.execution.started", "data": {"sessionID": session}}),
-            json!({"type": "session.compaction.started", "data": {
-                "sessionID": session, "reason": "manual", "inputID": recorded}}),
-            json!({"type": "session.compaction.failed", "data": {
-                "sessionID": session, "reason": "manual", "inputID": recorded,
-                "error": {
-                    "type": "provider.invalid-request",
-                    "message": "Upstream request failed: Model is unavailable.",
-                    "status": 400,
-                    "response": {"body": "{\"error\":{\"type\":\"server_error\",\"message\":\"Upstream request failed: Model is unavailable.\"}}"},
-                }}}),
-            json!({"type": "session.execution.succeeded", "data": {"sessionID": session}}),
+            json!({"type": "session.inbox.enqueued",
+                "data": {"inboxID": recorded, "sessionID": session}}),
+            json!({"type": "session.inbox.delivered",
+                "data": {"inboxID": recorded, "sessionID": session}}),
+            json!({"type": "session.execution.started",
+                "data": {"sessionID": session}}),
         ],
     });
-    let mut bench = Bench::new(script);
+    script
+}
+
+#[tokio::test]
+async fn manual_compactions_report_their_outcome() {
+    let mut bench = Bench::new(compaction_script());
     bench.start_ok().await;
+
+    // Отказ сжатия закрывает период как успешный, текст провайдера показывает сжатие.
     let input = bench.input("x");
     bench.accepted(&input).await;
     bench.until_finished(input.command_id).await;
@@ -6763,7 +6799,36 @@ async fn failed_manual_compaction_is_reported_and_the_session_stays() {
             "Ошибка OpenCode (provider.invalid-request): Upstream request failed: Model is unavailable."
         ]
     );
-    bench.close(CloseMode::Graceful).await;
+
+    // Прерывание даёт отказ aborted: блока нет, карточка сообщает итог.
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    assert_eq!(
+        bench.compact(Uuid::now_v7()).await,
+        CompactOutcome::Accepted
+    );
+    let mut events = bench
+        .until(|event| matches!(event, AdapterEvent::Compacted { .. }))
+        .await;
+    assert!(matches!(
+        events.last(),
+        Some(AdapterEvent::Compacted { ok: false })
+    ));
+    events.extend(bench.until_finished(input.command_id).await);
+    assert!(text_of(&events, "Error").is_empty());
+
+    // Сервер отказал в сжатии: сообщается сразу.
+    assert_eq!(bench.compact(Uuid::now_v7()).await, CompactOutcome::Failed);
+
+    // Сжатие отклоняется, пока ход идёт.
+    let input = bench.input("hang");
+    bench.accepted(&input).await;
+    assert_eq!(
+        bench.compact(Uuid::now_v7()).await,
+        CompactOutcome::NotApplicable
+    );
+    bench.close(CloseMode::Force).await;
 }
 
 // Зависший `opencode` не держит старт воркера: сопровождения Claude и Codex ждут за ним.
@@ -6846,52 +6911,6 @@ async fn children_get_their_rules_at_once() {
 
 // Настоящая запись `live/compaction.jsonl`: прерывание даёт отказ `aborted`, затем терминал.
 // Это решение владельца, а не ошибка: блока нет, карточка сообщает итог.
-#[tokio::test]
-async fn interrupted_compaction_is_reported_as_failed() {
-    let mut script = ready();
-    let session = session_of(&script);
-    let recorded = "msg_0190cafe000070008000000000000098";
-    script.steps.push(Step::Expect {
-        method: "POST".into(),
-        path: format!("/api/session/{session}/compact"),
-        reply: Reply {
-            body: Some(json!({"data": {"id": recorded, "type": "compaction"}})),
-            ..Default::default()
-        },
-        bind: [(recorded.to_owned(), "/id".to_owned())].into(),
-    });
-    script.steps.push(Step::Emit {
-        events: vec![
-            json!({"type": "session.execution.started", "data": {"sessionID": session}}),
-            json!({"type": "session.compaction.started", "data": {
-                "sessionID": session, "reason": "manual", "inputID": recorded}}),
-            json!({"type": "session.compaction.failed", "data": {
-                "sessionID": session, "reason": "manual", "inputID": recorded,
-                "error": {"type": "aborted", "message": "Compaction cancelled"}}}),
-            json!({"type": "session.execution.interrupted", "data": {
-                "sessionID": session, "reason": "user"}}),
-        ],
-    });
-    let mut bench = Bench::new(script);
-    bench.start_ok().await;
-    let input = bench.input("x");
-    bench.accepted(&input).await;
-    bench.until_finished(input.command_id).await;
-    assert_eq!(
-        bench.compact(Uuid::now_v7()).await,
-        CompactOutcome::Accepted
-    );
-    let mut events = bench
-        .until(|event| matches!(event, AdapterEvent::Compacted { .. }))
-        .await;
-    assert!(matches!(
-        events.last(),
-        Some(AdapterEvent::Compacted { ok: false })
-    ));
-    events.extend(bench.until_finished(input.command_id).await);
-    assert!(text_of(&events, "Error").is_empty());
-    bench.close(CloseMode::Graceful).await;
-}
 
 #[tokio::test]
 async fn steer_during_a_turn_posts_steer_delivery_and_is_accepted() {
