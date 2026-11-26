@@ -178,6 +178,8 @@ enum StopCause {
     ContextExhausted,
     /// Журнал исполнения не пишется: вывод CLI сохранять некуда.
     StorageFailure,
+    /// Машина выключается (`PrepareForShutdown`): сессию продолжит следующий ввод.
+    MachineShutdown,
 }
 
 struct StopState {
@@ -186,7 +188,16 @@ struct StopState {
     closed: bool,
     next_round: Instant,
     survivors_reported: usize,
+    /// Срок мягкой остановки перед выключением: после него остановка идёт как
+    /// принудительная, чтобы итог успел в журнал до SIGKILL от systemd.
+    escalate_at: Option<Instant>,
 }
+
+/// Сколько от срока выключения оставить на принудительное добивание и запись итога.
+const SHUTDOWN_KILL_RESERVE: Duration = Duration::from_millis(500);
+/// Ожидание после SIGTERM при остановке перед выключением вместо `stop_grace`: на всё
+/// у logind по умолчанию 5 секунд.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 enum Lifecycle {
     Starting,
@@ -865,8 +876,13 @@ impl Supervisor {
         let mut wake: Option<Instant> = None;
         let mut consider = |at: Instant| wake = Some(wake.map_or(at, |current| current.min(at)));
         match &self.lifecycle {
-            Lifecycle::Stopping(state) if self.terminate.is_none() && self.closing.is_none() => {
-                consider(state.next_round)
+            Lifecycle::Stopping(state) => {
+                if self.terminate.is_none() && self.closing.is_none() {
+                    consider(state.next_round);
+                }
+                if let Some(at) = state.escalate_at.filter(|_| !state.force) {
+                    consider(at);
+                }
             }
             _ => {}
         }
@@ -1139,6 +1155,9 @@ impl Supervisor {
                     .await?
             }
             down::Msg::Goal(goal) => self.on_goal_command(goal).await?,
+            down::Msg::Stop(stop) if stop.machine_shutdown => {
+                self.on_machine_shutdown(Duration::from_millis(stop.deadline_ms.into()))?
+            }
             down::Msg::Stop(stop) => self.on_stop(stop.force).await?,
             down::Msg::ShipFrom(ship) => self.sj.enable_ship(ship.committed_seq),
             down::Msg::SjAck(ack) => self.sj.ack(ack.up_to_seq)?,
@@ -3606,6 +3625,54 @@ impl Supervisor {
         }
     }
 
+    /// Остановка перед выключением машины. Уже идущая остановка сохраняет свою причину
+    /// (остановка владельцем остаётся его решением), но получает тот же срок.
+    fn on_machine_shutdown(&mut self, deadline: Duration) -> Result<(), SupervisorError> {
+        let escalate_at = Instant::now() + deadline.saturating_sub(SHUTDOWN_KILL_RESERVE);
+        tracing::info!(
+            kind = "machine_shutdown",
+            deadline_ms = deadline.as_millis() as u64,
+            "stopping for machine shutdown"
+        );
+        match &mut self.lifecycle {
+            Lifecycle::Draining { .. } => return Ok(()),
+            Lifecycle::Stopping(_) => {}
+            Lifecycle::Starting => {
+                self.start_attempted = true;
+                self.begin_stop(StopCause::MachineShutdown, false)?;
+            }
+            Lifecycle::Running => self.begin_stop(StopCause::MachineShutdown, false)?,
+        }
+        if let Lifecycle::Stopping(state) = &mut self.lifecycle {
+            state.escalate_at = Some(
+                state
+                    .escalate_at
+                    .map_or(escalate_at, |at| at.min(escalate_at)),
+            );
+        }
+        Ok(())
+    }
+
+    /// Срок выключения вышел, а мягкая остановка ещё идёт: адаптер уходит вместе с
+    /// задачей закрытия (CLI убивает kill_on_drop), остаток группы добивается коротко.
+    fn escalate_overdue_stop(&mut self) {
+        let Lifecycle::Stopping(state) = &mut self.lifecycle else {
+            return;
+        };
+        if state.force || state.escalate_at.is_none_or(|at| Instant::now() < at) {
+            return;
+        }
+        tracing::warn!(
+            kind = "machine_shutdown_overdue",
+            "soft stop missed the shutdown deadline; killing the group"
+        );
+        state.force = true;
+        state.next_round = Instant::now();
+        if let Some(closing) = &self.closing {
+            closing.abort();
+        }
+    }
+
     fn begin_stop(&mut self, cause: StopCause, force: bool) -> Result<(), SupervisorError> {
         match &mut self.lifecycle {
             Lifecycle::Stopping(_) | Lifecycle::Draining { .. } => return Ok(()),
@@ -3628,18 +3695,20 @@ impl Supervisor {
             closed: false,
             next_round: Instant::now(),
             survivors_reported: 0,
+            escalate_at: None,
         });
         Ok(())
     }
 
     async fn drive_stop(&mut self) -> Result<(), SupervisorError> {
-        let (force, closed) = match &self.lifecycle {
+        self.escalate_overdue_stop();
+        let (force, closed, shutdown) = match &self.lifecycle {
             Lifecycle::Stopping(state)
                 if self.terminate.is_none()
                     && self.closing.is_none()
                     && Instant::now() >= state.next_round =>
             {
-                (state.force, state.closed)
+                (state.force, state.closed, state.escalate_at.is_some())
             }
             _ => return Ok(()),
         };
@@ -3654,6 +3723,9 @@ impl Supervisor {
                 } else {
                     CloseMode::Graceful
                 };
+                if shutdown {
+                    adapter.set_stop_grace(self.spec.timers.stop_grace.min(SHUTDOWN_GRACE));
+                }
                 let containment = self.containment.clone();
                 self.closing = Some(tokio::spawn(async move {
                     let _ = adapter.close(mode, &*containment).await;
@@ -3664,6 +3736,8 @@ impl Supervisor {
         }
         let grace = if force {
             Duration::from_millis(200)
+        } else if shutdown {
+            self.spec.timers.stop_grace.min(SHUTDOWN_GRACE)
         } else {
             self.spec.timers.stop_grace
         };
@@ -3750,6 +3824,7 @@ impl Supervisor {
             StopCause::CliIncompatible => ("failed", "cli_incompatible", "cli_incompatible"),
             StopCause::ContextExhausted => ("failed", "context_exhausted", "context_exhausted"),
             StopCause::StorageFailure => ("failed", "storage_failure", "storage_failure"),
+            StopCause::MachineShutdown => ("stopped", "machine_shutdown", "stopped"),
             StopCause::ProtocolIncompatible => {
                 ("failed", "protocol_incompatible", "protocol_incompatible")
             }

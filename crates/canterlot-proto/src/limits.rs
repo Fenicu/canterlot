@@ -92,6 +92,8 @@ pub const IPC_CAP_GOALS: &str = "goals_v1";
 /// Сопровождение проверяет охрану `InterruptRequest` (`expected_turn_id`, `progress_checkpoint`)
 /// по готовым событиям адаптера. Старое сопровождение поля игнорирует и прервало бы любой ход.
 pub const IPC_CAP_GUARDED_INTERRUPT: &str = "guarded_interrupt_v1";
+/// Сопровождение понимает `StopRequest.machine_shutdown` и срок `deadline_ms`.
+pub const IPC_CAP_SHUTDOWN_STOP: &str = "shutdown_stop_v1";
 /// Всё, что объявляет эта сборка в `Attached.ipc_capabilities`.
 pub const IPC_CAPABILITIES: &[&str] = &[
     IPC_CAP_IGNORE_UNKNOWN,
@@ -99,6 +101,7 @@ pub const IPC_CAPABILITIES: &[&str] = &[
     IPC_CAP_STEER,
     IPC_CAP_GOALS,
     IPC_CAP_GUARDED_INTERRUPT,
+    IPC_CAP_SHUTDOWN_STOP,
 ];
 pub const MAX_SJ_BATCH_RECORDS: usize = 256;
 pub const MAX_BLOCK_DELTA_BYTES: usize = 16_384;

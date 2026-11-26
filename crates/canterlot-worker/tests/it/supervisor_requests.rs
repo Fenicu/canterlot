@@ -722,6 +722,7 @@ async fn stale_generation_after_journal_closed_does_not_extend_sj() {
         command_id: Uuid::now_v7().to_string(),
         dispatch_attempt: 1,
         force: true,
+        ..Default::default()
     }))
     .await;
     // Не подтверждаем JournalClosed, чтобы сопровождение осталось в Draining.
@@ -762,6 +763,7 @@ async fn closed_session_journal_stays_closed_after_supervisor_restart() {
         command_id: Uuid::now_v7().to_string(),
         dispatch_attempt: 1,
         force: true,
+        ..Default::default()
     }))
     .await;
     timeout(WAIT, async {

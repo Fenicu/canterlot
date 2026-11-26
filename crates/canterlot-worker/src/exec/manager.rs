@@ -2871,6 +2871,7 @@ impl Actor {
                             command_id: cid_text,
                             dispatch_attempt: attempt,
                             force: stop.force,
+                            ..Default::default()
                         }))
                         .await
                 {

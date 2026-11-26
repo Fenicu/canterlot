@@ -160,6 +160,12 @@ message StopRequest {
   string command_id = 1;
   uint32 dispatch_attempt = 2;
   bool force = 3;
+  // Остановка перед выключением машины (`PrepareForShutdown`): итог `machine_shutdown`,
+  // мягкая остановка не дольше `deadline_ms`, после чего сопровождение добивает группу.
+  // Шлётся только сопровождению с `shutdown_stop_v1`: старое прочло бы её как
+  // остановку владельцем.
+  bool machine_shutdown = 4;
+  uint32 deadline_ms = 5;
 }
 
 message ShipFrom {

@@ -586,6 +586,7 @@ fn ipc_messages_roundtrip_and_limit() {
             command_id: "command".into(),
             dispatch_attempt: 3,
             force: true,
+            ..Default::default()
         }),
         ipc::control_to_supervisor::Msg::ShipFrom(ipc::ShipFrom { committed_seq: 7 }),
         ipc::control_to_supervisor::Msg::SjAck(ipc::SjAck { up_to_seq: 8 }),

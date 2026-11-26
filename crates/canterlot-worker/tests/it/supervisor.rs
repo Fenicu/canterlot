@@ -416,6 +416,7 @@ impl Harness {
                 command_id: Uuid::now_v7().to_string(),
                 dispatch_attempt: 1,
                 force: true,
+                ..Default::default()
             }))
             .await;
             let _ = timeout(WAIT, self.wait_exit()).await;
@@ -1030,6 +1031,7 @@ async fn stop_waits_for_group_empty_including_escaped_children() {
             command_id: Uuid::now_v7().to_string(),
             dispatch_attempt: 1,
             force: false,
+            ..Default::default()
         }))
         .await;
     let bodies = harness
@@ -1207,6 +1209,7 @@ while True:
             command_id: Uuid::now_v7().to_string(),
             dispatch_attempt: 1,
             force: false,
+            ..Default::default()
         }))
         .await;
     // Мягкая остановка ждёт CLI, а цикл супервизора продолжает обслуживать поток и команды.
@@ -1218,6 +1221,7 @@ while True:
             command_id: Uuid::now_v7().to_string(),
             dispatch_attempt: 2,
             force: true,
+            ..Default::default()
         }))
         .await;
     let bodies = harness
@@ -1228,6 +1232,110 @@ while True:
     assert!(
         bodies.iter().any(
             |b| matches!(b, Body::ExecutionState(f) if f.state == "stopped" && f.outcome == "force_stopped")
+        ),
+        "{bodies:?}"
+    );
+    assert!(harness.wait_exit().await.success());
+}
+
+/// Остановка перед выключением машины: тот же путь `stopping`, что у остановки владельцем,
+/// но итог `machine_shutdown`, по которому хаб будит сессию следующим вводом.
+#[tokio::test]
+async fn machine_shutdown_stop_ends_as_machine_shutdown() {
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli("synthetic").await;
+    harness
+        .deliver(
+            Uuid::now_v7(),
+            1,
+            &script(r#"{"delta":"partial"},{"hang":true}"#),
+        )
+        .await;
+    harness
+        .wait_records("delta", |b| {
+            b.iter().any(|x| matches!(x, Body::BlockDelta(_)))
+        })
+        .await;
+    harness
+        .send(down::Msg::Stop(StopRequest {
+            machine_shutdown: true,
+            deadline_ms: 3_000,
+            ..Default::default()
+        }))
+        .await;
+    let bodies = harness
+        .wait_records("closed", |b| {
+            b.iter().any(|x| matches!(x, Body::JournalClosed(_)))
+        })
+        .await;
+    let stopping = index(&bodies, |b| state(b, "stopping")).unwrap();
+    let stopped = index(&bodies, |b| {
+        matches!(b, Body::ExecutionState(f) if f.state == "stopped" && f.outcome == "machine_shutdown")
+    })
+    .unwrap_or_else(|| panic!("stopped(machine_shutdown): {bodies:?}"));
+    assert!(stopping < stopped);
+    assert!(
+        matches!(bodies.last(), Some(Body::JournalClosed(closed)) if closed.reason == "machine_shutdown")
+    );
+    assert!(harness.wait_exit().await.success());
+}
+
+/// Срок остановки перед выключением — жёсткий: CLI, который не выходит по EOF и
+/// игнорирует SIGTERM, добивается до срока, а не после `stop_grace` в минуту.
+#[tokio::test]
+async fn machine_shutdown_stop_kills_a_stubborn_cli_by_the_deadline() {
+    const STUBBORN: &str = r#"#!/usr/bin/python3
+import signal, sys, time
+if '--version' in sys.argv:
+    print('2.1.311'); sys.exit(0)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    time.sleep(0.2)
+"#;
+    let tools = TempDir::new().unwrap();
+    let exe = tools.path().join("fake-cli");
+    crate::fake_exec::write_executable(&exe, STUBBORN, 0o700);
+    let spec = format!(
+        "[claude_code]\nexecutable = \"{}\"\nallow_paid_model_poll = false\n",
+        exe.display()
+    );
+    let mut harness = Harness::start_with(&[], "60s", &spec).await;
+    harness.attach_and_ship(0).await;
+    let workdir = harness._root.path().to_string_lossy().into_owned();
+    harness
+        .send(down::Msg::StartCli(StartCli {
+            profile: "claude_code".into(),
+            workdir,
+            model: "haiku".into(),
+            effort: "low".into(),
+            permission_mode: "ask".into(),
+            instructions: Some(Instructions {
+                mode: "owner".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await;
+    harness
+        .next_message(|message| matches!(message, up::Msg::CliStarted(_)))
+        .await;
+    harness
+        .send(down::Msg::Stop(StopRequest {
+            machine_shutdown: true,
+            deadline_ms: 2_000,
+            ..Default::default()
+        }))
+        .await;
+    // WAIT (15 с) короче stop_grace (60 с): итог успевает только по сроку выключения.
+    let bodies = harness
+        .wait_records("closed", |b| {
+            b.iter().any(|x| matches!(x, Body::JournalClosed(_)))
+        })
+        .await;
+    assert!(
+        bodies.iter().any(
+            |b| matches!(b, Body::ExecutionState(f) if f.state == "stopped" && f.outcome == "machine_shutdown")
         ),
         "{bodies:?}"
     );
@@ -1245,6 +1353,7 @@ async fn survivors_keep_execution_stopping_not_terminal() {
             command_id: Uuid::now_v7().to_string(),
             dispatch_attempt: 1,
             force: true,
+            ..Default::default()
         }))
         .await;
     let bodies = harness
@@ -1648,6 +1757,7 @@ async fn sj_ships_from_committed_and_compacts_only_on_ack() {
             command_id: Uuid::now_v7().to_string(),
             dispatch_attempt: 1,
             force: false,
+            ..Default::default()
         }))
         .await;
     let bodies = harness
@@ -1858,6 +1968,7 @@ async fn wave_w_closed_is_last_record_and_detached_drain_waits_for_ack() {
             command_id: Uuid::now_v7().to_string(),
             dispatch_attempt: 1,
             force: true,
+            ..Default::default()
         }))
         .await;
     harness
@@ -1923,6 +2034,7 @@ async fn wave_w_containment_errors_report_survivors_before_retry() {
             command_id: Uuid::now_v7().to_string(),
             dispatch_attempt: 1,
             force: true,
+            ..Default::default()
         }))
         .await;
     let bodies = harness
@@ -1958,6 +2070,7 @@ async fn wave_w_group_commit_keeps_stopped_crash_boundary_durable() {
             command_id: Uuid::now_v7().to_string(),
             dispatch_attempt: 1,
             force: true,
+            ..Default::default()
         }))
         .await;
     assert!(!timeout(WAIT, harness.wait_exit()).await.unwrap().success());
