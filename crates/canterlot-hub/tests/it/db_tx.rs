@@ -1,3 +1,6 @@
+//! Транзакции хаба: синхронный откат в `in_tx` и `run_in_tx` при любой ошибке,
+//! повтор после взаимной блокировки и `lock_timeout` на каждом соединении пула.
+
 use canterlot_hub::{
     conversations, delivery::ContentBlock, executions, idempotency, machines,
     model::ExecutionState, testkit,
@@ -332,5 +335,24 @@ async fn run_in_tx_retries_a_deadlock_until_both_transactions_commit() -> TestRe
             .expect("the helper must resolve the deadlock, not wait forever");
     left.unwrap();
     right.unwrap();
+    Ok(())
+}
+
+#[tokio::test]
+async fn production_pool_sets_lock_timeout_on_every_connection() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let url = sqlx::ConnectOptions::to_url_lossy(&*pool.connect_options());
+    let configured = canterlot_hub::db::connect(url.as_str()).await?;
+    let mut first = configured.acquire().await?;
+    let mut second = configured.acquire().await?;
+    for conn in [&mut first, &mut second] {
+        let setting: String = sqlx::query_scalar("show lock_timeout")
+            .fetch_one(&mut **conn)
+            .await?;
+        assert_eq!(setting, "5s");
+    }
+    drop(first);
+    drop(second);
+    configured.close().await;
     Ok(())
 }

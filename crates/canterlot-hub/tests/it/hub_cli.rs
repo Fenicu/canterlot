@@ -1,3 +1,6 @@
+//! Командная строка хаба: `machine rotate-token` и `machine set` на живой базе,
+//! миграции перед прослушиванием в `serve` и отказ при испорченной миграции.
+
 use std::{fs, process::Command, time::Duration};
 
 use canterlot_hub::{db, installation, machines, testkit::tls::test_pki};
@@ -234,7 +237,9 @@ async fn serve_applies_pending_migrations_before_listening_and_logs_version(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
-    tokio::time::timeout(Duration::from_secs(10), async {
+    // Полторы сотни миграций под нагрузкой гейта идут дольше 10 с (флейк 1.47.1): ждём
+    // открытого порта, а упавший процесс ловит проверка try_wait раньше потолка.
+    tokio::time::timeout(Duration::from_secs(60), async {
         while tokio::net::TcpStream::connect(addr).await.is_err() {
             assert!(child.try_wait().unwrap().is_none());
             tokio::time::sleep(Duration::from_millis(20)).await;

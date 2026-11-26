@@ -3033,3 +3033,132 @@ async fn content_range_of_a_large_file_is_not_buffered() {
         growth / MIB as u64
     );
 }
+
+async fn blocked_by_pid(pool: &PgPool, pid: i32) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where datname=current_database() and $1=any(pg_blocking_pids(pid)))")
+                .bind(pid).fetch_one(pool).await.unwrap();
+            if blocked { break; }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }).await.unwrap();
+}
+#[tokio::test]
+async fn settings_promotion_and_attachment_fk_have_no_deadlocks_50_times() {
+    let pool = canterlot_hub::testkit::db().await;
+    let s = testkit::seed(&pool).await;
+    crate::support::task5::input(&pool, &s, "settings").await;
+    let command: Uuid = sqlx::query_scalar("select id from commands where kind='deliver_input'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update commands set payload=payload||'{\"settings\":{\"model\":\"synthetic-small\"}}'::jsonb where id=$1").bind(command).execute(&pool).await.unwrap();
+    let before = crate::support::task5::count(
+        &pool,
+        "select deadlocks from pg_stat_database where datname=current_database()",
+    )
+    .await;
+    for n in 0..50 {
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+            .bind(s.conversation_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let pid: i32 = sqlx::query_scalar("select pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        canterlot_hub::events::append(
+            &mut tx,
+            canterlot_hub::events::NewEvent {
+                scope: canterlot_hub::events::Scope::Conversation {
+                    id: s.conversation_id,
+                },
+                kind: "block_started",
+                conversation_id: Some(s.conversation_id),
+                execution_id: None,
+                payload: json!({}),
+                correlation_id: Uuid::now_v7(),
+            },
+        )
+        .await
+        .unwrap();
+        let p = pool.clone();
+        let owner = s.owner_id;
+        let conversation = s.conversation_id;
+        let b = tokio::spawn(async move {
+            attachments::create(
+                &p,
+                owner,
+                &format!("fk-{n}"),
+                attachments::NewAttachment {
+                    conversation_id: conversation,
+                    name: "f.bin".into(),
+                    mime: Some("application/octet-stream".into()),
+                    size: 1,
+                    sha256: "a".repeat(64),
+                },
+                Uuid::now_v7(),
+            )
+            .await
+        });
+        blocked_by_pid(&pool, pid).await;
+        let a = conversations::promote_settings_in_tx(&mut tx, command, Uuid::now_v7()).await;
+        if a.is_ok() {
+            tx.commit().await.unwrap();
+        } else {
+            tx.rollback().await.unwrap();
+        }
+        let b = b.await.unwrap();
+        assert!(a.is_ok(), "promotion failed on iteration {n}");
+        assert!(b.is_ok(), "attachment failed on iteration {n}");
+    }
+    sqlx::query("select pg_stat_clear_snapshot()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::support::task5::count(
+            &pool,
+            "select deadlocks from pg_stat_database where datname=current_database()"
+        )
+        .await,
+        before
+    );
+}
+#[test]
+fn blob_shards_use_random_uuid_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = canterlot_hub::config::AttachmentsConfig {
+        blob_dir: dir.path().into(),
+        ..Default::default()
+    };
+    let store =
+        attachments::LocalBlobStore::open(&config, Arc::new(attachments::blobstore::NoTrace))
+            .unwrap();
+    let a = Uuid::parse_str("019a0000-0000-7000-8000-0000000000ab").unwrap();
+    let b = Uuid::parse_str("019a0000-0000-7000-8000-0000000000cd").unwrap();
+    assert_ne!(store.blob_path(a).parent(), store.blob_path(b).parent());
+}
+#[tokio::test]
+async fn legacy_blob_shards_remain_readable_and_removable() {
+    use canterlot_hub::attachments::BlobStore;
+    let dir = tempfile::tempdir().unwrap();
+    let config = canterlot_hub::config::AttachmentsConfig {
+        blob_dir: dir.path().into(),
+        ..Default::default()
+    };
+    let store =
+        attachments::LocalBlobStore::open(&config, Arc::new(attachments::blobstore::NoTrace))
+            .unwrap();
+    let id = Uuid::parse_str("019a0000-0000-7000-8000-0000000000ab").unwrap();
+    let legacy = config.blob_dir.join("blobs/01").join(id.to_string());
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, b"x").unwrap();
+    let (_, len) = store.open(id, 0).await.unwrap();
+    assert_eq!(len, 1);
+    store.delete_blob(id).await.unwrap();
+    assert!(!legacy.exists());
+}

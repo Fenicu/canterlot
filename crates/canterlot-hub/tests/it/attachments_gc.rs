@@ -690,3 +690,43 @@ async fn gc_service_holds_its_singleton_lock_and_stops_on_shutdown() {
     .await
     .expect("the lock is released");
 }
+
+#[tokio::test]
+async fn orphan_gc_batches_catalog_queries() {
+    let pool = canterlot_hub::testkit::db().await;
+    use canterlot_hub::attachments::BlobStore;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let f = Fixture::new(pool.clone()).await;
+    let queries = Arc::new(AtomicUsize::new(0));
+    let counter = queries.clone();
+    let probe = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .before_acquire(move |_, _| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { Ok(true) })
+        })
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        let id = Uuid::now_v7();
+        let path = f.staging_path(id);
+        std::fs::write(&path, b"x").unwrap();
+        std::fs::File::open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(90000))
+            .unwrap();
+    }
+    let report =
+        attachments::gc::run_once(&probe, &*f.store, Utc::now(), Duration::from_secs(86400))
+            .await
+            .unwrap();
+    assert_eq!(report.orphan_staging, 200);
+    assert!(f.store.scan().await.unwrap().is_empty());
+    let total = queries.load(Ordering::Relaxed);
+    assert!(
+        total < 15,
+        "orphan scan used {total} pool queries for 200 files"
+    );
+    probe.close().await;
+}

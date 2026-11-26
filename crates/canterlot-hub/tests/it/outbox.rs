@@ -2254,3 +2254,36 @@ async fn a_repeated_phase_is_liveness_and_keeps_the_phase_mark() {
     assert_eq!(changes, 1, "a repeat is not a new phase event");
     stop(hub).await;
 }
+
+#[tokio::test]
+async fn start_notifies_outbox_after_commit() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+{
+    let pool = canterlot_hub::testkit::db().await;
+    let seed = testkit::seed(&pool).await;
+    let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
+    listener.listen("canterlot_outbox").await?;
+    let started =
+        executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()).await?;
+    let message = timeout(Duration::from_secs(2), listener.recv()).await??;
+    assert_eq!(message.payload(), seed.machine_id.to_string());
+    let exists: bool = sqlx::query_scalar(
+        "select exists(select 1 from commands where id = $1 and delivery_state = 'pending')",
+    )
+    .bind(started.command_id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(exists);
+    sqlx::query("alter table events add constraint reject_execution_events check (kind <> 'execution_state_changed') not valid").execute(&pool).await?;
+    let other = testkit::seed(&pool).await;
+    assert!(
+        executions::start(&pool, other.owner_id, other.conversation_id, Uuid::now_v7())
+            .await
+            .is_err()
+    );
+    assert!(
+        timeout(Duration::from_millis(100), listener.recv())
+            .await
+            .is_err()
+    );
+    Ok(())
+}

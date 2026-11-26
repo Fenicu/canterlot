@@ -1,25 +1,20 @@
-use std::time::Duration;
+//! Управление очередью: отмена, отзыв, остановка и продолжение, их завершение
+//! квитанциями по попытке, причины пауз и события `queue_state_changed`.
 
 use canterlot_hub::{
-    db,
     delivery::{
         control::{CancelOutcome, StopOutcome, cancel_input, continue_queue, request_stop},
         dispatch::{DispatchOutcome, GateInputs, dispatch_next},
         receipts::{ApplyOutcome, InputReceipt, apply_input_receipt, apply_run_finished},
-        submit::{
-            ContentBlock, SubmitError, SubmitInput, SubmittedInput, submit_input,
-            submit_input_in_tx,
-        },
+        submit::{ContentBlock, SubmitInput, SubmittedInput, submit_input},
     },
-    events::{self, NewEvent, ReadAfter, Scope},
     executions,
     model::{ExecutionState, InputState, PauseReason, RunSlot, RunSlotView},
     testkit::{self, Seed},
 };
 use chrono::Utc;
 use serde_json::{Value, json};
-use sqlx::{ConnectOptions, PgPool, postgres::PgListener};
-use tokio::time::timeout;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -35,13 +30,11 @@ fn request(seed: &Seed, text: &str) -> SubmitInput {
         origin: None,
     }
 }
-
 async fn state(pool: &PgPool, id: Uuid, to: ExecutionState, outcome: Option<&str>) {
     executions::set_state(pool, id, to, outcome, Uuid::now_v7())
         .await
         .unwrap();
 }
-
 async fn running(pool: &PgPool, seed: &Seed) -> executions::StartedExecution {
     let execution = executions::start(pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
         .await
@@ -50,7 +43,6 @@ async fn running(pool: &PgPool, seed: &Seed) -> executions::StartedExecution {
     state(pool, execution.execution_id, ExecutionState::Running, None).await;
     execution
 }
-
 async fn dispatch(pool: &PgPool, seed: &Seed) -> DispatchOutcome {
     dispatch_next(
         pool,
@@ -65,7 +57,6 @@ async fn dispatch(pool: &PgPool, seed: &Seed) -> DispatchOutcome {
     .await
     .unwrap()
 }
-
 async fn setup(pool: &PgPool) -> (Seed, executions::StartedExecution, SubmittedInput) {
     let seed = testkit::seed(pool).await;
     let execution = running(pool, &seed).await;
@@ -78,7 +69,6 @@ async fn setup(pool: &PgPool) -> (Seed, executions::StartedExecution, SubmittedI
     ));
     (seed, execution, input)
 }
-
 async fn receipt(
     pool: &PgPool,
     input: &SubmittedInput,
@@ -89,7 +79,6 @@ async fn receipt(
         .await
         .unwrap()
 }
-
 async fn controls(pool: &PgPool, seed: &Seed, input: &SubmittedInput) -> (Uuid, Uuid) {
     let CancelOutcome::CancelRequested { cancel_command_id } = cancel_input(
         pool,
@@ -119,7 +108,23 @@ async fn controls(pool: &PgPool, seed: &Seed, input: &SubmittedInput) -> (Uuid, 
     };
     (cancel_command_id, withdraw)
 }
-
+async fn assert_queue_event(pool: &PgPool, seed: &Seed, correlation: Uuid) -> TestResult {
+    let rows: Vec<(Value, String)> = sqlx::query_as("select payload, xmin::text from events where correlation_id = $1 and kind = 'queue_state_changed'").bind(correlation).fetch_all(pool).await?;
+    assert_eq!(rows.len(), 1, "exactly one queue event per change");
+    let (pauses, holds, slot, input, attempt, tx): (Value, Value, String, Option<Uuid>, Option<i32>, String) = sqlx::query_as("select pause_reasons, hold_reasons, run_slot, run_slot_input_id, run_slot_attempt, xmin::text from queue_state where conversation_id = $1").bind(seed.conversation_id).fetch_one(pool).await?;
+    let slot = RunSlot::from_columns(&slot, input, attempt)?;
+    let command: Option<Uuid> = sqlx::query_scalar("select command_id from inputs where id = $1")
+        .bind(input)
+        .fetch_optional(pool)
+        .await?;
+    let slot = RunSlotView::new(&slot, command);
+    assert_eq!(
+        rows[0].0,
+        json!({"pause_reasons": pauses, "hold_reasons": holds, "run_slot": slot})
+    );
+    assert_eq!(rows[0].1, tx);
+    Ok(())
+}
 #[tokio::test]
 async fn resolved_owner_lost_is_removed_but_restore_pending_stays() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
@@ -161,35 +166,6 @@ async fn resolved_owner_lost_is_removed_but_restore_pending_stays() -> TestResul
     assert_eq!(outcome.remaining, [PauseReason::RestorePending]);
     Ok(())
 }
-
-#[tokio::test]
-async fn quote_heavy_text_uses_protobuf_limits() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let seed = testkit::seed(&pool).await;
-    let text = "\"x".repeat(70_000);
-    assert_eq!(text.len(), 140_000);
-    assert!(submit_input(&pool, request(&seed, &text)).await.is_ok());
-    Ok(())
-}
-
-async fn assert_queue_event(pool: &PgPool, seed: &Seed, correlation: Uuid) -> TestResult {
-    let rows: Vec<(Value, String)> = sqlx::query_as("select payload, xmin::text from events where correlation_id = $1 and kind = 'queue_state_changed'").bind(correlation).fetch_all(pool).await?;
-    assert_eq!(rows.len(), 1, "exactly one queue event per change");
-    let (pauses, holds, slot, input, attempt, tx): (Value, Value, String, Option<Uuid>, Option<i32>, String) = sqlx::query_as("select pause_reasons, hold_reasons, run_slot, run_slot_input_id, run_slot_attempt, xmin::text from queue_state where conversation_id = $1").bind(seed.conversation_id).fetch_one(pool).await?;
-    let slot = RunSlot::from_columns(&slot, input, attempt)?;
-    let command: Option<Uuid> = sqlx::query_scalar("select command_id from inputs where id = $1")
-        .bind(input)
-        .fetch_optional(pool)
-        .await?;
-    let slot = RunSlotView::new(&slot, command);
-    assert_eq!(
-        rows[0].0,
-        json!({"pause_reasons": pauses, "hold_reasons": holds, "run_slot": slot})
-    );
-    assert_eq!(rows[0].1, tx);
-    Ok(())
-}
-
 #[tokio::test]
 async fn queue_events_cover_lifecycle_receipts_controls_and_run_slot() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
@@ -309,7 +285,6 @@ async fn queue_events_cover_lifecycle_receipts_controls_and_run_slot() -> TestRe
     assert_queue_event(&pool, &seed, correlation).await?;
     Ok(())
 }
-
 #[tokio::test]
 async fn queue_event_failure_rolls_back_state_and_control_completion() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
@@ -340,7 +315,6 @@ async fn queue_event_failure_rolls_back_state_and_control_completion() -> TestRe
     assert_eq!(state, "dispatched");
     Ok(())
 }
-
 #[tokio::test]
 async fn receipt_causes_distinguish_withdrawn_and_deferred() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
@@ -367,7 +341,6 @@ async fn receipt_causes_distinguish_withdrawn_and_deferred() -> TestResult {
     }
     Ok(())
 }
-
 #[tokio::test]
 async fn control_payloads_and_completion_are_attempt_scoped() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
@@ -422,7 +395,6 @@ async fn control_payloads_and_completion_are_attempt_scoped() -> TestResult {
     }
     Ok(())
 }
-
 #[tokio::test]
 async fn late_control_receipt_completes_only_its_attempt() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
@@ -475,7 +447,6 @@ async fn late_control_receipt_completes_only_its_attempt() -> TestResult {
     assert!(rows.contains(&(current, "pending".into())));
     Ok(())
 }
-
 #[tokio::test]
 async fn old_generation_deferral_does_not_hold_running_generation() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
@@ -510,7 +481,6 @@ async fn old_generation_deferral_does_not_hold_running_generation() -> TestResul
     ));
     Ok(())
 }
-
 #[tokio::test]
 async fn cancelled_withdrawn_or_deferred_input_never_redispatches() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
@@ -548,120 +518,6 @@ async fn cancelled_withdrawn_or_deferred_input_never_redispatches() -> TestResul
     }
     Ok(())
 }
-
-#[tokio::test]
-async fn start_notifies_outbox_after_commit() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let seed = testkit::seed(&pool).await;
-    let mut listener = PgListener::connect_with(&pool).await?;
-    listener.listen("canterlot_outbox").await?;
-    let started =
-        executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()).await?;
-    let message = timeout(Duration::from_secs(2), listener.recv()).await??;
-    assert_eq!(message.payload(), seed.machine_id.to_string());
-    let exists: bool = sqlx::query_scalar(
-        "select exists(select 1 from commands where id = $1 and delivery_state = 'pending')",
-    )
-    .bind(started.command_id)
-    .fetch_one(&pool)
-    .await?;
-    assert!(exists);
-    sqlx::query("alter table events add constraint reject_execution_events check (kind <> 'execution_state_changed') not valid").execute(&pool).await?;
-    let other = testkit::seed(&pool).await;
-    assert!(
-        executions::start(&pool, other.owner_id, other.conversation_id, Uuid::now_v7())
-            .await
-            .is_err()
-    );
-    assert!(
-        timeout(Duration::from_millis(100), listener.recv())
-            .await
-            .is_err()
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn empty_content_and_invalid_keys_are_rejected_before_sql() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let seed = testkit::seed(&pool).await;
-    let mut conn = pool.acquire().await?;
-    let mut tx = sqlx::Connection::begin(&mut *conn).await?;
-    let closed = PgPool::connect_lazy_with((*pool.connect_options()).clone());
-    closed.close().await;
-    for content in [
-        vec![],
-        vec![
-            ContentBlock::Text {
-                text: String::new()
-            };
-            2
-        ],
-    ] {
-        let mut req = request(&seed, "text");
-        req.content = content;
-        assert!(matches!(
-            submit_input(&closed, req.clone()).await,
-            Err(SubmitError::InvalidContent { reason: "empty" })
-        ));
-        assert!(matches!(
-            submit_input_in_tx(&mut tx, &req).await,
-            Err(SubmitError::InvalidContent { reason: "empty" })
-        ));
-    }
-    tx.rollback().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn invalid_idempotency_keys_fail_before_pool_acquisition() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let seed = testkit::seed(&pool).await;
-    pool.close().await;
-    for key in [String::new(), "k".repeat(257), "é".repeat(129)] {
-        let mut req = request(&seed, "text");
-        req.idempotency_key = key.clone();
-        let error = submit_input(&pool, req).await.unwrap_err();
-        assert!(matches!(
-            error,
-            SubmitError::InvalidRequest {
-                reason: "invalid_idempotency_key"
-            }
-        ));
-        for error in [
-            cancel_input(&pool, seed.owner_id, Uuid::now_v7(), &key, Uuid::now_v7())
-                .await
-                .unwrap_err(),
-            request_stop(
-                &pool,
-                seed.owner_id,
-                seed.conversation_id,
-                &key,
-                Uuid::now_v7(),
-            )
-            .await
-            .unwrap_err(),
-            continue_queue(
-                &pool,
-                seed.owner_id,
-                seed.conversation_id,
-                &key,
-                Uuid::now_v7(),
-            )
-            .await
-            .unwrap_err(),
-        ] {
-            assert!(matches!(
-                error,
-                canterlot_hub::delivery::control::ControlError::InvalidRequest {
-                    reason: "invalid_idempotency_key"
-                }
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[tokio::test]
 async fn receipt_reasons_are_sanitized_and_bounded() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
@@ -689,47 +545,6 @@ async fn receipt_reasons_are_sanitized_and_bounded() -> TestResult {
     }
     Ok(())
 }
-
-#[tokio::test]
-async fn cursor_ahead_of_head_requires_resync() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let scope = Scope::Conversation { id: Uuid::now_v7() };
-    assert!(matches!(
-        events::read_after(&pool, &scope, 1, 10).await?,
-        ReadAfter::ResyncRequired {
-            oldest_available_seq: 1
-        }
-    ));
-    let mut tx = pool.begin().await?;
-    events::append(
-        &mut tx,
-        NewEvent {
-            scope,
-            kind: "test",
-            conversation_id: None,
-            execution_id: None,
-            payload: json!({}),
-            correlation_id: Uuid::now_v7(),
-        },
-    )
-    .await?;
-    tx.commit().await?;
-    assert!(matches!(
-        events::read_after(&pool, &scope, 2, 10).await?,
-        ReadAfter::ResyncRequired {
-            oldest_available_seq: 1
-        }
-    ));
-    events::purge_before(&pool, &scope, 2).await?;
-    assert!(matches!(
-        events::read_after(&pool, &scope, 2, 10).await?,
-        ReadAfter::ResyncRequired {
-            oldest_available_seq: 2
-        }
-    ));
-    Ok(())
-}
-
 #[tokio::test]
 async fn owner_initiated_terminal_outcomes_add_no_pause() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
@@ -764,21 +579,6 @@ async fn owner_initiated_terminal_outcomes_add_no_pause() -> TestResult {
     }
     Ok(())
 }
-
-#[tokio::test]
-async fn committed_at_defaults_use_wall_clock() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let defaults: Vec<(String, String)> = sqlx::query_as("select table_name, column_default from information_schema.columns where table_schema = 'public' and table_name in ('inputs', 'events') and column_name = 'committed_at' order by table_name").fetch_all(&pool).await?;
-    assert_eq!(
-        defaults,
-        [
-            ("events".into(), "clock_timestamp()".into()),
-            ("inputs".into(), "clock_timestamp()".into())
-        ]
-    );
-    Ok(())
-}
-
 #[tokio::test]
 async fn transmission_implies_machine_storage() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
@@ -806,67 +606,6 @@ async fn transmission_implies_machine_storage() -> TestResult {
     }
     Ok(())
 }
-
-#[tokio::test]
-async fn debug_redacts_content_and_event_payloads() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let seed = testkit::seed(&pool).await;
-    let marker = "PRIVATE_MARKER_TEXT_123";
-    let req = request(&seed, marker);
-    for debug in [format!("{:?}", req.content[0]), format!("{req:?}")] {
-        assert!(!debug.contains(marker));
-        assert!(debug.contains(&marker.len().to_string()));
-    }
-    let mut tx = pool.begin().await?;
-    let event = NewEvent {
-        scope: Scope::Conversation {
-            id: seed.conversation_id,
-        },
-        kind: "input_queued",
-        conversation_id: Some(seed.conversation_id),
-        execution_id: None,
-        payload: json!({"content": req.content, "nested": {"text": marker}, "append": marker}),
-        correlation_id: Uuid::now_v7(),
-    };
-    assert!(!format!("{event:?}").contains(marker));
-    let stored = events::append(&mut tx, event).await?;
-    assert!(!format!("{stored:?}").contains(marker));
-    tx.commit().await?;
-    let ReadAfter::Events(events) = events::read_after(
-        &pool,
-        &Scope::Conversation {
-            id: seed.conversation_id,
-        },
-        0,
-        10,
-    )
-    .await?
-    else {
-        panic!()
-    };
-    assert!(!format!("{:?}", events[0]).contains(marker));
-    Ok(())
-}
-
-#[tokio::test]
-async fn production_pool_sets_lock_timeout_on_every_connection() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let url = pool.connect_options().to_url_lossy();
-    let configured = db::connect(url.as_str()).await?;
-    let mut first = configured.acquire().await?;
-    let mut second = configured.acquire().await?;
-    for conn in [&mut first, &mut second] {
-        let setting: String = sqlx::query_scalar("show lock_timeout")
-            .fetch_one(&mut **conn)
-            .await?;
-        assert_eq!(setting, "5s");
-    }
-    drop(first);
-    drop(second);
-    configured.close().await;
-    Ok(())
-}
-
 #[tokio::test]
 async fn repeated_controls_with_different_keys_reuse_commands() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
@@ -882,90 +621,6 @@ async fn repeated_controls_with_different_keys_reuse_commands() -> TestResult {
     assert_eq!(count, 2);
     Ok(())
 }
-
-#[tokio::test]
-async fn message_limit_maps_to_submit_resource_limit_without_binding_key() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    use canterlot_hub::delivery::LimitKind;
-    use canterlot_proto::limits::MAX_MESSAGE_BYTES;
-    let seed = testkit::seed(&pool).await;
-    let mut req = request(&seed, "x");
-    req.content.resize(
-        270_000,
-        ContentBlock::Text {
-            text: String::new(),
-        },
-    );
-    let key = req.idempotency_key.clone();
-    assert!(
-        matches!(submit_input(&pool, req).await, Err(SubmitError::ResourceLimit { kind: LimitKind::Message, limit: MAX_MESSAGE_BYTES, actual }) if actual > MAX_MESSAGE_BYTES)
-    );
-    let count: i64 = sqlx::query_scalar("select count(*) from idempotency_keys where key = $1")
-        .bind(&key)
-        .fetch_one(&pool)
-        .await?;
-    assert_eq!(count, 0);
-    let mut retry = request(&seed, "retry");
-    retry.idempotency_key = key;
-    submit_input(&pool, retry).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn idempotency_key_boundary_and_in_tx_validation() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    use canterlot_hub::delivery::control::ControlError;
-    let seed = testkit::seed(&pool).await;
-    let mut req = request(&seed, "x");
-    req.idempotency_key = "é".repeat(128);
-    let input = submit_input(&pool, req.clone()).await?;
-    assert_eq!(
-        cancel_input(
-            &pool,
-            seed.owner_id,
-            input.input_id,
-            &"c".repeat(256),
-            Uuid::now_v7()
-        )
-        .await?,
-        CancelOutcome::Cancelled
-    );
-    request_stop(
-        &pool,
-        seed.owner_id,
-        seed.conversation_id,
-        &"s".repeat(256),
-        Uuid::now_v7(),
-    )
-    .await?;
-    continue_queue(
-        &pool,
-        seed.owner_id,
-        seed.conversation_id,
-        &"r".repeat(256),
-        Uuid::now_v7(),
-    )
-    .await?;
-    let mut tx = pool.begin().await?;
-    for key in [String::new(), "k".repeat(257), "é".repeat(129)] {
-        req.idempotency_key = key.clone();
-        assert!(matches!(
-            submit_input_in_tx(&mut tx, &req).await,
-            Err(SubmitError::InvalidRequest {
-                reason: "invalid_idempotency_key"
-            })
-        ));
-        assert!(matches!(
-            cancel_input(&pool, seed.owner_id, input.input_id, &key, Uuid::now_v7()).await,
-            Err(ControlError::InvalidRequest {
-                reason: "invalid_idempotency_key"
-            })
-        ));
-    }
-    tx.rollback().await?;
-    Ok(())
-}
-
 #[tokio::test]
 async fn terminal_receipts_still_complete_pending_controls() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;

@@ -29,7 +29,7 @@ not (
     | test(=exec_e2e::large_answer_backlog_does_not_starve_control_session)
     | test(=session::large_command_burst_during_large_replay_keeps_heartbeat_acks_timely)
   )
-  | test(=final_fix_hub::sj_ingest_cost_does_not_grow_with_block_size)
+  | test(=sj_ingest::sj_ingest_cost_does_not_grow_with_block_size)
 )
 '''
 
@@ -54,7 +54,7 @@ default-filter = '''
     test(=crunch::lock_order_has_no_deadlocks_across_ingest_dispatch_scheduler_and_http)
     | test(=crunch::create_racing_reserve_entry_always_ends_held)
     | test(=attachments_gc::gc_never_removes_blob_under_concurrent_link)
-    | test(=final_fix_hub::sj_ingest_cost_does_not_grow_with_block_size)
+    | test(=sj_ingest::sj_ingest_cost_does_not_grow_with_block_size)
   )
 )
 | (

@@ -1,5 +1,33 @@
 {
   "allowances": {
+    "crates/canterlot-hub/tests/it/attachments.rs": {
+      "rust_sleep": {
+        "count": 6,
+        "reason": "перенесён из final_wave.rs тест порядка блокировок вложений (settings_promotion_and_attachment_fk_have_no_deadlocks_50_times): ожидание блокировки опросом"
+      }
+    },
+    "crates/canterlot-hub/tests/it/attachments_gc.rs": {
+      "rust_clock": {
+        "count": 2,
+        "reason": "перенесён из final_wave.rs тест orphan_gc_batches_catalog_queries: возраст файла staging от текущих часов"
+      }
+    },
+    "crates/canterlot-hub/tests/it/event_log.rs": {
+      "rust_sleep": {
+        "count": 1,
+        "reason": "перенесён из final_wave.rs тест auto_title_counts_follow_prior_list_commit: ожидание блокировки опросом"
+      }
+    },
+    "crates/canterlot-hub/tests/it/singletons.rs": {
+      "rust_sleep": {
+        "count": 16,
+        "reason": "перенесены тесты одиночек из final_wave.rs и rereview.rs: ожидание замка и состояния опросом, окна паузы захвата"
+      },
+      "rust_clock": {
+        "count": 3,
+        "reason": "перенесены тесты одиночек из final_wave.rs и rereview.rs: ожидание замка и состояния опросом, окна паузы захвата"
+      }
+    },
     "crates/canterlot-worker/tests/it/carrier.rs": {
       "rust_clock": {
         "count": 1,
@@ -41,10 +69,10 @@
       "rust_sleep": 2
     },
     "crates/canterlot-hub/tests/it/attachments.rs": {
-      "rust_sleep": 5
+      "rust_sleep": 6
     },
     "crates/canterlot-hub/tests/it/attachments_gc.rs": {
-      "rust_clock": 1,
+      "rust_clock": 2,
       "rust_sleep": 5
     },
     "crates/canterlot-hub/tests/it/auth_geo.rs": {
@@ -68,11 +96,17 @@
     "crates/canterlot-hub/tests/it/crunch.rs": {
       "rust_sleep": 3
     },
+    "crates/canterlot-hub/tests/it/db_tx.rs": {
+      "rust_sleep": 2
+    },
     "crates/canterlot-hub/tests/it/derived.rs": {
       "rust_sleep": 4
     },
     "crates/canterlot-hub/tests/it/dictation.rs": {
       "rust_sleep": 6
+    },
+    "crates/canterlot-hub/tests/it/event_log.rs": {
+      "rust_sleep": 1
     },
     "crates/canterlot-hub/tests/it/execution_control.rs": {
       "rust_sleep": 1
@@ -80,13 +114,6 @@
     "crates/canterlot-hub/tests/it/file_probe.rs": {
       "rust_clock": 1,
       "rust_sleep": 2
-    },
-    "crates/canterlot-hub/tests/it/final_fix_cli.rs": {
-      "rust_sleep": 1
-    },
-    "crates/canterlot-hub/tests/it/final_wave.rs": {
-      "rust_clock": 3,
-      "rust_sleep": 9
     },
     "crates/canterlot-hub/tests/it/grpc_session.rs": {
       "rust_sleep": 5
@@ -99,6 +126,9 @@
       "rust_sleep": 6
     },
     "crates/canterlot-hub/tests/it/http_requests.rs": {
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/hub_cli.rs": {
       "rust_sleep": 1
     },
     "crates/canterlot-hub/tests/it/ingest.rs": {
@@ -117,8 +147,8 @@
       "rust_sleep": 4
     },
     "crates/canterlot-hub/tests/it/outbox.rs": {
-      "rust_clock": 1,
-      "rust_sleep": 7
+      "rust_sleep": 7,
+      "rust_clock": 1
     },
     "crates/canterlot-hub/tests/it/owner_push.rs": {
       "rust_clock": 7,
@@ -138,9 +168,6 @@
     },
     "crates/canterlot-hub/tests/it/requests_integration.rs": {
       "rust_sleep": 1
-    },
-    "crates/canterlot-hub/tests/it/rereview.rs": {
-      "rust_sleep": 4
     },
     "crates/canterlot-hub/tests/it/reserve_settings.rs": {
       "rust_sleep": 1
@@ -163,9 +190,9 @@
       "rust_clock": 4,
       "rust_sleep": 4
     },
-    "crates/canterlot-hub/tests/it/singleton_regressions.rs": {
-      "rust_clock": 1,
-      "rust_sleep": 5
+    "crates/canterlot-hub/tests/it/singletons.rs": {
+      "rust_sleep": 16,
+      "rust_clock": 3
     },
     "crates/canterlot-hub/tests/it/snapshot_boundary.rs": {
       "rust_sleep": 3
@@ -188,9 +215,6 @@
     "crates/canterlot-hub/tests/it/support/task9.rs": {
       "rust_clock": 2,
       "rust_sleep": 1
-    },
-    "crates/canterlot-hub/tests/it/tx_rollback.rs": {
-      "rust_sleep": 2
     },
     "crates/canterlot-hub/tests/it/ws.rs": {
       "rust_clock": 7,
