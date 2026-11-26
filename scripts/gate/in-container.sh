@@ -31,12 +31,14 @@ set -euo pipefail
 src=""
 out=""
 want_sha=""
+stress_flag=()
 while (($#)); do
     case "$1" in
         --src) src=${2:?--src требует каталог}; shift ;;
         --out) out=${2:?--out требует каталог}; shift ;;
         --sha) want_sha=${2:?--sha требует sha12}; shift ;;
-        *) echo "Использование: $0 --src DIR --out DIR --sha SHA12" >&2; exit 2 ;;
+        --stress) stress_flag=(--stress) ;;
+        *) echo "Использование: $0 --src DIR --out DIR --sha SHA12 [--stress]" >&2; exit 2 ;;
     esac
     shift
 done
@@ -109,6 +111,10 @@ for candidate in /usr/lib/postgresql/*/bin; do
 done
 [[ -n "$pgbin" ]] || die "нет initdb в /usr/lib/postgresql/*/bin"
 pgdata=/tmp/canterlot-gate-pg
+# Бюджет соединений как у scripts/test-db.sh: пул теста (5), соединение шаблона (1),
+# отдельные пулы внутри тестов; 20 на поток с запасом, не меньше 500.
+max_connections=$(($(nproc) * 20))
+((max_connections < 500)) && max_connections=500
 # Запись для uid уже подставлена выше, поэтому initdb и postgres видят своего
 # пользователя; окружение общее для всего гейта, включая тесты носителя с sshd.
 (
@@ -122,9 +128,9 @@ pgdata=/tmp/canterlot-gate-pg
     {
         printf "listen_addresses = '127.0.0.1'\n"
         printf 'port = %s\n' "$port"
-        # Как у postgres:*-trixie в scripts/test-db.sh (max_connections=500), плюс
-        # отключённые fsync: данные лежат в /tmp контейнера, терять их не жалко.
-        printf 'max_connections = 500\n'
+        # Как в scripts/test-db.sh, плюс отключённые fsync: данные лежат в /tmp
+        # контейнера, терять их не жалко.
+        printf 'max_connections = %s\n' "$max_connections"
         printf 'fsync = off\n'
         printf 'synchronous_commit = off\n'
         printf 'full_page_writes = off\n'
@@ -161,7 +167,7 @@ phase_done "PostgreSQL"
 # scripts/gate-coverage.sh. HEAD рабочей копии сверен с --sha в начале, до чистки /tmp.
 phase "scripts/gate.sh --no-attest"
 g=0
-(cd "$src" && CANTERLOT_NO_LEASE=1 bash scripts/gate.sh --no-attest) >"$out/gate.log" 2>&1 || g=$?
+(cd "$src" && CANTERLOT_NO_LEASE=1 bash scripts/gate.sh --no-attest "${stress_flag[@]}") >"$out/gate.log" 2>&1 || g=$?
 phase_done "scripts/gate.sh"
 
 # Состояние, сводка и логи шагов лежат в .superpowers/gate/<sha8> рабочей копии;
