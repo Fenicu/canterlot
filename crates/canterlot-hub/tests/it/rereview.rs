@@ -74,12 +74,21 @@ async fn rereview_failing_start_projection_keeps_exponential_backoff() {
     sqlx::raw_sql("create sequence projection_attempts; create function fail_projection() returns trigger language plpgsql as $$ begin perform nextval('projection_attempts'); raise exception using errcode='57014',message='projection unavailable'; end $$; create trigger fail_projection before update on machines for each row execute function fail_projection();")
         .execute(&pool).await.unwrap();
     let (stop, rx) = watch::channel(false);
-    let task = tokio::spawn(machine_info::run_status_projection(
+    // Пауза в десять раз короче боевой: те же пять удвоений укладываются в 0,5 с, а без
+    // роста паузы попыток было бы два десятка.
+    let task = tokio::spawn(machine_info::run_status_projection_with(
         pool.clone(),
         Registry::new(Default::default()),
+        canterlot_hub::machine_info::StatusProjectionTimers {
+            backoff: canterlot_hub::singleton::Backoff {
+                initial: Duration::from_millis(25),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         rx,
     ));
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     let _ = stop.send(true);
     task.await.unwrap();
     let attempts: i64 = sqlx::query_scalar("select last_value from projection_attempts")
@@ -88,7 +97,7 @@ async fn rereview_failing_start_projection_keeps_exponential_backoff() {
         .unwrap();
     assert!(
         (2..=5).contains(&attempts),
-        "projection reconnected {attempts} times in 5 s"
+        "projection reconnected {attempts} times in 0.5 s"
     );
 }
 

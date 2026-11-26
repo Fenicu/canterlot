@@ -742,9 +742,18 @@ async fn singleton_status_retries_failed_initial_projection() {
         .unwrap();
     sqlx::raw_sql("create function fail_initial_status() returns trigger language plpgsql as $$ begin raise exception 'projection_failed'; end $$; create trigger fail_initial_status before update on machines for each row execute function fail_initial_status();").execute(&pool).await.unwrap();
     let (stop, rx) = watch::channel(false);
-    let task = tokio::spawn(canterlot_hub::machine_info::run_status_projection(
+    // Короткие пауза захвата и такт пересчёта: боевые после двух сбоев и потери замка
+    // растут до секунд, а проверяется здесь только сам повтор проекции.
+    let task = tokio::spawn(canterlot_hub::machine_info::run_status_projection_with(
         pool.clone(),
         canterlot_hub::session::Registry::new(Default::default()),
+        canterlot_hub::machine_info::StatusProjectionTimers {
+            backoff: canterlot_hub::singleton::Backoff {
+                initial: Duration::from_millis(25),
+                ..Default::default()
+            },
+            tick: Duration::from_millis(50),
+        },
         rx,
     ));
     tokio::time::sleep(Duration::from_millis(500)).await;

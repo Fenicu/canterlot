@@ -630,35 +630,69 @@ pub async fn run_status_projection(
     registry: Registry,
     shutdown: watch::Receiver<bool>,
 ) {
+    run_status_projection_with(pool, registry, Default::default(), shutdown).await
+}
+
+/// Сроки проекции доступности машин. Боевые значения дают `Default`; тесты сжимают
+/// их, не меняя формы: пауза захвата так же растёт вдвое.
+#[derive(Clone, Copy, Debug)]
+pub struct StatusProjectionTimers {
+    /// Пауза между захватами замка после сбоя.
+    pub backoff: crate::singleton::Backoff,
+    /// Плановый пересчёт доступности помимо изменений сеансов.
+    pub tick: std::time::Duration,
+}
+
+impl Default for StatusProjectionTimers {
+    fn default() -> Self {
+        Self {
+            backoff: Default::default(),
+            tick: std::time::Duration::from_secs(5),
+        }
+    }
+}
+
+pub async fn run_status_projection_with(
+    pool: PgPool,
+    registry: Registry,
+    timers: StatusProjectionTimers,
+    shutdown: watch::Receiver<bool>,
+) {
     let first_acquire = std::sync::atomic::AtomicBool::new(true);
-    crate::singleton::supervise(&pool, "machine_status", shutdown, || async {
-        let first = first_acquire.swap(false, std::sync::atomic::Ordering::Relaxed);
-        if project(
-            &pool,
-            if first { None } else { Some(&registry) },
-            Uuid::now_v7(),
-        )
-        .await
-        .is_err()
-        {
-            tracing::warn!(
-                kind = "machine_status_database",
-                "initial projection failed"
-            );
-            return;
-        }
-        let mut changes = registry.subscribe_changes();
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
-        loop {
-            tokio::select! {_=tick.tick()=>{},_=changes.recv()=>{}}
-            if project_availability(&pool, &registry, Uuid::now_v7())
-                .await
-                .is_err()
+    crate::singleton::supervise_with(
+        &pool,
+        "machine_status",
+        timers.backoff,
+        shutdown,
+        || async {
+            let first = first_acquire.swap(false, std::sync::atomic::Ordering::Relaxed);
+            if project(
+                &pool,
+                if first { None } else { Some(&registry) },
+                Uuid::now_v7(),
+            )
+            .await
+            .is_err()
             {
-                tracing::warn!(kind = "machine_status_database", "projection failed");
+                tracing::warn!(
+                    kind = "machine_status_database",
+                    "initial projection failed"
+                );
+                return;
             }
-        }
-    })
+            let mut changes = registry.subscribe_changes();
+            let mut tick = tokio::time::interval(timers.tick);
+            loop {
+                tokio::select! {_=tick.tick()=>{},_=changes.recv()=>{}}
+                if project_availability(&pool, &registry, Uuid::now_v7())
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(kind = "machine_status_database", "projection failed");
+                }
+            }
+        },
+    )
     .await;
 }
 

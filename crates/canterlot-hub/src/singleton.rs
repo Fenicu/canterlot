@@ -89,9 +89,39 @@ pub fn down_services(pool: &PgPool) -> Vec<&'static str> {
         .unwrap_or_default()
 }
 
+/// Пауза между захватами после сбоя: растёт вдвое от `initial` до `max` и
+/// сбрасывается после минуты здоровой работы.
+#[derive(Clone, Copy, Debug)]
+pub struct Backoff {
+    pub initial: Duration,
+    pub max: Duration,
+}
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self {
+            initial: Duration::from_millis(250),
+            max: Duration::from_secs(30),
+        }
+    }
+}
+
 pub(crate) async fn supervise<F, Fut>(
     pool: &PgPool,
     service: &'static str,
+    shutdown: watch::Receiver<bool>,
+    work: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    supervise_with(pool, service, Backoff::default(), shutdown, work).await
+}
+
+pub(crate) async fn supervise_with<F, Fut>(
+    pool: &PgPool,
+    service: &'static str,
+    pauses: Backoff,
     mut shutdown: watch::Receiver<bool>,
     mut work: F,
 ) where
@@ -107,7 +137,7 @@ pub(crate) async fn supervise<F, Fut>(
         .or_default()
         .insert(service, health.0.clone());
     let options = pool.connect_options();
-    let mut backoff = Duration::from_millis(250);
+    let mut backoff = pauses.initial;
     loop {
         // Захват и остановка гоняют: завершившийся одновременно с ней захват
         // нельзя бросать — замок отпустит только закрытие соединения.
@@ -154,7 +184,7 @@ pub(crate) async fn supervise<F, Fut>(
                     return;
                 }
                 if healthy {
-                    backoff = Duration::from_millis(250);
+                    backoff = pauses.initial;
                 }
                 tracing::warn!(kind = ended, service, "singleton work suspended");
             }
@@ -176,7 +206,7 @@ pub(crate) async fn supervise<F, Fut>(
             _=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>return,
             _=tokio::time::sleep(backoff)=>{},
         }
-        backoff = backoff.saturating_mul(2).min(Duration::from_secs(30));
+        backoff = backoff.saturating_mul(2).min(pauses.max);
     }
 }
 

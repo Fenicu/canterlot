@@ -127,6 +127,8 @@ async fn machine_status_reacquire_preserves_connected_machine_availability() {
     assert_eq!(availability, "available");
 }
 
+const BACKOFF: Duration = Duration::from_millis(125);
+
 #[tokio::test]
 async fn failing_start_projection_backs_off_lock_acquisitions_and_readyz() {
     let pool = canterlot_hub::testkit::db().await;
@@ -159,9 +161,17 @@ async fn failing_start_projection_backs_off_lock_acquisitions_and_readyz() {
     .await
     .unwrap();
     let (stop, rx) = watch::channel(false);
-    let task = tokio::spawn(machine_info::run_status_projection(
+    // Пауза вдвое короче боевой: рост в два раза на попытку тот же, окно 3 с вместо 6 с.
+    let task = tokio::spawn(machine_info::run_status_projection_with(
         pool.clone(),
         Registry::new(Default::default()),
+        canterlot_hub::machine_info::StatusProjectionTimers {
+            backoff: canterlot_hub::singleton::Backoff {
+                initial: BACKOFF,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         rx,
     ));
     let first_pid = tokio::time::timeout(Duration::from_secs(10), async {
@@ -180,7 +190,7 @@ async fn failing_start_projection_backs_off_lock_acquisitions_and_readyz() {
     }
     let mut transitions = Vec::new();
     let mut bad_responses = Vec::new();
-    while start.elapsed() < Duration::from_secs(6) {
+    while start.elapsed() < Duration::from_secs(3) {
         if let Some(pid) = lock_pid(&pool).await {
             backends.insert(pid);
         }
@@ -217,7 +227,7 @@ async fn failing_start_projection_backs_off_lock_acquisitions_and_readyz() {
     );
     assert!(
         (4..=5).contains(&attempts),
-        "projection acquired {attempts} times in 6 s"
+        "projection acquired {attempts} times in 3 s"
     );
     assert!(
         (4..=5).contains(&backends.len()),
@@ -232,7 +242,7 @@ async fn failing_start_projection_backs_off_lock_acquisitions_and_readyz() {
         "readyz cycles were not observed: {transitions:?}"
     );
     for (index, cycle) in ready.windows(2).enumerate() {
-        let minimum = Duration::from_millis(250 * (1 << index));
+        let minimum = BACKOFF * (1u32 << index);
         let elapsed = cycle[1].0 - cycle[0].0;
         assert!(
             elapsed + Duration::from_millis(75) >= minimum,
