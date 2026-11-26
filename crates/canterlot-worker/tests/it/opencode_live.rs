@@ -2100,17 +2100,21 @@ async fn real_retry_of_a_rate_limit_finishes_the_same_turn() {
 #[tokio::test]
 #[ignore = "L2: настоящий opencode, см. заголовок файла"]
 async fn real_child_todo_list_goes_to_the_lane_of_its_call() {
+    // С 2.4.1 вызов `subagent` сразу возвращает «working in the background»,
+    // а родитель делает ещё один запрос, прежде чем отдать ход фону. Второй
+    // ответ отдаём текстом, чтобы родитель закрыл ход, а список задач пришёл
+    // уже от потомка, а не от родителя.
     let stub = Stub::start(vec![
         Reply::tool(
             "subagent",
             json!({"agent": "general", "description": "проба", "prompt": "сделай"}),
         ),
+        Reply::text("готово"),
         Reply::tool(
             "todowrite",
             json!({"todos": [{"content": "дочерний пункт", "status": "in_progress"}]}),
         ),
         Reply::text("готово у потомка"),
-        Reply::text("готово"),
     ])
     .await;
     let mut session = Session::start(&stub, "bypass").await;
