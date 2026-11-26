@@ -42,7 +42,8 @@ Heavy runs on one machine queue through the worker instead of fighting for CPU. 
 
 - Start a server per worktree: `CANTERLOT_TEST_PG_PORT=<port> scripts/test-db.sh up` (container `canterlot-test-pg-<port>`, data in tmpfs). **One port per worktree**: test databases are named by test path, so two checkouts on one server drop each other's databases. Port 55440 is the shared default and 55441 the gate's; pick another, export it for every check, and remove your container when done (`CANTERLOT_TEST_PG_PORT=<port> scripts/test-db.sh down`).
 - `scripts/check.sh` derives `DATABASE_URL` from `CANTERLOT_TEST_PG_PORT`. A bare `cargo` command does not: `.cargo/config.toml` points at 55440, so pass `DATABASE_URL` yourself.
-- A hub or worker test that needs the database is a plain `#[tokio::test]` whose first line is `let pool = canterlot_hub::testkit::db().await;`. It clones a template database that already has all migrations; the clone is dropped when the test thread ends. Only migration and schema tests stay on `#[sqlx::test(migrator = …)]`.
+- A hub or worker test that needs the database is a plain `#[tokio::test]` whose first line is `let pool = canterlot_hub::testkit::db().await;`. It clones a template database that already has all migrations; the clone is dropped when the test thread ends. Only tests that apply migrations themselves (from an empty database or part of the way) stay on `#[sqlx::test(migrator = …)]`; checks of the final schema run on the clone.
+- Setup (clone, install, router) costs more than most checks, so independent cases of one theme share it: `run_cases!` and `Snapshot` in `crates/canterlot-hub/tests/it/support/cases.rs`. A case creates its own owners, machines and conversations; a case that changes the schema or closes the pool stays a separate test.
 - Tests must never touch real user state (config, secrets, worker data): build every path from a temp dir.
 
 ### Flaky tests and the quarantine
