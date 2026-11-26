@@ -485,6 +485,8 @@ fn reply_204() -> Reply {
     }
 }
 
+// ВРЕМЕННО: минимальный прерывающийся ход.
+
 fn text_of(events: &[AdapterEvent], kind: &str) -> Vec<String> {
     let ids: Vec<Uuid> = events
         .iter()
@@ -3577,11 +3579,164 @@ async fn owner_mode_marks_tool_results_that_ran_without_a_prompt() {
 }
 
 // Запрос разрешения снимает удержание без пометки: решал не CLI.
+
+// Режим `ask`: запрос доходит карточкой, ход ждёт решения владельца.
+// Режим `ask`: запрос доходит карточкой, ход ждёт решения владельца.
+/// Запросы разрешений на общем стенде: ходы идут подряд, у каждого свой id запроса,
+/// иначе сервер склеил бы решения. События хода берутся из записи как есть, только
+/// id сессии приводится к стенду. Полный хвост нужен проверкам блоков и фаз.
+fn permission_script(cases: Vec<(Reply, bool)>) -> Script {
+    let template = permission_turn();
+    let capture_session = session_of(&template);
+    let ready_session = session_of(&ready());
+    let message_rec = template
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            Step::Expect { method, path, reply, .. }
+                if method == "POST" && path.ends_with("/prompt") =>
+            {
+                reply
+                    .body
+                    .as_ref()
+                    .and_then(|body| body.pointer("/data/id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let call_rec = template
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::Emit { events } => Some(events.clone()),
+            _ => None,
+        })
+        .flatten()
+        .find(|event| event["type"] == "session.tool.called")
+        .and_then(|event| event["data"]["id"].as_str().map(str::to_owned))
+        .unwrap();
+    let relocate = |value: &Value, message: &str, call: &str| {
+        let text = serde_json::to_string(value).unwrap();
+        let text = text.replace(&capture_session, &ready_session);
+        let text = text.replace(&message_rec, message);
+        let text = text.replace(&call_rec, call);
+        serde_json::from_str(&text).unwrap()
+    };
+    let emits: Vec<Vec<Value>> = template
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::Emit { events } => Some(events.clone()),
+            _ => None,
+        })
+        .collect();
+    let flat: Vec<Value> = emits.into_iter().flatten().collect();
+    let asked_at = flat
+        .iter()
+        .position(|event| event["type"] == "permission.asked")
+        .unwrap();
+    let replied_at = flat
+        .iter()
+        .position(|event| event["type"] == "permission.replied")
+        .unwrap();
+    let asked = flat[asked_at].clone();
+    let prefix = flat[..asked_at].to_vec();
+    let replied = flat[replied_at].clone();
+    let rest = flat[replied_at + 1..].to_vec();
+    let prompt = format!("/api/session/{ready_session}/prompt");
+    let mut script = session_only();
+    for (n, (reply, full_tail)) in cases.into_iter().enumerate() {
+        let request = format!("per_clone{n:03}");
+        let recorded = format!("msg_clone{n:03}");
+        let call = format!("call_clone{n:03}");
+        let relocate = |value: &Value| relocate(value, &recorded, &call);
+        script.steps.push(Step::Expect {
+            method: "POST".into(),
+            path: prompt.clone(),
+            reply: Reply {
+                body: Some(json!({"data": {"id": recorded}})),
+                ..Default::default()
+            },
+            bind: [(recorded.clone(), "/id".to_owned())].into_iter().collect(),
+        });
+        // Ввод виден очереди раньше начала шага, иначе ход сочтут чужим.
+        let mut turn: Vec<Value> = vec![
+            relocate(&json!({"type": "session.inbox.enqueued",
+                "data": {"inboxID": recorded, "sessionID": ready_session}})),
+            relocate(&json!({"type": "session.inbox.delivered",
+                "data": {"inboxID": recorded, "sessionID": ready_session}})),
+        ];
+        turn.extend(prefix.iter().map(|event| relocate(event)));
+        let mut asked = relocate(&asked);
+        asked["data"]["id"] = request.clone().into();
+        turn.push(asked);
+        script.steps.push(Step::Emit { events: turn });
+        script.steps.push(Step::Expect {
+            method: "POST".into(),
+            path: format!("/api/session/{ready_session}/permission/{request}/reply"),
+            reply,
+            bind: Default::default(),
+        });
+        let mut end = Vec::new();
+        let mut replied = relocate(&replied);
+        replied["data"]["requestID"] = request.clone().into();
+        end.push(replied);
+        if full_tail {
+            end.extend(rest.iter().map(|event| relocate(event)));
+        } else {
+            end.push(finish(&ready_session));
+        }
+        script.steps.push(Step::Emit { events: end });
+    }
+    script
+}
+
+// Решения по запросам на общем стенде: карточки открываются по очереди, ответ
+// каждого случая уходит ровно один раз.
 #[tokio::test]
-async fn tool_with_a_permission_prompt_gets_no_mark() {
-    let mut bench = Bench::new(permission_turn());
+async fn permission_decisions_reach_the_server_once() {
+    let ok = || Reply { status: 204, ..Default::default() };
+    let mut bench = Bench::new(permission_script(vec![
+        (ok(), true),   // карточка с полями запроса
+        (ok(), true),   // запрос с промптом без пометки
+        (ok(), false),  // отказ без сообщения
+        (ok(), false),  // отказ с пробелами
+        (ok(), false),  // отказ с текстом
+        (ok(), false),  // повтор решения
+        (Reply { status: 404, body: Some(json!({"_tag": "PermissionNotFoundError", "message": "gone"})), ..Default::default() }, false),
+        (Reply { status: 500, body: Some(json!({"_tag": "InternalError"})), ..Default::default() }, false),
+        (Reply { status: 503, body: Some(json!({"_tag": "InternalError"})), ..Default::default() }, false),
+        (ok(), false),  // отказ мимо владельца
+    ]));
     bench.spec.permission_mode = "ask".into();
     bench.start_ok().await;
+
+    // Запрос доходит карточкой, ход ждёт решения владельца.
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let (request, payload, _) = bench.until_request().await;
+    assert!(request.starts_with("per_"), "{request}");
+    assert_eq!(payload["tool_name"], "shell");
+    assert_eq!(payload["command"], "echo one > one.txt");
+    assert_eq!(payload["agent"], "orchestrator");
+    assert_eq!(payload["deny_also_interrupts"], false);
+    assert!(payload["tool_use_id"].as_str().unwrap().starts_with("call_"));
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::Phase { phase: Phase::AwaitingPermission, .. }
+    ));
+    assert!(bench.replies().is_empty(), "no answer before the owner");
+    assert!(matches!(bench.deliver(&request, &allow()).await, DecisionOutcome::Applied(_)));
+    assert_eq!(bench.replies()[0]["body"], json!({"decision": "once"}));
+    let events = bench.until_finished(input.command_id).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Phase { phase: Phase::RunningTool, .. }
+    )), "the card is gone: {events:?}");
+
+    // Запрос разрешения снимает удержание без пометки: решал не CLI.
     let input = bench.input("x");
     bench.accepted(&input).await;
     let (request, _, mut events) = bench.until_request().await;
@@ -3593,68 +3748,14 @@ async fn tool_with_a_permission_prompt_gets_no_mark() {
     let calls = calls(&events);
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].approved_by, None);
-    bench.close(CloseMode::Graceful).await;
-}
 
-// Режим `ask`: запрос доходит карточкой, ход ждёт решения владельца.
-#[tokio::test]
-async fn permission_request_reaches_the_owner_as_a_card() {
-    let mut bench = Bench::new(permission_turn());
-    bench.spec.permission_mode = "ask".into();
-    bench.start_ok().await;
-    let input = bench.input("x");
-    bench.accepted(&input).await;
-    let (request, payload, _) = bench.until_request().await;
-    assert!(request.starts_with("per_"), "{request}");
-    assert_eq!(payload["tool_name"], "shell");
-    assert_eq!(payload["command"], "echo one > one.txt");
-    assert_eq!(payload["agent"], "orchestrator");
-    assert_eq!(payload["deny_also_interrupts"], false);
-    assert!(
-        payload["tool_use_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("call_")
-    );
-    assert!(matches!(
-        bench.event().await,
-        AdapterEvent::Phase {
-            phase: Phase::AwaitingPermission,
-            ..
-        }
-    ));
-    assert!(bench.replies().is_empty(), "no answer before the owner");
-    assert!(matches!(
-        bench.deliver(&request, &allow()).await,
-        DecisionOutcome::Applied(_)
-    ));
-    // `always` записал бы правило на весь проект, только `once`.
-    assert_eq!(bench.replies()[0]["body"], json!({"decision": "once"}));
-    let events = bench.until_finished(input.command_id).await;
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            AdapterEvent::Phase {
-                phase: Phase::RunningTool,
-                ..
-            }
-        )),
-        "the card is gone: {events:?}"
-    );
-    bench.close(CloseMode::Graceful).await;
-}
-
-// Отказ без сообщения кончает ход, поэтому сообщение есть всегда.
-#[tokio::test]
-async fn deny_always_carries_a_message() {
+    // Отказ без сообщения кончает ход, поэтому сообщение есть всегда.
     for (given, sent) in [
         (None, None),
         (Some("  "), None),
         (Some("Не трогай этот файл"), Some("Не трогай этот файл")),
     ] {
-        let mut bench = Bench::new(permission_turn());
-        bench.spec.permission_mode = "ask".into();
-        bench.start_ok().await;
+        let mark = bench.fake.requests().len();
         let input = bench.input("x");
         bench.accepted(&input).await;
         let (request, ..) = bench.until_request().await;
@@ -3662,23 +3763,18 @@ async fn deny_always_carries_a_message() {
             bench.deliver(&request, &deny(given)).await,
             DecisionOutcome::Applied(_)
         ));
-        let reply = bench.replies().remove(0);
+        bench.until_finished(input.command_id).await;
+        let reply = bench.since(mark).into_iter().find(|r| path_of(r).ends_with("/reply")).unwrap();
         assert_eq!(reply["body"]["decision"], "reject");
         let message = reply["body"]["message"].as_str().unwrap();
         assert!(!message.trim().is_empty());
         if let Some(sent) = sent {
             assert_eq!(message, sent);
         }
-        bench.close(CloseMode::Graceful).await;
     }
-}
 
-// Повтор решения доходит до сервера один раз: запрос живёт только в его памяти.
-#[tokio::test]
-async fn repeated_decision_reaches_the_server_once() {
-    let mut bench = Bench::new(permission_turn());
-    bench.spec.permission_mode = "ask".into();
-    bench.start_ok().await;
+    // Повтор решения доходит до сервера один раз: запрос живёт только в его памяти.
+    let mark = bench.fake.requests().len();
     let input = bench.input("x");
     bench.accepted(&input).await;
     let (request, ..) = bench.until_request().await;
@@ -3690,29 +3786,13 @@ async fn repeated_decision_reaches_the_server_once() {
         panic!("second decision");
     };
     assert_eq!(reason, "request_not_pending");
-    assert_eq!(bench.replies().len(), 1);
-    bench.close(CloseMode::Graceful).await;
-}
+    bench.until_finished(input.command_id).await;
+    assert_eq!(
+        bench.since(mark).into_iter().filter(|r| path_of(r).ends_with("/reply")).count(),
+        1
+    );
 
-#[tokio::test]
-async fn decision_on_a_settled_request_is_not_applied() {
-    let mut script = permission_turn();
-    let position = script
-        .steps
-        .iter()
-        .position(|step| step.expected_path().is_some_and(|p| p.ends_with("/reply")))
-        .unwrap();
-    let Step::Expect { reply, .. } = &mut script.steps[position] else {
-        unreachable!();
-    };
-    *reply = Reply {
-        status: 404,
-        body: Some(json!({"_tag": "PermissionNotFoundError", "message": "gone"})),
-        ..Default::default()
-    };
-    let mut bench = Bench::new(script);
-    bench.spec.permission_mode = "ask".into();
-    bench.start_ok().await;
+    // Решение по закрытому запросу не применяется.
     let input = bench.input("x");
     bench.accepted(&input).await;
     let (request, ..) = bench.until_request().await;
@@ -3720,27 +3800,12 @@ async fn decision_on_a_settled_request_is_not_applied() {
         panic!("404 is a proven miss");
     };
     assert_eq!(reason, "request_not_pending");
-    bench.close(CloseMode::Graceful).await;
-}
+    bench.until_finished(input.command_id).await;
 
-// Доставку не доказать: исход неизвестен, повторной отправки нет.
-#[tokio::test]
-async fn lost_answer_is_undetermined_and_never_resent() {
+    // Потерянные ответы не пересылаются: исход неизвестен оба раза.
     for status in [500, 503] {
-        let mut script = permission_turn();
-        let position = script
-            .steps
-            .iter()
-            .position(|step| step.expected_path().is_some_and(|p| p.ends_with("/reply")))
-            .unwrap();
-        let Step::Expect { reply, .. } = &mut script.steps[position] else {
-            unreachable!();
-        };
-        reply.status = status;
-        reply.body = Some(json!({"_tag": "InternalError"}));
-        let mut bench = Bench::new(script);
-        bench.spec.permission_mode = "ask".into();
-        bench.start_ok().await;
+        let _ = status;
+        let mark = bench.fake.requests().len();
         let input = bench.input("x");
         bench.accepted(&input).await;
         let (request, ..) = bench.until_request().await;
@@ -3753,10 +3818,34 @@ async fn lost_answer_is_undetermined_and_never_resent() {
             DecisionOutcome::NotApplied(_)
         ));
         bench.adapter.refuse_request(&request, "turn ended").await;
-        assert_eq!(bench.replies().len(), 1);
-        bench.close(CloseMode::Graceful).await;
+        bench.until_finished(input.command_id).await;
+        assert_eq!(
+            bench.since(mark).into_iter().filter(|r| path_of(r).ends_with("/reply")).count(),
+            1
+        );
     }
+
+    // Карточка не показана: сервер получает отказ с текстом, ход идёт дальше.
+    let mark = bench.fake.requests().len();
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let (request, ..) = bench.until_request().await;
+    bench.adapter.refuse_request(&request, "Request is too large to show to the owner").await;
+    bench.until_finished(input.command_id).await;
+    let replies: Vec<_> = bench.since(mark).into_iter().filter(|r| path_of(r).ends_with("/reply")).collect();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["body"]["decision"], "reject");
+    assert_eq!(replies[0]["body"]["message"], "Request is too large to show to the owner");
+    bench.close(CloseMode::Graceful).await;
 }
+
+
+// Отказ без сообщения кончает ход, поэтому сообщение есть всегда.
+
+// Повтор решения доходит до сервера один раз: запрос живёт только в его памяти.
+
+
+// Доставку не доказать: исход неизвестен, повторной отправки нет.
 
 // Запрос живёт в памяти сервера: новый адаптер на той же сессии его не знает.
 #[tokio::test]
@@ -3874,28 +3963,6 @@ async fn deny_closes_the_siblings_from_the_replied_events() {
 }
 
 // Карточка не показана или уже закрыта: сервер получает отказ с текстом, ход идёт дальше.
-#[tokio::test]
-async fn refusal_without_the_owner_carries_a_message() {
-    let mut bench = Bench::new(permission_turn());
-    bench.spec.permission_mode = "ask".into();
-    bench.start_ok().await;
-    let input = bench.input("x");
-    bench.accepted(&input).await;
-    let (request, ..) = bench.until_request().await;
-    bench
-        .adapter
-        .refuse_request(&request, "Request is too large to show to the owner")
-        .await;
-    bench.until_finished(input.command_id).await;
-    let replies = bench.replies();
-    assert_eq!(replies.len(), 1);
-    assert_eq!(replies[0]["body"]["decision"], "reject");
-    assert_eq!(
-        replies[0]["body"]["message"],
-        "Request is too large to show to the owner"
-    );
-    bench.close(CloseMode::Graceful).await;
-}
 
 // Вне хода карточку показать некому: отказ сразу, иначе вызов ждал бы вечно.
 #[tokio::test]
@@ -6813,7 +6880,8 @@ async fn failed_steer_reconciliation_leaves_the_running_turn_alone() {
         "failed POST reconciles later: {outcome:?}"
     );
     // Гоняем события, пока сверка не уляжется: конца чужого хода быть не должно.
-    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    // Сверка опросами занимает до 3,5 с, дальше тишина означает её конец.
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
     let mut stray_finish = false;
     while std::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
