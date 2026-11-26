@@ -14,6 +14,7 @@ use canterlot_worker::{
             DiscoverError, OpenCodeAdapter,
             catalog::ModelEntry,
             discover, discover_within,
+            permissions::PermissionMode,
             replay::{Reply, Script, Step, evidence_path},
         },
     },
@@ -968,9 +969,11 @@ fn preset_text_stays_out_of_debug_output() {
     }
 }
 
-#[tokio::test]
-async fn modes_become_session_rules() {
-    for (mode, rules) in [
+/// Правила мод в сессии: точное содержимое проверяется без запуска сервера,
+/// применение — одним запуском.
+fn expected_session_rules() -> Vec<(&'static str, Value)> {
+    vec![
+
         ("owner", Value::Null),
         (
             "read_only",
@@ -1040,27 +1043,27 @@ async fn modes_become_session_rules() {
                 {"action": "canterlot_runners_list", "resource": "*", "effect": "allow"},
             ]),
         ),
-    ] {
-        let mut bench = Bench::new(session_only());
-        bench.spec.permission_mode = mode.into();
-        bench.start_ok().await;
-        let requests = bench.fake.requests();
-        let create = find(&requests, "POST", "/api/session").unwrap();
-        assert_eq!(create["body"]["permissions"], rules, "{mode}");
-        bench.close(CloseMode::Graceful).await;
-    }
+        ]
 }
 
-#[tokio::test]
-async fn session_tools_follow_the_mode() {
+#[test]
+fn permission_modes_shape_the_session_rules() {
+    for (mode, rules) in expected_session_rules() {
+        // Создание сессии кладёт ruleset(): у владельца ключа нет вовсе.
+        assert_eq!(
+            PermissionMode::parse(mode).unwrap().ruleset().unwrap_or(Value::Null),
+            rules,
+            "{mode}"
+        );
+    }
+    // В OpenCode действует последнее совпавшее правило.
     for (mode, default, read_like) in [("ask", "ask", "allow"), ("read_only", "deny", "allow")] {
-        let mut bench = Bench::new(session_only());
-        bench.spec.permission_mode = mode.into();
-        bench.start_ok().await;
-        let requests = bench.fake.requests();
-        let create = find(&requests, "POST", "/api/session").unwrap();
-        let rules = create["body"]["permissions"].as_array().unwrap().clone();
-        // В OpenCode действует последнее совпавшее правило.
+        let rules = PermissionMode::parse(mode)
+            .unwrap()
+            .session_rules()
+            .as_array()
+            .unwrap()
+            .clone();
         let effect = |tool: &str| {
             rules
                 .iter()
@@ -1094,8 +1097,23 @@ async fn session_tools_follow_the_mode() {
         ] {
             assert_eq!(effect(tool), default, "{mode} {tool}");
         }
-        bench.close(CloseMode::Graceful).await;
     }
+}
+
+#[tokio::test]
+async fn session_create_carries_the_mode_rules() {
+    let mut bench = Bench::new(session_only());
+    bench.spec.permission_mode = "ask".into();
+    bench.start_ok().await;
+    let requests = bench.fake.requests();
+    let create = find(&requests, "POST", "/api/session").unwrap();
+    let rules = expected_session_rules()
+        .into_iter()
+        .find(|(mode, _)| *mode == "ask")
+        .unwrap()
+        .1;
+    assert_eq!(create["body"]["permissions"], rules);
+    bench.close(CloseMode::Graceful).await;
 }
 
 #[tokio::test]
