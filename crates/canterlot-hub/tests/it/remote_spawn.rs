@@ -453,7 +453,7 @@ impl Api {
 }
 
 #[tokio::test]
-async fn the_owner_flips_the_switch_over_http_and_the_machine_view_shows_it() {
+async fn the_owner_flips_the_switch_over_http_and_only_the_owner_can() {
     let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool.clone()).await;
     let machine = Uuid::now_v7();
@@ -494,12 +494,8 @@ async fn the_owner_flips_the_switch_over_http_and_the_machine_view_shows_it() {
         api.put(Uuid::now_v7(), json!(true)).await.status.as_u16(),
         404
     );
-}
 
-#[tokio::test]
-async fn the_switch_endpoint_needs_the_owner_session() {
-    let pool = canterlot_hub::testkit::db().await;
-    let api = Api::new(pool.clone()).await;
+    // ── Без сеанса владельца выключатель не меняется ──
     let machine = Uuid::now_v7();
     sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'machine-b')")
         .bind(machine)
@@ -634,7 +630,7 @@ async fn without_machine_or_with_the_callers_own_nothing_changes() {
 }
 
 #[tokio::test]
-async fn remote_spawn_is_refused_without_a_workdir_or_outside_the_roots() {
+async fn remote_spawn_refuses_a_bad_workdir_domain_or_domainless_caller() {
     let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
@@ -649,13 +645,8 @@ async fn remote_spawn_is_refused_without_a_workdir_or_outside_the_roots() {
         "/tmp/w лежит в корнях A, но не в корнях B"
     );
     assert!(f.children().await.is_empty());
-}
 
-#[tokio::test]
-async fn remote_spawn_checks_the_domain_on_the_target_machine() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.switch(true).await;
+    // ── Домен проверяется по рабочему каталогу цели ──
     sqlx::query(
         "update machines set capabilities=array['pilot_v1','memory_scope_v1'],
            memory_work_roots='[\"/tmp/b/work\"]' where id=$1",
@@ -676,20 +667,16 @@ async fn remote_spawn_checks_the_domain_on_the_target_machine() {
             .await
             .unwrap();
     assert_eq!(domain.as_deref(), Some("personal"));
-}
 
-#[tokio::test]
-async fn a_domain_less_caller_cannot_spawn_remotely() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.switch(true).await;
+    // ── Без домена у вызывающего удалённый запуск запрещён ──
+    let children = f.children().await.len();
     sqlx::query("update conversations set memory_domain=null where id=$1")
         .bind(f.parent)
         .execute(&f.pool)
         .await
         .unwrap();
     assert_eq!(code(f.spawn(remote_args()).await), Code::DomainMismatch);
-    assert!(f.children().await.is_empty());
+    assert_eq!(f.children().await.len(), children, "nothing was created");
 }
 
 #[tokio::test]
@@ -757,7 +744,7 @@ async fn switch_off_refuses_a_fresh_remote_spawn_and_creates_nothing() {
 }
 
 #[tokio::test]
-async fn an_approved_but_unstarted_remote_spawn_is_refused_after_switching_off() {
+async fn an_approved_remote_spawn_obeys_the_switch_and_starts_on_b() {
     let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
@@ -791,12 +778,8 @@ async fn an_approved_but_unstarted_remote_spawn_is_refused_after_switching_off()
             .any(|note| note.contains("remote_work_disabled")),
         "{notes:?}"
     );
-}
 
-#[tokio::test]
-async fn an_approved_remote_spawn_starts_on_b_not_on_the_parents_machine() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
+    // ── Одобренная карточка при включённом выключателе стартует на B ──
     f.switch(true).await;
     let mut outside = remote_args();
     outside["model"] = json!(OUTSIDE);
@@ -828,7 +811,7 @@ async fn a_replayed_remote_call_returns_the_same_answer_and_starts_nothing_twice
 }
 
 #[tokio::test]
-async fn an_offline_target_queues_with_its_reason_and_starts_after_it_returns() {
+async fn an_offline_target_queues_and_starts_after_it_returns() {
     let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(pool, false).await;
     f.switch(true).await;
@@ -846,13 +829,13 @@ async fn an_offline_target_queues_with_its_reason_and_starts_after_it_returns() 
     let mut no_queue = remote_args();
     no_queue["queue"] = json!(false);
     assert_eq!(code(f.spawn(no_queue).await), Code::MachineUnavailable);
-}
 
-#[tokio::test]
-async fn a_queued_remote_spawn_survives_a_hub_restart_and_starts_on_b() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::with(pool, false).await;
-    f.switch(true).await;
+    // ── Очередь переживает перезапуск хаба и запускает на B ──
+    sqlx::query("delete from spawn_queue where parent_id=$1")
+        .bind(f.parent)
+        .execute(&f.pool)
+        .await
+        .unwrap();
     f.spawn(remote_args()).await.unwrap();
     // «Перезапуск»: новый реестр с обеими машинами; очередь берётся только из базы.
     let registry = Registry::new(Default::default());
@@ -870,7 +853,7 @@ async fn a_queued_remote_spawn_survives_a_hub_restart_and_starts_on_b() {
 }
 
 #[tokio::test]
-async fn a_queued_remote_spawn_is_refused_when_the_switch_goes_off_before_the_start() {
+async fn a_queued_remote_spawn_is_refused_after_off_or_expiry() {
     let pool = canterlot_hub::testkit::db().await;
     let f = Fx::with(pool, false).await;
     f.switch(true).await;
@@ -898,14 +881,13 @@ async fn a_queued_remote_spawn_is_refused_when_the_switch_goes_off_before_the_st
         "{:?}",
         f.queue_notes().await
     );
-}
 
-/// Выключатель, выключенный и включённый обратно до старта, не оживляет ожидавший запуск:
-/// он запомнил прежнее поколение допуска.
-#[tokio::test]
-async fn a_queued_remote_spawn_does_not_revive_after_off_and_on() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::with(pool, false).await;
+    // ── Выключение и включение обратно не оживляют ожидавший запуск ──
+    sqlx::query("delete from spawn_queue where parent_id=$1")
+        .bind(f.parent)
+        .execute(&f.pool)
+        .await
+        .unwrap();
     f.switch(true).await;
     f.spawn(remote_args()).await.unwrap();
     f.switch(false).await;
@@ -927,6 +909,34 @@ async fn a_queued_remote_spawn_does_not_revive_after_off_and_on() {
     assert_eq!(state, "failed", "{result:?}");
     assert_eq!(result.unwrap()["code"], "remote_work_disabled");
     assert!(f.children().await.is_empty());
+
+    // ── Срок ожидания истёк: элемент истекает с запиской родителю ──
+    sqlx::query("delete from spawn_queue where parent_id=$1")
+        .bind(f.parent)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.switch(true).await;
+    f.spawn(remote_args()).await.unwrap();
+    sqlx::query("update spawn_queue set not_before=now()-interval '2 hours',expires_at=now()-interval '1 second'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.dequeue().await;
+    let state: String = sqlx::query_scalar("select state from spawn_queue where parent_id=$1")
+        .bind(f.parent)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "expired");
+    assert!(
+        f.queue_notes()
+            .await
+            .iter()
+            .any(|note| note.contains("expired")),
+        "{:?}",
+        f.queue_notes().await
+    );
 }
 
 #[tokio::test]
@@ -953,33 +963,6 @@ async fn an_approved_remote_spawn_does_not_revive_after_off_and_on() {
     );
     // Новая заявка после повторного включения проходит.
     f.started(remote_args()).await;
-}
-
-#[tokio::test]
-async fn an_offline_queued_remote_spawn_expires_with_a_note_to_the_parent() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::with(pool, false).await;
-    f.switch(true).await;
-    f.spawn(remote_args()).await.unwrap();
-    sqlx::query("update spawn_queue set not_before=now()-interval '2 hours',expires_at=now()-interval '1 second'")
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    f.dequeue().await;
-    let state: String = sqlx::query_scalar("select state from spawn_queue where parent_id=$1")
-        .bind(f.parent)
-        .fetch_one(&f.pool)
-        .await
-        .unwrap();
-    assert_eq!(state, "expired");
-    assert!(
-        f.queue_notes()
-            .await
-            .iter()
-            .any(|note| note.contains("expired")),
-        "{:?}",
-        f.queue_notes().await
-    );
 }
 
 #[tokio::test]
@@ -1054,7 +1037,7 @@ async fn an_isolated_remote_child_gets_its_worktree_from_the_target_machine() {
 }
 
 #[tokio::test]
-async fn sessions_list_rows_carry_the_machine_name() {
+async fn sessions_list_names_the_machine_and_accept_stops_the_remote_child() {
     let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.switch(true).await;
@@ -1071,13 +1054,8 @@ async fn sessions_list_rows_carry_the_machine_name() {
     };
     assert_eq!(name_of(child), "machine-b");
     assert_eq!(name_of(f.parent), "synthetic");
-}
 
-#[tokio::test]
-async fn accept_stops_a_remote_child_on_its_own_machine() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.switch(true).await;
+    // ── Принятие останавливает ребёнка на его собственной машине ──
     let mut isolated = remote_args();
     isolated["isolated"] = json!(true);
     let (child, _) = f.started(isolated).await;
