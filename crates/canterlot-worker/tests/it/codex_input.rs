@@ -8,10 +8,11 @@ use canterlot_worker::adapter::{
         events::{Translated, Translator},
         input::{
             CurrentSettings, INTERRUPT_TIMEOUT, Outbox, PROOF_KIND_HISTORY, PROOF_KIND_MESSAGE,
-            background_terminal_terminate_params, background_terminals_list_params,
+            PendingInstructions, background_terminal_terminate_params,
+            background_terminals_list_params, build_turn_request_with_instructions,
             build_turn_start, build_turn_steer, error_rejection, history_contains,
-            history_lookup_params, interrupt_params, model_entries, terminals_to_terminate,
-            threshold_note, validate_settings,
+            history_lookup_params, instructions_block, interrupt_params, model_entries,
+            terminals_to_terminate, threshold_note, validate_settings,
         },
         process::{AppServerProcess, LaunchSpec},
         rpc::{Incoming, RpcClient, RpcError},
@@ -145,6 +146,7 @@ fn turn_start_matches_recorded_request() {
         &current(),
         &empty_owner(),
         None,
+        None,
     )
     .unwrap();
     let recorded = evidence_data("start_stream", 18)["params"].clone();
@@ -177,6 +179,7 @@ async fn delivery_is_proven_by_client_id_echo_not_by_response() {
         &tx(command_id(), 1, "hi"),
         &current(),
         &empty_owner(),
+        None,
         None,
     )
     .unwrap();
@@ -296,6 +299,7 @@ fn retry_without_history_match_is_sent_once() {
         &current(),
         &empty_owner(),
         None,
+        None,
     )
     .unwrap();
     assert_eq!(params["clientUserMessageId"], command.to_string());
@@ -316,7 +320,8 @@ fn attachments_add_paths_and_local_images() {
         local_file(&pdf, "doc.pdf", "application/pdf", 4, false),
         local_file(&big, "big.png", "image/png", 25 * 1024 * 1024, true),
     ];
-    let params = build_turn_start("thread-main", &t, &current(), &empty_owner(), None).unwrap();
+    let params =
+        build_turn_start("thread-main", &t, &current(), &empty_owner(), None, None).unwrap();
     let input = params["input"].as_array().unwrap();
     assert_eq!(input.len(), 2);
     assert_eq!(input[0]["type"], "text");
@@ -355,7 +360,7 @@ fn settings_become_turn_start_overrides() {
             permission_mode: mode.map(str::to_owned),
             instructions: None,
         });
-        build_turn_start("thread-main", &t, &current(), &owner, None).unwrap()
+        build_turn_start("thread-main", &t, &current(), &owner, None, None).unwrap()
     };
     assert_eq!(
         change(Some("gpt-6-luna"), None, None)["model"],
@@ -385,6 +390,7 @@ fn settings_become_turn_start_overrides() {
         &tx(command_id(), 1, "Hi."),
         &current(),
         &owner,
+        None,
         None,
     )
     .unwrap();
@@ -645,4 +651,80 @@ fn steer_params_carry_text_images_and_no_settings() {
     let input = params["input"].as_array().unwrap();
     assert!(input.iter().any(|block| block["type"] == "text"));
     assert!(input.iter().any(|block| block["type"] == "localImage"));
+    // Вливка — часть уже начатого хода: блок новых инструкций ждёт turn/start.
+    let text = input.iter().find(|block| block["type"] == "text").unwrap()["text"]
+        .as_str()
+        .unwrap();
+    assert!(text.starts_with("send now"), "{text}");
+    assert!(!text.contains("<canterlot-instructions>"), "{text}");
+}
+
+#[test]
+fn instructions_block_goes_before_the_limit_note_and_owner_text() {
+    let block = instructions_block("[canterlot] preset changed\nPRESET-TEXT");
+    let params = build_turn_start(
+        "thread-main",
+        &tx(command_id(), 1, "owner words"),
+        &current(),
+        &empty_owner(),
+        Some("[canterlot] Weekly Codex limit: 80 % used."),
+        Some(&block),
+    )
+    .unwrap();
+    assert_eq!(
+        params["input"][0]["text"],
+        format!("{block}\n\n[canterlot] Weekly Codex limit: 80 % used.\n\nowner words")
+    );
+}
+
+#[test]
+fn block_is_deferred_when_the_joined_text_would_exceed_the_limit() {
+    use canterlot_proto::limits::MAX_INPUT_TEXT_BYTES;
+    let block = instructions_block("[canterlot] preset changed\nPRESET-TEXT");
+    // Слова владельца сами по себе влезают, вместе с блоком — уже нет.
+    let big = "x".repeat(MAX_INPUT_TEXT_BYTES - 8);
+    let (request, block_sent) = build_turn_request_with_instructions(
+        "thread-main",
+        &tx(command_id(), 1, &big),
+        &current(),
+        &empty_owner(),
+        None,
+        Some(&block),
+    )
+    .unwrap();
+    assert!(!block_sent, "block waits for a turn with room");
+    assert_eq!(request.params["input"][0]["text"], big);
+
+    // Слишком длинный ввод остаётся отказом: блок тут ни при чём.
+    let too_big = "x".repeat(MAX_INPUT_TEXT_BYTES + 1);
+    let error = build_turn_request_with_instructions(
+        "thread-main",
+        &tx(command_id(), 1, &too_big),
+        &current(),
+        &empty_owner(),
+        None,
+        Some(&block),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("input_too_long"), "{error}");
+}
+
+#[test]
+fn history_dedupe_ignores_the_instructions_block_text() {
+    // Сверка повтора идёт по clientId, а не по тексту: блок в истории не мешает.
+    let result = json!({"data": [{"id": "turn-1", "status": "completed", "items": [
+        {"type": "userMessage", "clientId": "cmd-with-block", "content": [
+            {"type": "text", "text": "<canterlot-instructions>\n[canterlot] note\nPRESET\n</canterlot-instructions>\n\nowner"}]}
+    ]}]});
+    assert_eq!(
+        history_contains(&result, "cmd-with-block").as_deref(),
+        Some("turn-1")
+    );
+}
+
+#[test]
+fn pending_instructions_debug_hides_the_preset_text() {
+    let pending = PendingInstructions::new("[canterlot] note\nSECRET-PRESET-TEXT");
+    let debug = format!("{pending:?}");
+    assert!(!debug.contains("SECRET-PRESET-TEXT"), "{debug}");
 }

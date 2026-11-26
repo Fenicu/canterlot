@@ -15,7 +15,7 @@ pub mod version;
 use self::{
     events::{Translated, Translator, TurnErrorInfo, TurnStatus},
     home::{CodexHome, HomeError},
-    input::{CurrentSettings, ModelEntry, Outbox, model_entries},
+    input::{CurrentSettings, ModelEntry, Outbox, PendingInstructions, model_entries},
     limits::{CrunchContext, LimitTracker, ReachedDecision},
     process::{AppServerProcess, LaunchSpec, StdoutLine},
     requests::{Intake, Requests, Resolved},
@@ -168,6 +168,9 @@ pub struct CodexAdapter {
     effort: Option<String>,
     workdir: PathBuf,
     instructions: InstructionSpec,
+    /// Блок новых инструкций, ждущий следующего turn/start: на 0.172.0
+    /// `thread/resume` поле `developerInstructions` не применяет.
+    pending_instructions: Option<PendingInstructions>,
     codex_home: Option<CodexHome>,
     /// Делегированная сессия: дом без конфига MCP владельца, без приложений и плагинов.
     isolate_mcp: bool,
@@ -281,6 +284,7 @@ impl CodexAdapter {
                 title: String::new(),
             },
             codex_home: None,
+            pending_instructions: None,
             isolate_mcp: false,
             delegate_mcp: Vec::new(),
             delegate_mcp_kept: Vec::new(),
@@ -650,6 +654,8 @@ impl CodexAdapter {
                 } else if let Some(command_id) = command
                     && self.unconfirmed.remove(&command_id)
                 {
+                    // Позднее эхо доказало приём: блок инструкций доехал.
+                    self.settle_pending_instructions(command_id);
                     self.events
                         .push_back(AdapterEvent::InputAccepted { command_id });
                 }
@@ -1365,6 +1371,9 @@ impl CodexAdapter {
                 self.mode = mode;
                 self.effort = effort;
                 self.instructions = next;
+                // 0.172.0 применяет developerInstructions только на thread/start:
+                // новые инструкции доедут блоком в следующем ходе.
+                self.pending_instructions = Some(PendingInstructions::new(&dev));
                 self.codex_home = new_home;
                 self.events.push_back(AdapterEvent::CliRestarted {
                     cli_pid: started.0,
@@ -1596,6 +1605,17 @@ impl CodexAdapter {
         self.turn_items.clear();
     }
 
+    // Ход принят: если он нёс блок новых инструкций, блок доехал до модели.
+    fn settle_pending_instructions(&mut self, command_id: Uuid) {
+        if self
+            .pending_instructions
+            .as_ref()
+            .is_some_and(|pending| pending.is_carried_by(command_id))
+        {
+            self.pending_instructions = None;
+        }
+    }
+
     async fn deliver_decision_inner(
         &mut self,
         request_id: &str,
@@ -1670,6 +1690,7 @@ impl CodexAdapter {
                 // turn/start должен нести их, а не прежние.
                 if let Some(pending) = self.pending_turn.take() {
                     self.apply_settings_override(pending.settings.as_ref());
+                    self.settle_pending_instructions(pending.command_id);
                 }
             }
             return;
@@ -1681,6 +1702,8 @@ impl CodexAdapter {
         match accepted {
             Some(Some(turn_id)) => {
                 self.apply_settings_override(pending.settings.as_ref());
+                // Поздний ответ turn/start тоже доказывает, что ход с вводом пошёл.
+                self.settle_pending_instructions(pending.command_id);
                 if self.outbox.take_adopted(&turn_id) {
                     return;
                 }
@@ -1829,6 +1852,8 @@ impl CodexAdapter {
                         },
                     );
                 }
+                // Ввод уже принят: блок новых инструкций, если он был в нём, доехал.
+                self.settle_pending_instructions(input.command_id);
                 return TransmitOutcome::Accepted(Proof {
                     command_id: input.command_id,
                     kind: input::PROOF_KIND_HISTORY,
@@ -1836,14 +1861,19 @@ impl CodexAdapter {
             }
         }
         let note = input::threshold_note(self.limits.snapshot().weekly, &mut self.last_noted);
-        let request = match input::build_turn_request(
+        let block = self
+            .pending_instructions
+            .as_ref()
+            .map(|pending| pending.block().to_owned());
+        let (request, block_sent) = match input::build_turn_request_with_instructions(
             &self.thread_id(),
             input,
             &self.current_settings(),
             &self.owner,
             note.as_deref(),
+            block.as_deref(),
         ) {
-            Ok(request) => request,
+            Ok(built) => built,
             Err(error) => {
                 return TransmitOutcome::Rejected(
                     if error.to_string().contains("input_too_long") {
@@ -1855,6 +1885,10 @@ impl CodexAdapter {
                 );
             }
         };
+        // Блок мог не уехать: ввод владельца важнее, блок ждёт следующего хода.
+        if block_sent && let Some(pending) = self.pending_instructions.as_mut() {
+            pending.carry(input.command_id);
+        }
         let (id, message) = self.rpc.request("turn/start", request.params);
         // До записи: turn/started и userMessage могут обогнать ответ.
         self.proof_for = Some(input.command_id);
@@ -1874,6 +1908,7 @@ impl CodexAdapter {
             // pending_turn остаётся: поздний ответ разберёт settle_late_turn.
             self.proof_for = None;
             if self.proof_seen {
+                self.settle_pending_instructions(input.command_id);
                 return TransmitOutcome::Accepted(Proof {
                     command_id: input.command_id,
                     kind: input::PROOF_KIND_MESSAGE,
@@ -1911,6 +1946,7 @@ impl CodexAdapter {
         loop {
             if self.proof_seen {
                 self.proof_for = None;
+                self.settle_pending_instructions(input.command_id);
                 return TransmitOutcome::Accepted(Proof {
                     command_id: input.command_id,
                     kind: input::PROOF_KIND_MESSAGE,

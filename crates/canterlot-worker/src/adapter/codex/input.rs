@@ -168,18 +168,83 @@ impl fmt::Debug for TurnRequest {
     }
 }
 
-pub fn build_turn_request(
+/// Маркеры служебного блока инструкций: модель отличает его от слов владельца.
+pub const INSTRUCTIONS_OPEN: &str = "<canterlot-instructions>";
+pub const INSTRUCTIONS_CLOSE: &str = "</canterlot-instructions>";
+
+/// Обернуть текст `compose_developer_instructions` в служебный блок.
+pub fn instructions_block(composed: &str) -> String {
+    format!("{INSTRUCTIONS_OPEN}\n{composed}\n{INSTRUCTIONS_CLOSE}")
+}
+
+/// Блок инструкций, ждущий следующего `turn/start`. `command_id` — ход, в чей
+/// ввод блок уже попал: только принятие этого хода снимает блок. Текст пресета —
+/// данные сообщения, `Debug` показывает лишь размер.
+pub struct PendingInstructions {
+    block: String,
+    command_id: Option<Uuid>,
+}
+
+impl PendingInstructions {
+    pub fn new(composed: &str) -> Self {
+        Self {
+            block: instructions_block(composed),
+            command_id: None,
+        }
+    }
+
+    pub fn block(&self) -> &str {
+        &self.block
+    }
+
+    /// Блок попал в `turn/start` этой команды.
+    pub fn carry(&mut self, command_id: Uuid) {
+        self.command_id = Some(command_id);
+    }
+
+    pub fn is_carried_by(&self, command_id: Uuid) -> bool {
+        self.command_id == Some(command_id)
+    }
+}
+
+impl fmt::Debug for PendingInstructions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingInstructions")
+            .field("block_bytes", &self.block.len())
+            .field("carried", &self.command_id.is_some())
+            .finish()
+    }
+}
+
+/// Собрать `turn/start`, поставив блок инструкций первым, затем пометку лимита и
+/// слова владельца. Если вместе с блоком текст не влезает в предел, ввод важнее:
+/// блок откладывается до следующего хода, а `bool` говорит, уехал ли он.
+pub fn build_turn_request_with_instructions(
     thread_id: &str,
     t: &Transmission,
     current: &CurrentSettings,
     owner: &OwnerDefaults,
     note: Option<&str>,
-) -> std::io::Result<TurnRequest> {
-    Ok(TurnRequest {
-        params: build_turn_start(thread_id, t, current, owner, note)?,
-        command_id: t.command_id,
-        files: t.files.clone(),
-    })
+    block: Option<&str>,
+) -> std::io::Result<(TurnRequest, bool)> {
+    let build = |block: Option<&str>| {
+        build_turn_start(thread_id, t, current, owner, note, block).map(|params| TurnRequest {
+            params,
+            command_id: t.command_id,
+            files: t.files.clone(),
+        })
+    };
+    match build(block) {
+        Ok(request) => Ok((request, block.is_some())),
+        Err(error) if block.is_some() && is_input_too_long(&error) => {
+            build(None).map(|request| (request, false))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_input_too_long(error: &std::io::Error) -> bool {
+    error.to_string().contains("input_too_long")
 }
 
 pub fn build_turn_start(
@@ -188,8 +253,13 @@ pub fn build_turn_start(
     current: &CurrentSettings,
     owner: &OwnerDefaults,
     note: Option<&str>,
+    block: Option<&str>,
 ) -> std::io::Result<Value> {
     let mut parts = Vec::new();
+    // Блок инструкций идёт раньше пометки лимита и слов владельца.
+    if let Some(block) = block {
+        parts.push(block.to_owned());
+    }
     if let Some(note) = note {
         parts.push(note.to_owned());
     }

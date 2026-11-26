@@ -117,6 +117,8 @@ for line in sys.stdin:
         emit({'id': i, 'result': config})
     elif m == 'model/list':
         emit({'id': i, 'result': models})
+    elif m == 'thread/turns/list':
+        emit({'id': i, 'result': {'data': []}})
     elif m in ('thread/start', 'thread/resume'):
         if m == 'thread/resume' and (d / 'resume-hang-once').exists() and not (d / 'hung').exists():
             # Сервер отвечает ошибкой и виснет, не реагируя на EOF stdin.
@@ -139,15 +141,22 @@ for line in sys.stdin:
             t['thread']['cliVersion'] = '0.164.0'
             emit({'id': i, 'result': t})
     elif m == 'turn/start':
+        if (d / 'fail-turn-once').exists() and not (d / 'turn-failed').exists():
+            (d / 'turn-failed').write_text('1')
+            emit({'id': i, 'error': {'code': -32000, 'message': 'rejected'}})
+            continue
         turn_no += 1
         tid = f"turn-{pid}-{turn_no}"
         t = p.get('threadId'); cid = p.get('clientUserMessageId')
         emit({'id': i, 'result': {'turn': {'id': tid, 'status': 'inProgress'}}})
-        emit({'method': 'item/started', 'params': {'threadId': t, 'turnId': tid,
-            'item': {'id': 'u', 'type': 'userMessage', 'clientId': cid, 'content': []}}})
-        emit({'method': 'item/completed', 'params': {'threadId': t, 'turnId': tid,
-            'completedAtMs': 1,
-            'item': {'id': 'u', 'type': 'userMessage', 'clientId': cid, 'content': []}}})
+        if (d / 'drop-echo-once').exists() and not (d / 'echo-dropped').exists():
+            (d / 'echo-dropped').write_text('1')
+        else:
+            emit({'method': 'item/started', 'params': {'threadId': t, 'turnId': tid,
+                'item': {'id': 'u', 'type': 'userMessage', 'clientId': cid, 'content': []}}})
+            emit({'method': 'item/completed', 'params': {'threadId': t, 'turnId': tid,
+                'completedAtMs': 1,
+                'item': {'id': 'u', 'type': 'userMessage', 'clientId': cid, 'content': []}}})
         emit({'method': 'item/started', 'params': {'threadId': t, 'turnId': tid,
             'item': {'id': 'a', 'type': 'agentMessage', 'text': f'TURN-{turn_no}'}}})
         emit({'method': 'item/completed', 'params': {'threadId': t, 'turnId': tid,
@@ -317,6 +326,60 @@ impl PresetHarness {
             .filter(|v| v.get("method").and_then(Value::as_str) == Some(method))
             .filter_map(|v| v.get("params").cloned())
             .collect()
+    }
+
+    // Текст первого текстового блока каждого turn/start; порядок файлов pid
+    // произволен, поэтому тесты ищут ход по содержимому.
+    fn turn_texts(&self) -> Vec<String> {
+        self.method_params("turn/start")
+            .into_iter()
+            .filter_map(|params| {
+                params
+                    .get("input")?
+                    .as_array()?
+                    .iter()
+                    .find(|block| block["type"] == "text")?
+                    .get("text")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    async fn transmit_text(
+        &mut self,
+        settings: Option<SettingsChange>,
+        text: &str,
+    ) -> TransmitOutcome {
+        let t = Transmission {
+            command_id: Uuid::now_v7(),
+            attempt: 1,
+            text: text.into(),
+            files: vec![],
+            settings,
+        };
+        tokio::time::timeout(WAIT, self.adapter.transmit(&t, &self.group))
+            .await
+            .expect("transmit deadline")
+    }
+
+    async fn transmit_with(
+        &mut self,
+        command: Uuid,
+        attempt: u32,
+        text: &str,
+        settings: Option<SettingsChange>,
+    ) -> TransmitOutcome {
+        let t = Transmission {
+            command_id: command,
+            attempt,
+            text: text.into(),
+            files: vec![],
+            settings,
+        };
+        tokio::time::timeout(WAIT, self.adapter.transmit(&t, &self.group))
+            .await
+            .expect("transmit deadline")
     }
 }
 
@@ -916,4 +979,207 @@ async fn failed_restart_stops_the_failed_server_before_the_fallback() {
     );
     let out = h.transmit(None).await;
     assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+}
+
+// --- Служебный блок инструкций в следующем ходе после смены пресета ---
+
+const BLOCK_OPEN: &str = "<canterlot-instructions>";
+const BLOCK_CLOSE: &str = "</canterlot-instructions>";
+
+fn turn_with<'a>(texts: &'a [String], needle: &str) -> &'a str {
+    texts
+        .iter()
+        .find(|text| text.contains(needle))
+        .unwrap_or_else(|| panic!("no turn with {needle}: {texts:?}"))
+}
+
+fn assert_block_before_owner(text: &str, block_body: &str, owner: &str) {
+    let expected = format!("{BLOCK_OPEN}\n{block_body}\n{BLOCK_CLOSE}\n\n{owner}");
+    assert_eq!(text, expected);
+}
+
+#[tokio::test]
+async fn preset_change_reaches_the_model_in_the_next_turn_input() {
+    let mut h = PresetHarness::new().await;
+    let out = h.transmit(None).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+
+    let out = h
+        .transmit_text(Some(change(preset_spec("CANARY-DEV-A"))), "owner-words")
+        .await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+
+    let texts = h.turn_texts();
+    let changed = turn_with(&texts, "CANARY-DEV-A");
+    assert_block_before_owner(
+        changed,
+        concat!(
+            "[canterlot] The instructions preset of this conversation changed to «тест» ",
+            "(revision 7); it replaces any earlier canterlot preset instructions in this thread.\n",
+            "CANARY-DEV-A"
+        ),
+        "owner-words",
+    );
+    // developerInstructions на resume по-прежнему уходят: будущий CLI их применит.
+    let resumes = h.method_params("thread/resume");
+    assert_eq!(resumes.len(), 1, "{resumes:?}");
+    assert!(
+        resumes[0]["developerInstructions"]
+            .as_str()
+            .is_some_and(|text| text.contains("CANARY-DEV-A")),
+        "{}",
+        resumes[0]["developerInstructions"]
+    );
+
+    // Следующий ход блока уже не несёт.
+    let out = h.transmit_text(None, "next-words").await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    let texts = h.turn_texts();
+    assert_eq!(texts.len(), 3, "{texts:?}");
+    assert_eq!(turn_with(&texts, "next-words"), "next-words");
+}
+
+#[tokio::test]
+async fn clean_change_block_carries_only_the_note() {
+    let mut h = PresetHarness::new().await;
+    let out = h
+        .transmit_text(Some(change(clean_spec())), "owner-words")
+        .await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    let texts = h.turn_texts();
+    assert_block_before_owner(
+        turn_with(&texts, "owner-words"),
+        concat!(
+            "[canterlot] This conversation no longer uses an instructions preset; ",
+            "disregard earlier canterlot preset instructions in this thread."
+        ),
+        "owner-words",
+    );
+}
+
+#[tokio::test]
+async fn failed_change_leaves_no_block_for_the_next_turn() {
+    let mut h = PresetHarness::new().await;
+    let out = h.transmit(None).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+
+    // Смена не состоялась: сервер вернулся к прежним инструкциям.
+    std::fs::write(h.dir.path().join("resume-error.json"), NO_ROLLOUT).unwrap();
+    let out = h
+        .transmit_text(Some(change(clean_spec())), "rejected-words")
+        .await;
+    assert!(
+        matches!(&out, TransmitOutcome::Rejected(reason) if reason == "instructions_change_failed"),
+        "{out:?}"
+    );
+    let out = h.transmit_text(None, "after-words").await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    let texts = h.turn_texts();
+    assert_eq!(turn_with(&texts, "after-words"), "after-words");
+    assert!(
+        texts.iter().all(|text| !text.contains(BLOCK_OPEN)),
+        "{texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn rejected_first_turn_resends_the_block_on_retry() {
+    let mut h = PresetHarness::new().await;
+    std::fs::write(h.dir.path().join("fail-turn-once"), "").unwrap();
+    let command = Uuid::now_v7();
+    let out = h
+        .transmit_with(
+            command,
+            1,
+            "owner-words",
+            Some(change(preset_spec("CANARY-RETRY"))),
+        )
+        .await;
+    assert!(matches!(&out, TransmitOutcome::Rejected(_)), "{out:?}");
+    let texts = h.turn_texts();
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(texts[0].starts_with(BLOCK_OPEN), "{}", texts[0]);
+    assert!(texts[0].contains("CANARY-RETRY"), "{}", texts[0]);
+
+    // Хаб повторяет тот же ввод без смены: блок обязан уехать снова.
+    let out = h.transmit_with(command, 2, "owner-words", None).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    let texts = h.turn_texts();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    let retried = turn_with(&texts, "owner-words");
+    assert!(retried.starts_with(BLOCK_OPEN), "{retried}");
+    assert!(retried.contains("CANARY-RETRY"), "{retried}");
+    assert!(retried.ends_with("\n\nowner-words"), "{retried}");
+
+    // Принятый ход снял блок: третий его уже не несёт.
+    let out = h.transmit_text(None, "third-words").await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    let texts = h.turn_texts();
+    assert_eq!(turn_with(&texts, "third-words"), "third-words");
+}
+
+#[tokio::test]
+async fn unconfirmed_first_turn_resends_the_block_on_retry() {
+    let mut h = PresetHarness::new().await;
+    // Сервер принял ход, но эха userMessage нет: доставка не доказана.
+    std::fs::write(h.dir.path().join("drop-echo-once"), "").unwrap();
+    let command = Uuid::now_v7();
+    let out = h
+        .transmit_with(
+            command,
+            1,
+            "owner-words",
+            Some(change(preset_spec("CANARY-UNCONFIRMED"))),
+        )
+        .await;
+    assert!(matches!(out, TransmitOutcome::Undetermined), "{out:?}");
+    let texts = h.turn_texts();
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(texts[0].starts_with(BLOCK_OPEN), "{}", texts[0]);
+    assert!(texts[0].contains("CANARY-UNCONFIRMED"), "{}", texts[0]);
+
+    // Неподтверждённый ввод повторяется вместе с блоком.
+    let out = h.transmit_with(command, 2, "owner-words", None).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    let texts = h.turn_texts();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    let retried = turn_with(&texts, "owner-words");
+    assert!(retried.starts_with(BLOCK_OPEN), "{retried}");
+    assert!(retried.contains("CANARY-UNCONFIRMED"), "{retried}");
+}
+
+#[tokio::test]
+async fn oversized_joined_text_defers_the_block_to_a_later_turn() {
+    use canterlot_proto::limits::MAX_INPUT_TEXT_BYTES;
+    let mut h = PresetHarness::new().await;
+    // Ввод владельца сам по себе влезает, а вместе с блоком — уже нет.
+    let big = "x".repeat(MAX_INPUT_TEXT_BYTES - 16);
+    let out = h
+        .transmit_text(Some(change(preset_spec("SMALL-PRESET"))), &big)
+        .await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    let texts = h.turn_texts();
+    let big_turn = turn_with(&texts, "xxxx");
+    assert_eq!(big_turn.len(), MAX_INPUT_TEXT_BYTES - 16);
+    assert!(!big_turn.contains(BLOCK_OPEN), "input not rejected");
+
+    // Блок ждал следующего хода, где место есть.
+    let out = h.transmit_text(None, "short").await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    let texts = h.turn_texts();
+    let short = turn_with(&texts, "short");
+    assert!(short.starts_with(BLOCK_OPEN), "{short}");
+    assert!(short.contains("SMALL-PRESET"), "{short}");
+    assert!(short.ends_with("\n\nshort"), "{short}");
 }
