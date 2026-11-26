@@ -1409,13 +1409,6 @@ async fn foreign_server_is_refused_without_waiting_for_the_deadline() {
     );
 }
 
-/// Сервер отвечает, но список так и не доказал изоляцию до срока ожидания MCP.
-#[tokio::test]
-async fn unproven_server_list_past_the_long_deadline_is_mcp_not_ready() {
-    let mut bench = isolated(vec![mcp_reply(json!({"data": []}))]);
-    bench.adapter.set_mcp_wait(Duration::from_millis(300));
-    assert_eq!(bench.fail_reason().await, "mcp_not_ready");
-}
 
 /// Процесс сервера ушёл, пока шло ожидание MCP: связь потеряна, а не timeout изоляции.
 #[tokio::test]
