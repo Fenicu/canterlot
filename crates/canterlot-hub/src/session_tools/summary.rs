@@ -27,7 +27,8 @@ const FILES_BUDGET: usize = 2 * 1024;
 const SHORT_FIELD: usize = 200;
 const PATH_FIELD: usize = 1024;
 
-/// Ход для итога: команда, длительность, git-факты, рабочее время и итоги тестов.
+/// Ход для итога: команда, длительность, git-факты, рабочее время, итоги тестов, закрыт ли
+/// он хабом без конца хода и состояние его исполнения.
 type RunRow = (
     Uuid,
     Option<i64>,
@@ -35,7 +36,52 @@ type RunRow = (
     Option<i64>,
     bool,
     Option<Value>,
+    bool,
+    String,
 );
+
+/// Ход без конца: воркер не прислал ни итога, ни расхода, ни фактов git.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unfinished {
+    /// Исполнение живо: ход ещё идёт.
+    Running,
+    /// Исполнение кончилось посреди хода (CLI умер, остановка): хаб закрыл ход сам.
+    Interrupted,
+    /// Воркер потерял исполнение; ход может вернуться вместе с ним.
+    Lost,
+}
+
+impl Unfinished {
+    fn of(open: bool, forced_close: bool, execution_state: &str) -> Option<Self> {
+        if forced_close {
+            return Some(Self::Interrupted);
+        }
+        if !open {
+            return None;
+        }
+        Some(match execution_state {
+            "created" | "starting" | "running" | "stopping" => Self::Running,
+            "owner_lost" => Self::Lost,
+            _ => Self::Interrupted,
+        })
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Interrupted => "interrupted",
+            Self::Lost => "lost",
+        }
+    }
+
+    fn elapsed(self) -> &'static str {
+        match self {
+            Self::Running => "running for",
+            Self::Interrupted => "interrupted after",
+            Self::Lost => "lost after",
+        }
+    }
+}
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -109,11 +155,18 @@ pub struct SessionSummary {
     pub harness: String,
     pub model: String,
     state: String,
+    /// Все ходы окна, законченные и нет.
     turns: Option<usize>,
+    /// Незаконченные ходы окна по порядку: вид и время от начала до сбоя или до сейчас.
+    unfinished: Vec<(Unfinished, i64)>,
+    /// Вид последнего хода окна, если он не закончился: тогда факты git старше его работы.
+    last_unfinished: Option<Unfinished>,
     duration_ms: Option<i64>,
     working_ms: Option<i64>,
-    /// `None`, пока ход идёт и расход ещё не записан.
+    /// `None`, пока расход незаконченного хода неизвестен и законченных ходов нет.
     tokens: Option<(i64, i64)>,
+    /// `tokens` — только законченные ходы: расход незаконченного неизвестен.
+    tokens_partial: bool,
     git: Option<Git>,
     /// Итоги тестов последнего хода окна: nextest, Playwright, vitest.
     tests: Vec<TestSummary>,
@@ -314,11 +367,14 @@ pub async fn build_bounded(
     // Верхняя граница — идентификатор хода, а не время: часы воркера и хаба расходятся.
     // Нижняя граница окна остаётся моментом взвода подписки: ход, начатый до него и
     // законченный после, всё ещё принадлежит окну.
+    // Открытый ход потерянного исполнения тоже ход сессии: воркер может вернуть его, а
+    // без него итог `owner_lost` говорит «0 ходов за 0 секунд» после часа работы.
     let runs: Vec<RunRow> = sqlx::query_as(
         "select r.input_command_id,
                 coalesce(r.duration_ms,
                   (extract(epoch from (coalesce(r.finished_at,now()) - r.started_at)) * 1000)::bigint),
-                r.git,w.working_ms,r.finished_at is null,r.tests
+                r.git,w.working_ms,r.finished_at is null,r.tests,r.forced_close,
+                coalesce((select e.state from executions e where e.id=r.execution_id),'')
          from runs r
          left join run_working w on w.input_command_id=r.input_command_id
          where r.conversation_id=$1
@@ -330,7 +386,8 @@ pub async fn build_bounded(
                 or (r.finished_at is null
                     and $4::uuid is null
                     and exists(select 1 from executions e where e.id=r.execution_id
-                               and e.state in ('created','starting','running','stopping'))))
+                               and e.state in ('created','starting','running','stopping',
+                                               'owner_lost'))))
          order by coalesce(r.finished_at,r.started_at),r.started_at,r.input_command_id",
     )
     .bind(target_id)
@@ -346,14 +403,37 @@ pub async fn build_bounded(
         .and_then(|run| run.5.clone())
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default();
-    let (tokens_in, tokens_out): (i64, i64) = sqlx::query_as(
-        "select coalesce(sum(input_tokens),0)::bigint,coalesce(sum(output_tokens),0)::bigint
-         from run_model_usage where input_command_id = any($1)",
+    // Расход по ходам: у законченного хода без строк он нулевой, у незаконченного — неизвестен.
+    let usage: Vec<(Uuid, i64, i64)> = sqlx::query_as(
+        "select input_command_id,coalesce(sum(input_tokens),0)::bigint,
+                coalesce(sum(output_tokens),0)::bigint
+         from run_model_usage where input_command_id = any($1) group by input_command_id",
     )
     .bind(&run_ids)
-    .fetch_one(&mut *conn)
+    .fetch_all(&mut *conn)
     .await?;
-    let any_open = runs.iter().any(|run| run.4);
+    let ends: Vec<Option<Unfinished>> = runs
+        .iter()
+        .map(|run| Unfinished::of(run.4, run.6, &run.7))
+        .collect();
+    let finished_turns = ends.iter().filter(|end| end.is_none()).count();
+    let (mut tokens_in, mut tokens_out, mut usage_unknown) = (0_i64, 0_i64, false);
+    for (run, end) in runs.iter().zip(&ends) {
+        match usage.iter().find(|(id, _, _)| *id == run.0) {
+            Some((_, input, output)) => {
+                tokens_in += input;
+                tokens_out += output;
+            }
+            None if end.is_some() => usage_unknown = true,
+            None => {}
+        }
+    }
+    let unfinished: Vec<(Unfinished, i64)> = runs
+        .iter()
+        .zip(&ends)
+        .filter_map(|(run, end)| end.map(|end| (end, run.1.unwrap_or(0))))
+        .collect();
+    let last_unfinished = ends.last().copied().flatten();
     // Удержанный итог снят в момент, когда цель уже устоялась: идущего хода в нём нет.
     let active = if boundary.is_some() {
         false
@@ -366,15 +446,17 @@ pub async fn build_bounded(
         .fetch_one(&mut *conn)
         .await?
     };
-    // У идущего хода расход ещё не записан: показываем «unknown», а не нули.
+    // У незаконченного хода расход не записан: показываем «unknown» или расход законченных
+    // ходов с оговоркой, а не нули.
     let (turns, tokens) = if runs.is_empty() && active {
         (None, None)
     } else {
         (
             Some(runs.len()),
-            (!any_open).then_some((tokens_in, tokens_out)),
+            (!usage_unknown || finished_turns > 0).then_some((tokens_in, tokens_out)),
         )
     };
+    let tokens_partial = usage_unknown && tokens.is_some();
     let git_values: Vec<Option<Value>> = runs.iter().map(|run| run.2.clone()).collect();
     let mut git = aggregate_git(&git_values);
     if git.is_none() {
@@ -514,6 +596,8 @@ pub async fn build_bounded(
         model: one_line(&model, SHORT_FIELD),
         state: state.to_owned(),
         turns,
+        unfinished,
+        last_unfinished,
         duration_ms: if turns.is_some() {
             Some(runs.iter().filter_map(|run| run.1).sum())
         } else {
@@ -525,6 +609,7 @@ pub async fn build_bounded(
             None
         },
         tokens,
+        tokens_partial,
         git,
         tests,
         worktree,
@@ -662,12 +747,25 @@ fn list(lines: impl ExactSizeIterator<Item = String>, budget: usize, noun: &str)
     out
 }
 
-fn git_section(git: Option<&Git>, worktree: Option<&(String, String)>) -> String {
+/// `unfinished` — вид последнего хода окна, если он не закончился: факты git воркер
+/// снимает только на конце хода, поэтому работа такого хода в них не попала.
+fn git_section(
+    git: Option<&Git>,
+    worktree: Option<&(String, String)>,
+    unfinished: Option<Unfinished>,
+) -> String {
     let Some(git) = git else {
-        return if worktree.is_some() {
-            "Git: no finished turn yet.\n".to_owned()
-        } else {
-            "Git: unavailable\n".to_owned()
+        return match (worktree, unfinished) {
+            (None, _) => "Git: unavailable\n".to_owned(),
+            (Some(_), None) => "Git: no finished turn yet.\n".to_owned(),
+            (Some(_), Some(Unfinished::Running)) => {
+                "Git: unknown until the running turn ends; its work may be in the worktree.\n"
+                    .to_owned()
+            }
+            (Some(_), Some(end)) => format!(
+                "Git: unknown: the {} turn never reported git facts; its work may be in the worktree.\n",
+                end.word()
+            ),
         };
     };
     let mut out = String::new();
@@ -722,7 +820,60 @@ fn git_section(git: Option<&Git>, worktree: Option<&(String, String)>) -> String
         "Uncommitted changes: {}",
         if git.dirty { "yes" } else { "no" }
     );
+    if let Some(end) = unfinished {
+        let _ = writeln!(
+            out,
+            "Git facts are from the last finished turn; the {} turn may have changed more.",
+            end.word()
+        );
+    }
     out
+}
+
+/// Строка ходов. Без незаконченных ходов она прежняя; иначе законченные и незаконченные
+/// названы отдельно, чтобы сбой после часа работы не читался как сбой на старте.
+fn turns_line(summary: &SessionSummary) -> String {
+    let tokens = match summary.tokens {
+        None => "unknown".to_owned(),
+        Some((input, output)) if summary.tokens_partial => {
+            format!("{input}/{output} in finished turns")
+        }
+        Some((input, output)) => format!("{input}/{output}"),
+    };
+    let duration_text = summary
+        .duration_ms
+        .map_or_else(|| "unknown".to_owned(), duration);
+    if summary.unfinished.is_empty() {
+        let turns = summary
+            .turns
+            .map_or_else(|| "unknown".to_owned(), |turns| turns.to_string());
+        return format!("Turns: {turns}, duration {duration_text}, tokens in/out {tokens}.\n");
+    }
+    let mut kinds: Vec<(Unfinished, usize, i64)> = Vec::new();
+    for (end, elapsed_ms) in &summary.unfinished {
+        match kinds.iter_mut().find(|(kind, _, _)| kind == end) {
+            Some((_, count, total)) => {
+                *count += 1;
+                *total += elapsed_ms;
+            }
+            None => kinds.push((*end, 1, *elapsed_ms)),
+        }
+    }
+    let parts: Vec<String> = kinds
+        .iter()
+        .map(|(end, count, total)| format!("{count} {} {}", end.elapsed(), duration(*total)))
+        .collect();
+    let finished = summary.turns.unwrap_or(0) - summary.unfinished.len();
+    // Без законченных ходов общая длительность совпадает со временем незаконченного.
+    let totals = if finished > 0 {
+        format!("duration {duration_text}, tokens in/out {tokens}")
+    } else {
+        format!("tokens in/out {tokens}")
+    };
+    format!(
+        "Turns: {finished} finished, {}; {totals}.\n",
+        parts.join(", ")
+    )
 }
 
 fn tool_label(tool: &str) -> &str {
@@ -843,20 +994,7 @@ pub fn render_bounded(summary: &SessionSummary, limit: usize) -> String {
         summary.title, summary.id, summary.harness, summary.model, summary.state
     );
     head.push_str(&detail_section(&summary.detail));
-    let turns = summary
-        .turns
-        .map_or_else(|| "unknown".to_owned(), |turns| turns.to_string());
-    let duration = summary
-        .duration_ms
-        .map_or_else(|| "unknown".to_owned(), duration);
-    let tokens = summary.tokens.map_or_else(
-        || "unknown".to_owned(),
-        |(input, output)| format!("{input}/{output}"),
-    );
-    let _ = writeln!(
-        head,
-        "Turns: {turns}, duration {duration}, tokens in/out {tokens}."
-    );
+    head.push_str(&turns_line(summary));
     if let Some((count, next)) = summary.alarms {
         let _ = writeln!(
             head,
@@ -882,6 +1020,7 @@ pub fn render_bounded(summary: &SessionSummary, limit: usize) -> String {
     head.push_str(&git_section(
         summary.git.as_ref(),
         summary.worktree.as_ref(),
+        summary.last_unfinished,
     ));
     head.push_str(&tests_section(&summary.tests));
     if let Some((path, branch)) = &summary.worktree {
@@ -958,8 +1097,15 @@ impl SessionSummary {
             turns: self.turns.map(|turns| turns as i64),
             duration_ms: self.duration_ms,
             working_ms: self.working_ms,
-            tokens_in: self.tokens.map(|(input, _)| input),
-            tokens_out: self.tokens.map(|(_, output)| output),
+            // Расход только законченных ходов — не расход сессии: лента его не получает.
+            tokens_in: self
+                .tokens
+                .filter(|_| !self.tokens_partial)
+                .map(|(input, _)| input),
+            tokens_out: self
+                .tokens
+                .filter(|_| !self.tokens_partial)
+                .map(|(_, output)| output),
             commits: self.git.as_ref().map(|git| {
                 git.commits
                     .iter()
