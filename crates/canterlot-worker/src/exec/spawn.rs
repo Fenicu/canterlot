@@ -137,8 +137,9 @@ pub(crate) fn base_spec_toml(
         String::new()
     } else {
         format!(
-            "\n[periods]\ngroup_record = {}\n",
-            millis(timers.periods.group_record)
+            "\n[periods]\ngroup_record = {}\nsocket_check = {}\n",
+            millis(timers.periods.group_record),
+            millis(timers.periods.socket_check)
         )
     };
     format!("ipc_socket = {socket_spec}\nversion_cache = {cache_spec}\n{core}{periods}")
@@ -346,11 +347,13 @@ mod tests {
         let short = SupervisorTimers {
             periods: SupervisorPeriods {
                 group_record: Duration::from_millis(100),
+                socket_check: Duration::from_millis(200),
             },
             ..SupervisorTimers::default()
         };
         let parsed: SupervisorSpec = toml::from_str(&spec(&short)).unwrap();
         assert_eq!(parsed.periods.group_record, Duration::from_millis(100));
+        assert_eq!(parsed.periods.socket_check, Duration::from_millis(200));
     }
 
     #[test]

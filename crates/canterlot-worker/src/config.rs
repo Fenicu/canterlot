@@ -295,12 +295,16 @@ pub struct SupervisorPeriods {
     /// Период снимка участников группы: он находит потомков, потерявших метку группы.
     #[serde(with = "humantime_serde")]
     pub group_record: Duration,
+    /// Как часто сопровождение проверяет свой сокет IPC и восстанавливает удалённый.
+    #[serde(with = "humantime_serde")]
+    pub socket_check: Duration,
 }
 
 impl Default for SupervisorPeriods {
     fn default() -> Self {
         Self {
             group_record: Duration::from_secs(5),
+            socket_check: Duration::from_secs(5),
         }
     }
 }
@@ -930,6 +934,7 @@ mod tests {
                 supervisor.stop_grace,
                 supervisor.stop_retry,
                 supervisor.periods.group_record,
+                supervisor.periods.socket_check,
             ],
             [
                 Duration::from_secs(30),
@@ -938,6 +943,7 @@ mod tests {
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 Duration::from_secs(2),
+                Duration::from_secs(5),
                 Duration::from_secs(5),
             ]
         );

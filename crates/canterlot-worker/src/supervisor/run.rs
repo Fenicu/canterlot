@@ -720,8 +720,8 @@ impl Supervisor {
         >,
     ) -> Result<ExitCode, SupervisorError> {
         let (accepted_tx, mut accepted) = mpsc::channel::<IpcConnection>(8);
+        let period = self.spec.periods.socket_check;
         let accept_task = tokio::spawn(async move {
-            let period = Duration::from_secs(5);
             let mut socket_check = tokio::time::interval_at(Instant::now() + period, period);
             socket_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {

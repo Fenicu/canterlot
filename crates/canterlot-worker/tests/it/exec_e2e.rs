@@ -25,7 +25,10 @@ use canterlot_journal::{Journal, JournalOptions};
 use canterlot_proto::worker::v1::{InterruptState, RecordBody, command, record_body::Body};
 use canterlot_worker::{
     adapter::opencode::replay::Script,
-    config::{ExecutionConfig, OpenCodeConfig, SupervisorTimers, WorkerConfig, WorkerTimers},
+    config::{
+        ExecutionConfig, OpenCodeConfig, SupervisorPeriods, SupervisorTimers, WorkerConfig,
+        WorkerTimers,
+    },
     fault_injection::{SessionProbe, StoreProbe},
     session::{SessionState, Worker, WorkerError},
     store::WorkerStore,
@@ -394,6 +397,12 @@ impl Fixture {
                 supervisor: SupervisorTimers {
                     stop_grace: Duration::from_millis(500),
                     stop_retry: Duration::from_millis(300),
+                    // Сокет, стёртый вместе с runtime-каталогом, сопровождение восстанавливает
+                    // на проверке; боевая раз в 5 с, и тесты стирания ждали её дважды.
+                    periods: SupervisorPeriods {
+                        socket_check: Duration::from_millis(200),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 delegate_mcp_servers: Vec::new(),
