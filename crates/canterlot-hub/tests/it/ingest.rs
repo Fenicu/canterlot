@@ -15,6 +15,8 @@ use sha2::Digest as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 async fn wait_for_lock(pool: &PgPool, query_prefix: &str, event: &str) -> TestResult {
@@ -79,21 +81,21 @@ async fn first_record_racing_credential_change(pool: PgPool, rotate: bool) -> Te
     Ok(())
 }
 
+// Свой триггер на журнальных курсорах: отдельный тест, а не случай таблицы.
 #[tokio::test]
 async fn concurrent_revoke_and_first_record_has_no_deadlock() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     first_record_racing_credential_change(pool, false).await
 }
 
+// Свой триггер на журнальных курсорах: отдельный тест, а не случай таблицы.
 #[tokio::test]
 async fn concurrent_rotation_and_first_record_has_no_deadlock() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     first_record_racing_credential_change(pool, true).await
 }
 
-#[tokio::test]
-async fn rotated_session_cannot_ingest_before_session_close() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn rotated_session_cannot_ingest_before_session_close(pool: PgPool) -> TestResult {
     use canterlot_hub::machines;
     let seed = testkit::seed(&pool).await;
     let machine = machines::add(&pool, seed.owner_id, "rotated-session").await?;
@@ -135,9 +137,7 @@ async fn rotated_session_cannot_ingest_before_session_close() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn rotated_session_cannot_ingest_after_batch_check() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn rotated_session_cannot_ingest_after_batch_check(pool: PgPool) -> TestResult {
     use canterlot_hub::machines;
     let seed = testkit::seed(&pool).await;
     let machine = machines::add(&pool, seed.owner_id, "rotation-after-check").await?;
@@ -270,9 +270,7 @@ async fn snapshot(pool: &PgPool, input_id: Uuid) -> Value {
     ).bind(input_id).fetch_one(pool).await.unwrap()
 }
 
-#[tokio::test]
-async fn stored_record_moves_input_on_machine() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn stored_record_moves_input_on_machine(pool: PgPool) -> TestResult {
     let (seed, _, input) = setup(&pool).await;
     let journal = Uuid::now_v7();
     let outcome = Ingest::new(pool.clone())
@@ -293,9 +291,7 @@ async fn stored_record_moves_input_on_machine() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn duplicate_records_are_skipped_but_acked() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn duplicate_records_are_skipped_but_acked(pool: PgPool) -> TestResult {
     let (seed, _, input) = setup(&pool).await;
     let journal = Uuid::now_v7();
     let ingest = Ingest::new(pool.clone());
@@ -333,9 +329,7 @@ async fn duplicate_records_are_skipped_but_acked() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn gap_stops_before_the_hole() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn gap_stops_before_the_hole(pool: PgPool) -> TestResult {
     let (seed, _, input) = setup(&pool).await;
     let journal = Uuid::now_v7();
     let mut records = batch(
@@ -382,9 +376,7 @@ async fn gap_stops_before_the_hole() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn ack_never_exceeds_commit() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn ack_never_exceeds_commit(pool: PgPool) -> TestResult {
     let (seed, execution, input) = setup(&pool).await;
     let journal = Uuid::now_v7();
     let mut records = batch(
@@ -448,9 +440,7 @@ async fn ack_never_exceeds_commit() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn foreign_journal_is_rejected() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn foreign_journal_is_rejected(pool: PgPool) -> TestResult {
     let (seed, _, input) = setup(&pool).await;
     let other = testkit::seed(&pool).await;
     let journal = Uuid::now_v7();
@@ -486,9 +476,7 @@ async fn foreign_journal_is_rejected() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn rejected_start_fails_execution() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn rejected_start_fails_execution(pool: PgPool) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let execution =
         executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()).await?;
@@ -529,9 +517,7 @@ async fn rejected_start_fails_execution() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn start_failure_reaches_hub_as_outcome() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn start_failure_reaches_hub_as_outcome(pool: PgPool) -> TestResult {
     for reason in [
         "worktree_not_git",
         "worktree_base_unknown",
@@ -567,9 +553,7 @@ async fn start_failure_reaches_hub_as_outcome() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn dispatch_deferred_requeues() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn dispatch_deferred_requeues(pool: PgPool) -> TestResult {
     let (seed, _, input) = setup(&pool).await;
     let journal = Uuid::now_v7();
     assert_eq!(
@@ -606,9 +590,7 @@ async fn dispatch_deferred_requeues() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn receipt_mapping_and_run_finished() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn receipt_mapping_and_run_finished(pool: PgPool) -> TestResult {
     for (body, expected, cause) in [
         (
             "transmission_started",
@@ -727,9 +709,7 @@ async fn receipt_mapping_and_run_finished() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn execution_facts_and_unknown_command_receipts_are_consumed() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn execution_facts_and_unknown_command_receipts_are_consumed(pool: PgPool) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let execution =
         executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()).await?;
@@ -831,9 +811,7 @@ async fn failed_record_rolls_back_effect_and_cursor() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn limits_are_checked_before_any_record() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn limits_are_checked_before_any_record(pool: PgPool) -> TestResult {
     let (seed, _, input) = setup(&pool).await;
     let journal = Uuid::now_v7();
     let records = batch(
@@ -866,9 +844,7 @@ async fn limits_are_checked_before_any_record() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn concurrent_registration_has_one_owner() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn concurrent_registration_has_one_owner(pool: PgPool) -> TestResult {
     let first = testkit::seed(&pool).await;
     let second = testkit::seed(&pool).await;
     let journal = Uuid::now_v7();
@@ -909,9 +885,7 @@ async fn concurrent_registration_has_one_owner() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn stale_and_unknown_receipts_are_consumed() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn stale_and_unknown_receipts_are_consumed(pool: PgPool) -> TestResult {
     let (seed, _, input) = setup(&pool).await;
     let before = snapshot(&pool, input.input_id).await;
     let journal = Uuid::now_v7();
@@ -942,9 +916,7 @@ async fn stale_and_unknown_receipts_are_consumed() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn other_commands_are_stored_and_rejected() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn other_commands_are_stored_and_rejected(pool: PgPool) -> TestResult {
     let (seed, _, input) = setup(&pool).await;
     let command = Uuid::now_v7();
     sqlx::query("insert into commands (id, machine_id, conversation_id, kind, payload, delivery_state) values ($1, $2, $3, 'interrupt', '{}', 'pending')")
@@ -1012,9 +984,7 @@ async fn other_commands_are_stored_and_rejected() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn cursor_is_locked_before_queue_state() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn cursor_is_locked_before_queue_state(pool: PgPool) -> TestResult {
     use std::time::Duration;
     use tokio::time::{sleep, timeout};
 
@@ -1107,9 +1077,7 @@ async fn start_only(pool: &PgPool, seed: &Seed) -> executions::StartedExecution 
         .unwrap()
 }
 
-#[tokio::test]
-async fn late_start_rejection_for_stopped_execution_is_consumed() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn late_start_rejection_for_stopped_execution_is_consumed(pool: PgPool) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let execution = start_only(&pool, &seed).await;
     executions::set_state(
@@ -1172,9 +1140,9 @@ async fn late_start_rejection_for_stopped_execution_is_consumed() -> TestResult 
     Ok(())
 }
 
-#[tokio::test]
-async fn start_rejection_for_completed_command_leaves_execution_untouched() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn start_rejection_for_completed_command_leaves_execution_untouched(
+    pool: PgPool,
+) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let execution = start_only(&pool, &seed).await;
     sqlx::query("update commands set delivery_state = 'completed', completed_at = now(), result = '{\"done\": true}' where id = $1")
@@ -1204,9 +1172,7 @@ async fn start_rejection_for_completed_command_leaves_execution_untouched() -> T
     Ok(())
 }
 
-#[tokio::test]
-async fn start_rejection_for_other_attempt_is_ignored() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn start_rejection_for_other_attempt_is_ignored(pool: PgPool) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let execution = start_only(&pool, &seed).await;
     let before = world(&pool, seed.conversation_id).await;
@@ -1231,9 +1197,7 @@ async fn start_rejection_for_other_attempt_is_ignored() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn start_rejection_without_execution_or_queue_is_consumed() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn start_rejection_without_execution_or_queue_is_consumed(pool: PgPool) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let execution = start_only(&pool, &seed).await;
     sqlx::query("update commands set execution_id = null where id = $1")
@@ -1292,9 +1256,7 @@ async fn start_rejection_without_execution_or_queue_is_consumed() -> TestResult 
     Ok(())
 }
 
-#[tokio::test]
-async fn unchanged_execution_state_emits_no_event() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn unchanged_execution_state_emits_no_event(pool: PgPool) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let execution = start_only(&pool, &seed).await;
     let before = world(&pool, seed.conversation_id).await;
@@ -1319,9 +1281,7 @@ async fn unchanged_execution_state_emits_no_event() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn duplicates_are_skipped_without_locking_the_cursor() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn duplicates_are_skipped_without_locking_the_cursor(pool: PgPool) -> TestResult {
     use std::time::Duration;
     use tokio::time::timeout;
 
@@ -1360,9 +1320,7 @@ async fn duplicates_are_skipped_without_locking_the_cursor() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn seq_zero_is_an_invalid_record() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn seq_zero_is_an_invalid_record(pool: PgPool) -> TestResult {
     let (seed, _, input) = setup(&pool).await;
     let journal = Uuid::now_v7();
     let ingest = Ingest::new(pool.clone());
@@ -1404,9 +1362,7 @@ async fn seq_zero_is_an_invalid_record() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn cursor_row_exists_only_after_the_first_record_is_applied() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn cursor_row_exists_only_after_the_first_record_is_applied(pool: PgPool) -> TestResult {
     let (seed, _, input) = setup(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let count = |journal: Uuid| {
@@ -1479,9 +1435,7 @@ async fn cursor_row_exists_only_after_the_first_record_is_applied() -> TestResul
     Ok(())
 }
 
-#[tokio::test]
-async fn journal_id_has_a_single_owner_in_the_schema() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn journal_id_has_a_single_owner_in_the_schema(pool: PgPool) -> TestResult {
     let first = testkit::seed(&pool).await;
     let second = testkit::seed(&pool).await;
     let journal = Uuid::now_v7();
@@ -1509,9 +1463,7 @@ async fn journal_id_has_a_single_owner_in_the_schema() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn ignored_records_are_counted_per_ingest() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn ignored_records_are_counted_per_ingest(pool: PgPool) -> TestResult {
     let (seed, execution, _) = setup(&pool).await;
     let block_id = Uuid::now_v7().to_string();
     let records = batch(
@@ -1643,9 +1595,7 @@ async fn assert_isolated(
     );
 }
 
-#[tokio::test]
-async fn records_of_one_machine_never_affect_another_machine() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn records_of_one_machine_never_affect_another_machine(pool: PgPool) -> TestResult {
     let start = |v: &Foreign| v.execution.command_id.to_string();
     let input = |v: &Foreign| v.input.as_ref().unwrap().command_id.to_string();
     assert_isolated(
@@ -1733,9 +1683,7 @@ async fn records_of_one_machine_never_affect_another_machine() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn latest_record_replays_compare_committed_body_digest() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn latest_record_replays_compare_committed_body_digest(pool: PgPool) -> TestResult {
     use prost::Message;
     use sha2::{Digest, Sha256};
 
@@ -1841,9 +1789,7 @@ async fn command_result(pool: &PgPool, id: Uuid) -> (String, Option<String>, Opt
         .unwrap()
 }
 
-#[tokio::test]
-async fn sj_batch_for_foreign_execution_is_rejected() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn sj_batch_for_foreign_execution_is_rejected(pool: PgPool) -> TestResult {
     let (victim, execution, _) = setup(&pool).await;
     let attacker = testkit::seed(&pool).await;
     let journal = Uuid::now_v7();
@@ -1881,9 +1827,7 @@ async fn sj_batch_for_foreign_execution_is_rejected() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn sj_record_before_journal_opened_is_invalid() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn sj_record_before_journal_opened_is_invalid(pool: PgPool) -> TestResult {
     let (seed, execution, _) = setup(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let facts = vec![
@@ -1954,9 +1898,7 @@ async fn sj_record_before_journal_opened_is_invalid() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn phase_changed_updates_execution_phase() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn phase_changed_updates_execution_phase(pool: PgPool) -> TestResult {
     let (seed, execution, _) = setup(&pool).await;
     let journal = Uuid::now_v7();
     let before = Utc::now();
@@ -2006,9 +1948,9 @@ async fn phase_changed_updates_execution_phase() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn phase_retry_reaches_the_event_the_phase_detail_and_the_activity_evidence() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn phase_retry_reaches_the_event_the_phase_detail_and_the_activity_evidence(
+    pool: PgPool,
+) -> TestResult {
     use canterlot_hub::activity::{self, Evidence, Thresholds};
     let (seed, execution, _) = setup(&pool).await;
     let journal = Uuid::now_v7();
@@ -2079,9 +2021,7 @@ async fn phase_retry_reaches_the_event_the_phase_detail_and_the_activity_evidenc
     Ok(())
 }
 
-#[tokio::test]
-async fn phase_without_retry_has_no_retry_key() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn phase_without_retry_has_no_retry_key(pool: PgPool) -> TestResult {
     let (seed, execution, _) = setup(&pool).await;
     Ingest::new(pool.clone())
         .apply_batch(
@@ -2111,9 +2051,9 @@ async fn phase_without_retry_has_no_retry_key() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn execution_running_completes_start_command_and_records_native_id() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn execution_running_completes_start_command_and_records_native_id(
+    pool: PgPool,
+) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let execution = start_only(&pool, &seed).await;
     let mut running = execution_fact(execution.execution_id, execution.generation, "running");
@@ -2150,9 +2090,7 @@ async fn execution_running_completes_start_command_and_records_native_id() -> Te
     Ok(())
 }
 
-#[tokio::test]
-async fn terminal_execution_completes_stop_and_interrupt_commands() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn terminal_execution_completes_stop_and_interrupt_commands(pool: PgPool) -> TestResult {
     for (state, outcome) in [("stopped", "normal_exit"), ("failed", "crashed")] {
         let (seed, execution, _) = setup(&pool).await;
         let stop = control_command(&pool, &seed, &execution, "stop_execution").await;
@@ -2195,9 +2133,7 @@ async fn terminal_execution_completes_stop_and_interrupt_commands() -> TestResul
     Ok(())
 }
 
-#[tokio::test]
-async fn interrupt_statuses_complete_command_on_terminal_status() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn interrupt_statuses_complete_command_on_terminal_status(pool: PgPool) -> TestResult {
     let (seed, execution, _) = setup(&pool).await;
     let ingest = Ingest::new(pool.clone());
     for (terminal, name) in [
@@ -2251,9 +2187,7 @@ async fn interrupt_statuses_complete_command_on_terminal_status() -> TestResult 
     Ok(())
 }
 
-#[tokio::test]
-async fn withdraw_refused_completes_withdraw_command() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn withdraw_refused_completes_withdraw_command(pool: PgPool) -> TestResult {
     let (seed, execution, input) = setup(&pool).await;
     let withdraw = control_command(&pool, &seed, &execution, "withdraw_input").await;
     sqlx::query("update commands set target_command_id = $2 where id = $1")
@@ -2284,9 +2218,7 @@ async fn withdraw_refused_completes_withdraw_command() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn machine_times_are_stored_from_records() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn machine_times_are_stored_from_records(pool: PgPool) -> TestResult {
     let (seed, execution, input) = setup(&pool).await;
     Ingest::new(pool.clone())
         .apply_batch(
@@ -2339,9 +2271,7 @@ async fn machine_times_are_stored_from_records() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn adapter_diagnostic_and_new_status_records_are_machine_scoped() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn adapter_diagnostic_and_new_status_records_are_machine_scoped(pool: PgPool) -> TestResult {
     let (seed, execution, _) = setup(&pool).await;
     let attacker = testkit::seed(&pool).await;
     let interrupt = control_command(&pool, &seed, &execution, "interrupt").await;
@@ -2402,9 +2332,9 @@ async fn adapter_diagnostic_and_new_status_records_are_machine_scoped() -> TestR
     Ok(())
 }
 
-#[tokio::test]
-async fn adapter_diagnostic_keeps_bounded_field_names_and_omits_empty_ones() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn adapter_diagnostic_keeps_bounded_field_names_and_omits_empty_ones(
+    pool: PgPool,
+) -> TestResult {
     let (seed, execution, _) = setup(&pool).await;
     let diagnostic = |event_type: &str, field_names: Vec<String>| {
         record_body::Body::AdapterDiagnostic(AdapterDiagnostic {
@@ -2453,9 +2383,7 @@ async fn adapter_diagnostic_keeps_bounded_field_names_and_omits_empty_ones() -> 
     Ok(())
 }
 
-#[tokio::test]
-async fn machine_times_survive_late_receipts_and_reset_for_new_attempt() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn machine_times_survive_late_receipts_and_reset_for_new_attempt(pool: PgPool) -> TestResult {
     let (seed, _, input) = setup(&pool).await;
     let ingest = Ingest::new(pool.clone());
     let time_fact = |attempt, time| {
@@ -2544,9 +2472,7 @@ async fn machine_times_survive_late_receipts_and_reset_for_new_attempt() -> Test
     Ok(())
 }
 
-#[tokio::test]
-async fn bound_sj_rejects_foreign_phase_and_close_without_effect() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn bound_sj_rejects_foreign_phase_and_close_without_effect(pool: PgPool) -> TestResult {
     let (victim, victim_execution, _) = setup(&pool).await;
     let (seed, execution, _) = setup(&pool).await;
     let journal = Uuid::now_v7();
@@ -2601,9 +2527,7 @@ async fn bound_sj_rejects_foreign_phase_and_close_without_effect() -> TestResult
 
 /// Запись о вливании берёт замок очереди раньше строки команды, как захват
 /// outbox и правка: иначе они взаимно блокируются, и Postgres рвёт одну сторону.
-#[tokio::test]
-async fn steer_records_lock_the_queue_before_the_command() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn steer_records_lock_the_queue_before_the_command(pool: PgPool) -> TestResult {
     use std::time::Duration;
     use tokio::time::{sleep, timeout};
 
@@ -2689,9 +2613,7 @@ async fn steer_records_lock_the_queue_before_the_command() -> TestResult {
 
 /// Время приёма влитого ввода пишется в сам ввод, хотя квитанция приходит на
 /// команду вливания.
-#[tokio::test]
-async fn steered_input_gets_agent_confirmation_time() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn steered_input_gets_agent_confirmation_time(pool: PgPool) -> TestResult {
     let (seed, execution, _) = setup(&pool).await;
     let queued = submit_input(
         &pool,
@@ -2749,9 +2671,7 @@ async fn steered_input_gets_agent_confirmation_time() -> TestResult {
 /// Исполнение кончилось смертью сопровождения: вливание, дошедшее до машины,
 /// становится неподтверждённым приёмом, не ушедшее — возвращает ввод в
 /// очередь. Ни одно не висит и не уходит второй раз.
-#[tokio::test]
-async fn ended_execution_settles_its_open_steers() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn ended_execution_settles_its_open_steers(pool: PgPool) -> TestResult {
     let (seed, execution, _) = setup(&pool).await;
     let mut steers = Vec::new();
     for (text, stored) in [("stored", true), ("unsent", false)] {
@@ -2829,9 +2749,9 @@ async fn ended_execution_settles_its_open_steers() -> TestResult {
 /// Поздняя квитанция interrupt спасения против удаления разговора: удаление держит
 /// блокировку очереди и потом удаляет строки команд, а приём квитанции обязан брать
 /// очередь раньше строки команды, иначе две транзакции ждут друг друга.
-#[tokio::test]
-async fn a_late_interrupt_receipt_does_not_deadlock_with_conversation_deletion() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_late_interrupt_receipt_does_not_deadlock_with_conversation_deletion(
+    pool: PgPool,
+) -> TestResult {
     let (seed, execution, _) = setup(&pool).await;
     let interrupt = control_command(&pool, &seed, &execution, "interrupt").await;
     sqlx::query(
@@ -2898,4 +2818,84 @@ async fn a_late_interrupt_receipt_does_not_deadlock_with_conversation_deletion()
         .expect("the late receipt must not wait on the deleting transaction")?;
     assert!(applied.is_ok(), "{applied:?}");
     Ok(())
+}
+
+/// Курсор журнала и квитанции: гонки отзыва и ротации, пропуски и дубли, чужой
+/// журнал, отказ запуска, отложенная доставка, лимиты.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn cursor_and_receipt_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        rotated_session_cannot_ingest_before_session_close,
+        rotated_session_cannot_ingest_after_batch_check,
+        stored_record_moves_input_on_machine,
+        duplicate_records_are_skipped_but_acked,
+        gap_stops_before_the_hole,
+        ack_never_exceeds_commit,
+        foreign_journal_is_rejected,
+        rejected_start_fails_execution,
+        start_failure_reaches_hub_as_outcome,
+        dispatch_deferred_requeues,
+        receipt_mapping_and_run_finished,
+        execution_facts_and_unknown_command_receipts_are_consumed,
+        limits_are_checked_before_any_record,
+    );
+}
+
+/// Регистрация журнала, устаревшие квитанции, отказы запуска по попыткам и
+/// состояниям, курсор после первой записи, учёт пропущенных записей.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn rejection_and_cursor_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        concurrent_registration_has_one_owner,
+        stale_and_unknown_receipts_are_consumed,
+        other_commands_are_stored_and_rejected,
+        cursor_is_locked_before_queue_state,
+        late_start_rejection_for_stopped_execution_is_consumed,
+        start_rejection_for_completed_command_leaves_execution_untouched,
+        start_rejection_for_other_attempt_is_ignored,
+        start_rejection_without_execution_or_queue_is_consumed,
+        unchanged_execution_state_emits_no_event,
+        duplicates_are_skipped_without_locking_the_cursor,
+        seq_zero_is_an_invalid_record,
+        cursor_row_exists_only_after_the_first_record_is_applied,
+        journal_id_has_a_single_owner_in_the_schema,
+        ignored_records_are_counted_per_ingest,
+    );
+}
+
+/// Журнал сопровождения: чужое исполнение, фазы и повторы, завершение команд,
+/// время машины, диагностика адаптера, вливания и поздние квитанции.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn sj_and_phase_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        records_of_one_machine_never_affect_another_machine,
+        latest_record_replays_compare_committed_body_digest,
+        sj_batch_for_foreign_execution_is_rejected,
+        sj_record_before_journal_opened_is_invalid,
+        phase_changed_updates_execution_phase,
+        phase_retry_reaches_the_event_the_phase_detail_and_the_activity_evidence,
+        phase_without_retry_has_no_retry_key,
+        execution_running_completes_start_command_and_records_native_id,
+        terminal_execution_completes_stop_and_interrupt_commands,
+        interrupt_statuses_complete_command_on_terminal_status,
+        withdraw_refused_completes_withdraw_command,
+        machine_times_are_stored_from_records,
+        adapter_diagnostic_and_new_status_records_are_machine_scoped,
+        adapter_diagnostic_keeps_bounded_field_names_and_omits_empty_ones,
+        machine_times_survive_late_receipts_and_reset_for_new_attempt,
+        bound_sj_rejects_foreign_phase_and_close_without_effect,
+        steer_records_lock_the_queue_before_the_command,
+        steered_input_gets_agent_confirmation_time,
+        ended_execution_settles_its_open_steers,
+        a_late_interrupt_receipt_does_not_deadlock_with_conversation_deletion,
+    );
 }
