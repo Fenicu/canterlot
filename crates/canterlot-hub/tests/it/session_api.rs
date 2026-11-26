@@ -8,9 +8,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-#[tokio::test]
-async fn decision_endpoint_unknown_request_answers_404() {
-    let pool = canterlot_hub::testkit::db().await;
+use crate::support::cases::{Snapshot, restore, run_cases};
+
+async fn decision_endpoint_unknown_request_answers_404(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -38,9 +38,7 @@ async fn decision_endpoint_unknown_request_answers_404() {
     assert_eq!(response.json::<Value>()["error"]["code"], "not_found");
 }
 
-#[tokio::test]
-async fn queue_refusals_answer_409_with_a_published_reason() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn queue_refusals_answer_409_with_a_published_reason(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -156,9 +154,7 @@ async fn queue_refusals_answer_409_with_a_published_reason() {
 
 /// Закрытый разговор отвечает на правку и «Отправить сейчас» кодом
 /// `conversation_closed`, а NUL в тексте — `nul_character` с кодом 400.
-#[tokio::test]
-async fn closed_conversation_and_nul_content_answer_with_published_reasons() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn closed_conversation_and_nul_content_answer_with_published_reasons(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -227,9 +223,7 @@ async fn closed_conversation_and_nul_content_answer_with_published_reasons() {
     refused(409, "conversation_closed", "conversation_closed", send_now);
 }
 
-#[tokio::test]
-async fn submit_cancel_interrupt_stop_continue_map_to_domain_outcomes() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn submit_cancel_interrupt_stop_continue_map_to_domain_outcomes(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -296,9 +290,7 @@ async fn submit_cancel_interrupt_stop_continue_map_to_domain_outcomes() {
     }
 }
 
-#[tokio::test]
-async fn cancel_replays_the_domain_outcome() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn cancel_replays_the_domain_outcome(pool: PgPool) {
     use canterlot_hub::delivery::submit::{self, ContentBlock, SubmitInput};
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
@@ -341,9 +333,7 @@ async fn cancel_replays_the_domain_outcome() {
     assert_eq!(count, 1);
 }
 
-#[tokio::test]
-async fn attachment_ids_are_checked_and_part_of_the_request_hash() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn attachment_ids_are_checked_and_part_of_the_request_hash(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -382,9 +372,7 @@ async fn attachment_ids_are_checked_and_part_of_the_request_hash() {
     assert_eq!(conflict.status, 409);
 }
 
-#[tokio::test]
-async fn resume_carries_the_last_native_conversation_id() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn resume_carries_the_last_native_conversation_id(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -502,9 +490,7 @@ async fn started_payload(pool: &PgPool, r: &canterlot_hub::testkit::TestResponse
         .unwrap()
 }
 
-#[tokio::test]
-async fn a_stale_start_cannot_drop_the_context_of_a_recorded_turn() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_stale_start_cannot_drop_the_context_of_a_recorded_turn(pool: PgPool) {
     let (id, client, _dir) = ended_session(
         &pool,
         ExecutionState::Stopped,
@@ -525,9 +511,7 @@ async fn a_stale_start_cannot_drop_the_context_of_a_recorded_turn() {
     assert_eq!(payload["native_conversation_id"], "native-id");
 }
 
-#[tokio::test]
-async fn a_start_without_a_recorded_turn_begins_a_new_native_conversation() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_start_without_a_recorded_turn_begins_a_new_native_conversation(pool: PgPool) {
     let (id, client, _dir) = ended_session(
         &pool,
         ExecutionState::Stopped,
@@ -548,9 +532,7 @@ async fn a_start_without_a_recorded_turn_begins_a_new_native_conversation() {
     assert_eq!(payload["native_conversation_id"], Value::Null);
 }
 
-#[tokio::test]
-async fn detail_says_whether_a_turn_was_recorded() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn detail_says_whether_a_turn_was_recorded(pool: PgPool) {
     let (fresh, client, _dir) = ended_session(
         &pool,
         ExecutionState::Stopped,
@@ -583,9 +565,7 @@ async fn detail_says_whether_a_turn_was_recorded() {
     assert_eq!(body["turn_recorded"], true);
 }
 
-#[tokio::test]
-async fn the_single_action_clears_a_failed_start_and_starts_an_execution() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn the_single_action_clears_a_failed_start_and_starts_an_execution(pool: PgPool) {
     let (id, client, _dir) =
         ended_session(&pool, ExecutionState::Failed, "start_rejected", None, false).await;
     let before: (Value, Value) = sqlx::query_as(
@@ -642,9 +622,7 @@ async fn the_single_action_clears_a_failed_start_and_starts_an_execution() {
     assert_eq!(live, 1);
 }
 
-#[tokio::test]
-async fn the_single_action_clears_an_exited_process_and_keeps_the_context() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn the_single_action_clears_an_exited_process_and_keeps_the_context(pool: PgPool) {
     let (id, client, _dir) = ended_session(
         &pool,
         ExecutionState::Stopped,
@@ -672,9 +650,7 @@ async fn the_single_action_clears_an_exited_process_and_keeps_the_context() {
     assert_eq!(pauses, json!([]));
 }
 
-#[tokio::test]
-async fn resume_without_a_recorded_turn_starts_a_new_native_conversation() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn resume_without_a_recorded_turn_starts_a_new_native_conversation(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -719,9 +695,7 @@ async fn resume_without_a_recorded_turn_starts_a_new_native_conversation() {
     assert_eq!(payload["native_conversation_id"], Value::Null);
 }
 
-#[tokio::test]
-async fn resume_skips_a_newer_execution_that_never_ran_a_turn() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn resume_skips_a_newer_execution_that_never_ran_a_turn(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -777,9 +751,7 @@ async fn resume_skips_a_newer_execution_that_never_ran_a_turn() {
 }
 
 #[cfg(feature = "fault-injection")]
-#[tokio::test]
-async fn resume_and_continue_is_one_transaction() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn resume_and_continue_is_one_transaction(pool: PgPool) {
     use canterlot_hub::fault_injection::Point;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
@@ -828,9 +800,7 @@ async fn resume_and_continue_is_one_transaction() {
     assert_eq!(pauses, serde_json::json!([{"reason":"user_stop"}]));
 }
 
-#[tokio::test]
-async fn retry_of_must_reference_an_unconfirmed_input_of_the_same_conversation() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn retry_of_must_reference_an_unconfirmed_input_of_the_same_conversation(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -906,9 +876,7 @@ async fn retry_of_must_reference_an_unconfirmed_input_of_the_same_conversation()
     assert_eq!(title, "Первое сообщение");
 }
 
-#[tokio::test]
-async fn title_is_auto_from_first_input_unless_user_set() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn title_is_auto_from_first_input_unless_user_set(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -956,9 +924,7 @@ async fn title_is_auto_from_first_input_unless_user_set() {
     assert_eq!(count, 1);
 }
 
-#[tokio::test]
-async fn scheduled_first_message_sets_the_auto_title() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn scheduled_first_message_sets_the_auto_title(pool: PgPool) {
     use canterlot_hub::{
         delivery::ContentBlock,
         dispatcher::Dispatcher,
@@ -996,9 +962,7 @@ async fn scheduled_first_message_sets_the_auto_title() {
     assert_eq!(title, "Запланированная задача");
 }
 
-#[tokio::test]
-async fn foreign_ids_are_not_found_even_when_a_key_is_already_bound() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn foreign_ids_are_not_found_even_when_a_key_is_already_bound(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -1033,9 +997,7 @@ async fn foreign_ids_are_not_found_even_when_a_key_is_already_bound() {
     assert_eq!(r.status, 404);
 }
 
-#[tokio::test]
-async fn old_text_input_keys_still_replay_after_upgrade() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn old_text_input_keys_still_replay_after_upgrade(pool: PgPool) {
     use canterlot_hub::{
         conversations::{self, SubmitMessage},
         delivery::{ContentBlock, SubmitInput, submit_input},
@@ -1088,9 +1050,7 @@ async fn old_text_input_keys_still_replay_after_upgrade() {
     assert_eq!(first, replay);
 }
 
-#[tokio::test]
-async fn foreign_ids_are_not_found_on_every_control_endpoint() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn foreign_ids_are_not_found_on_every_control_endpoint(pool: PgPool) {
     use canterlot_hub::delivery::submit::{self, ContentBlock, SubmitInput};
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
@@ -1173,9 +1133,7 @@ async fn foreign_ids_are_not_found_on_every_control_endpoint() {
     }
 }
 
-#[tokio::test]
-async fn auto_title_is_cut_at_a_word_boundary_and_collapses_whitespace() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auto_title_is_cut_at_a_word_boundary_and_collapses_whitespace(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -1235,9 +1193,7 @@ async fn auto_title_is_cut_at_a_word_boundary_and_collapses_whitespace() {
 
 /// «Отправить повторно как новое» — решение владельца по неподтверждённому
 /// вводу: пауза этого ввода снимается, повтор не ждёт ещё и «Продолжить».
-#[tokio::test]
-async fn retry_as_new_clears_the_unconfirmed_delivery_pause() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn retry_as_new_clears_the_unconfirmed_delivery_pause(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -1307,4 +1263,60 @@ async fn retry_as_new_clears_the_unconfirmed_delivery_pause() {
     .await
     .unwrap();
     assert!(changed >= 1);
+}
+
+/// Отказы и итоги управления разговором: решение, очередь, закрытый разговор,
+/// отмена, вложения, продолжение по последнему идентификатору.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn control_endpoint_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        decision_endpoint_unknown_request_answers_404,
+        queue_refusals_answer_409_with_a_published_reason,
+        closed_conversation_and_nul_content_answer_with_published_reasons,
+        submit_cancel_interrupt_stop_continue_map_to_domain_outcomes,
+        cancel_replays_the_domain_outcome,
+        attachment_ids_are_checked_and_part_of_the_request_hash,
+        resume_carries_the_last_native_conversation_id,
+        a_stale_start_cannot_drop_the_context_of_a_recorded_turn,
+    );
+}
+
+/// Начало нового разговора агента, один шаг при сбое старта или выходе процесса,
+/// продолжение без хода, одна транзакция продолжения, повтор ввода.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn start_and_resume_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        a_start_without_a_recorded_turn_begins_a_new_native_conversation,
+        detail_says_whether_a_turn_was_recorded,
+        the_single_action_clears_a_failed_start_and_starts_an_execution,
+        the_single_action_clears_an_exited_process_and_keeps_the_context,
+        resume_without_a_recorded_turn_starts_a_new_native_conversation,
+        resume_skips_a_newer_execution_that_never_ran_a_turn,
+        resume_and_continue_is_one_transaction,
+        retry_of_must_reference_an_unconfirmed_input_of_the_same_conversation,
+    );
+}
+
+/// Автоназвание по первому вводу, чужие идентификаторы на всех ручках, старые ключи
+/// ввода, повтор как новый.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn title_and_foreign_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        title_is_auto_from_first_input_unless_user_set,
+        scheduled_first_message_sets_the_auto_title,
+        foreign_ids_are_not_found_even_when_a_key_is_already_bound,
+        old_text_input_keys_still_replay_after_upgrade,
+        foreign_ids_are_not_found_on_every_control_endpoint,
+        auto_title_is_cut_at_a_word_boundary_and_collapses_whitespace,
+        retry_as_new_clears_the_unconfirmed_delivery_pause,
+    );
 }
