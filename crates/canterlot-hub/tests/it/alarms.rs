@@ -3,7 +3,6 @@ use std::{sync::Arc, time::Duration};
 use canterlot_hub::{
     activity::{self, Thresholds},
     config::{SchedulerConfig, SessionToolsConfig},
-    conversations::{self, SubmitMessage},
     delivery::ContentBlock,
     dispatcher::Dispatcher,
     executions,
@@ -274,26 +273,47 @@ impl Fx {
         self.fill_queue_n(100).await;
     }
 
+    /// Очередь заполняется одной вставкой тех же строк, что оставляет `submit_message`
+    /// (ввод в `queued` и придержанная команда доставки): сотня настоящих вводов
+    /// стоила тесту секунды, а проверяется здесь только полнота очереди.
     async fn fill_queue_n(&self, count: usize) {
-        for n in 0..count {
-            conversations::submit_message(
-                &self.pool,
-                SubmitMessage {
-                    owner_id: self.owner,
-                    conversation_id: self.orchestrator,
-                    key: Uuid::now_v7().to_string(),
-                    content: vec![ContentBlock::Text {
-                        text: format!("work {n}"),
-                    }],
-                    attachment_ids: vec![],
-                    retry_of: None,
-                    received_at: Utc::now(),
-                },
-                Uuid::now_v7(),
-            )
-            .await
-            .unwrap();
-        }
+        let inputs: Vec<Uuid> = (0..count).map(|_| Uuid::now_v7()).collect();
+        let commands: Vec<Uuid> = (0..count).map(|_| Uuid::now_v7()).collect();
+        let contents: Vec<Value> = (0..count)
+            .map(|n| {
+                json!([ContentBlock::Text {
+                    text: format!("work {n}"),
+                }])
+            })
+            .collect();
+        sqlx::query(
+            "with seq as (
+               update queue_state set next_input_seq=next_input_seq+$6
+               where conversation_id=$1 returning next_input_seq-$6 base),
+             rows as (
+               select r.input_id,r.command_id,r.content,seq.base+r.n-1 input_seq
+               from seq,unnest($3::uuid[],$4::uuid[],$5::jsonb[]) with ordinality r(input_id,command_id,content,n)),
+             commands as (
+               insert into commands(id,machine_id,conversation_id,kind,delivery_state,payload)
+               select command_id,$7,$1,'deliver_input','held',
+                      jsonb_build_object('input_id',input_id,'conversation_id',$1,'content',content)
+               from rows)
+             insert into inputs(id,conversation_id,owner_id,input_seq,idempotency_key,content,
+                                state,command_id,received_at,client_idempotency_key)
+             select input_id,$1,$2,input_seq,input_id::text,content,'queued',command_id,
+                    clock_timestamp(),input_id::text
+             from rows",
+        )
+        .bind(self.orchestrator)
+        .bind(self.owner)
+        .bind(&inputs)
+        .bind(&commands)
+        .bind(&contents)
+        .bind(count as i64)
+        .bind(self.machine)
+        .execute(&self.pool)
+        .await
+        .unwrap();
     }
 }
 
