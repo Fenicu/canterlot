@@ -21,6 +21,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 async fn seed(pool: &PgPool) -> Seed {
     let seed = testkit::seed(pool).await;
     sqlx::query("update machines set availability='available' where id=$1")
@@ -129,9 +131,7 @@ async fn dispatch(pool: &PgPool, seed: &Seed) -> DispatchOutcome {
     .unwrap()
 }
 
-#[tokio::test]
-async fn an_accepted_event_is_a_quiet_feed_line_and_an_input_prefix() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn an_accepted_event_is_a_quiet_feed_line_and_an_input_prefix(pool: PgPool) {
     let seed = seed(&pool).await;
     start(&pool, &seed).await;
     let child = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
@@ -206,9 +206,7 @@ async fn an_accepted_event_is_a_quiet_feed_line_and_an_input_prefix() {
     assert_eq!(attached, Some(owner.input_id));
 }
 
-#[tokio::test]
-async fn a_failed_queued_spawn_still_wakes_the_orchestrator() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_failed_queued_spawn_still_wakes_the_orchestrator(pool: PgPool) {
     let seed = seed(&pool).await;
     let note = note(
         &pool,
@@ -324,9 +322,7 @@ async fn a_note_survives_a_withdrawn_dispatch_and_an_edit_of_its_input() {
 
 /// Ввод с приложенной заметкой вернулся в очередь, и владелец его отменил. Заметка не
 /// остаётся привязанной к мёртвому вводу: её несёт следующий.
-#[tokio::test]
-async fn a_note_of_a_cancelled_input_rides_with_the_next_one() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_note_of_a_cancelled_input_rides_with_the_next_one(pool: PgPool) {
     let seed = seed(&pool).await;
     start(&pool, &seed).await;
     let note = note(&pool, &seed, accepted_origin(Uuid::now_v7()), ACCEPTED).await;
@@ -538,4 +534,18 @@ mod send_now {
         .unwrap();
         assert_eq!(bound(&pool, late).await, None, "a refused steer lets it go");
     }
+}
+
+/// Служебные заметки: строка ленты и префикс ввода, неудачный запуск из очереди,
+/// заметка отменённого ввода.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn service_note_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        an_accepted_event_is_a_quiet_feed_line_and_an_input_prefix,
+        a_failed_queued_spawn_still_wakes_the_orchestrator,
+        a_note_of_a_cancelled_input_rides_with_the_next_one,
+    );
 }
