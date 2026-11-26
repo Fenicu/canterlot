@@ -58,9 +58,14 @@ async fn machine_status_reacquire_preserves_connected_machine_availability() {
         .await
         .unwrap();
     let (stop, rx) = watch::channel(false);
-    let task = tokio::spawn(machine_info::run_status_projection(
+    // Вторая проекция приходит по такту пересчёта: боевой такт 5 с, здесь короткий.
+    let task = tokio::spawn(machine_info::run_status_projection_with(
         service_pool.clone(),
         registry,
+        machine_info::StatusProjectionTimers {
+            tick: Duration::from_millis(100),
+            ..Default::default()
+        },
         rx,
     ));
     let observed = tokio::time::timeout(Duration::from_secs(20), async {
