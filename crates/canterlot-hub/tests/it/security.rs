@@ -23,6 +23,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 const DEADLINE: Duration = Duration::from_millis(250);
 const WAIT: Duration = Duration::from_secs(3);
 
@@ -104,9 +106,7 @@ async fn closed(socket: &mut TcpStream, within: Duration) -> Vec<u8> {
     bytes
 }
 
-#[tokio::test]
-async fn security_untrusted_unfinished_headers_expire() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn security_untrusted_unfinished_headers_expire(pool: PgPool) {
     let mut config = test_http_config();
     config.header_read_timeout = DEADLINE;
     let h = server(pool, config).await;
@@ -122,9 +122,7 @@ async fn security_untrusted_unfinished_headers_expire() {
     }
 }
 
-#[tokio::test]
-async fn security_slow_body_expires_and_capacity_returns() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn security_slow_body_expires_and_capacity_returns(pool: PgPool) {
     let mut config = test_http_config();
     config.body_read_timeout = DEADLINE;
     config.max_connections = 1;
@@ -150,9 +148,7 @@ async fn security_slow_body_expires_and_capacity_returns() {
     }
 }
 
-#[tokio::test]
-async fn security_connection_cap_rejects_immediately_and_recovers() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn security_connection_cap_rejects_immediately_and_recovers(pool: PgPool) {
     let mut config = test_http_config();
     config.max_connections = 2;
     config.header_read_timeout = Duration::from_secs(1);
@@ -175,9 +171,7 @@ async fn security_connection_cap_rejects_immediately_and_recovers() {
     );
 }
 
-#[tokio::test]
-async fn security_keep_alive_idle_connection_expires() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn security_keep_alive_idle_connection_expires(pool: PgPool) {
     let mut config = test_http_config();
     config.header_read_timeout = DEADLINE;
     let h = server(pool, config).await;
@@ -191,9 +185,7 @@ async fn security_keep_alive_idle_connection_expires() {
 }
 
 #[cfg(feature = "fault-injection")]
-#[tokio::test]
-async fn security_upgraded_connection_outlives_body_deadline() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn security_upgraded_connection_outlives_body_deadline(pool: PgPool) {
     let mut config = test_http_config();
     config.header_read_timeout = DEADLINE;
     config.body_read_timeout = DEADLINE;
@@ -406,4 +398,20 @@ async fn security_same_row_transition_race_replays_success() {
 async fn security_unique_create_race_replays_success() {
     let pool = canterlot_hub::testkit::db().await;
     race(pool, true).await;
+}
+
+/// Ресурсы соединений HTTP: незаконченные заголовки, медленное тело, предел соединений,
+/// простой keep-alive, апгрейд после срока тела.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn security_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        security_untrusted_unfinished_headers_expire,
+        security_slow_body_expires_and_capacity_returns,
+        security_connection_cap_rejects_immediately_and_recovers,
+        security_keep_alive_idle_connection_expires,
+        security_upgraded_connection_outlives_body_deadline,
+    );
 }
