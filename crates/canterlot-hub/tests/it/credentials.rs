@@ -10,6 +10,8 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 use crate::support::task7 as support;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -79,9 +81,9 @@ async fn own_machine(pool: &PgPool, owner_id: Uuid, name: &str) -> Uuid {
     id
 }
 
-#[tokio::test]
-async fn credential_is_stored_per_machine_and_the_earliest_one_is_shown() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn credential_is_stored_per_machine_and_the_earliest_one_is_shown(
+    pool: PgPool,
+) -> TestResult {
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe_window(&pool, &s).await;
@@ -137,9 +139,7 @@ async fn credential_is_stored_per_machine_and_the_earliest_one_is_shown() -> Tes
     Ok(())
 }
 
-#[tokio::test]
-async fn a_new_login_date_replaces_the_expired_one() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_new_login_date_replaces_the_expired_one(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     let expired = at(Duration::days(-1));
     let renewed = at(Duration::days(30));
@@ -174,9 +174,7 @@ async fn a_new_login_date_replaces_the_expired_one() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
-async fn machine_view_names_the_credential_date() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
+async fn machine_view_names_the_credential_date(pool: PgPool) -> TestResult {
     let fixture = support::Fixture::new(pool.clone()).await;
     let expires = at(Duration::days(4));
     record(
@@ -217,4 +215,17 @@ async fn machine_view_names_the_credential_date() -> TestResult {
         expires.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     );
     Ok(())
+}
+
+/// Учётные данные CLI на машине: дата входа, замена истёкшей, вид машины.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn credentials_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        credential_is_stored_per_machine_and_the_earliest_one_is_shown,
+        a_new_login_date_replaces_the_expired_one,
+        machine_view_names_the_credential_date,
+    );
 }
