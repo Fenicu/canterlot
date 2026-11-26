@@ -402,6 +402,15 @@ fn step_first_token_is_known_and_silent() {
 }
 
 #[test]
+fn artifact_updated_is_known_and_silent() {
+    // 2.4.1 объявляет `artifact.updated` с пустой схемой: данных в нём нет.
+    // Артефакты адаптер не ведёт, событие известно и молчит.
+    let mut translator = Translator::new("ses_a", HashMap::new());
+    let event = json!({"type": "artifact.updated", "data": {}});
+    assert!(translator.feed(&event).is_empty());
+}
+
+#[test]
 fn unknown_execution_end_is_required() {
     let mut translator = Translator::new("ses_a", HashMap::new());
     let unknown = json!({"type": "session.execution.paused", "data": {"sessionID": "ses_a"}});

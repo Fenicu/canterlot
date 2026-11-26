@@ -36,6 +36,7 @@ const BLOCK_NAMESPACE: Uuid = Uuid::from_u128(0x7c1e_52a0_9d3b_4f6e_8a21_3b5d_c0
 // Служебные события и то, что разбирают следующие срезы адаптера.
 const KNOWN: &[&str] = &[
     "agent.updated",
+    "artifact.updated",
     "command.updated",
     "experimental.job.updated",
     "experimental.mcp.event",
