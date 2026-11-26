@@ -108,6 +108,12 @@ impl ProcessGuard {
         loop {
             let members = self.members();
             if members.is_empty() {
+                // Тишина нужна только против запуска в полёте: до exec сопровождение ещё
+                // ребёнок процесса теста с чужим exe. Нет живых детей — запускать некому,
+                // а потомки участников до своего exec сами видны участниками.
+                if !has_live_children() {
+                    break;
+                }
                 let since = *empty_since.get_or_insert_with(Instant::now);
                 if since.elapsed() >= Duration::from_millis(600) {
                     break;
@@ -133,6 +139,32 @@ impl ProcessGuard {
             );
         }
     }
+}
+
+/// Есть ли у процесса теста живой (не зомби) ребёнок. Не прочли `/proc` — считаем, что есть.
+fn has_live_children() -> bool {
+    let me = std::process::id().to_string();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return true;
+    };
+    entries.flatten().any(|entry| {
+        if !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return false;
+        }
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+            return false;
+        };
+        let Some(end) = stat.rfind(')') else {
+            return false;
+        };
+        let mut fields = stat[end + 1..].split_whitespace();
+        let state = fields.next();
+        fields.next() == Some(me.as_str()) && !matches!(state, Some("Z" | "X"))
+    })
 }
 
 impl Drop for ProcessGuard {
