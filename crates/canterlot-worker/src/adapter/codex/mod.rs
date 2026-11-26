@@ -122,7 +122,11 @@ pub async fn discover_with_cache(
     ))
 }
 
-const HANDSHAKE_STEP: Duration = Duration::from_secs(20);
+/// 0.172.0 поднимает состояние на свежем доме больше десяти секунд и больше не
+/// пишет «state db backfill is running», по которой старт ждал перенос отдельно.
+/// Замер: свежий дом — 16,7 с на весь старт, второй на нём же — 1,3 с; прежних
+/// 20 с не хватало. Общий срок старта всё равно ограничивает вызывающий.
+const HANDSHAKE_STEP: Duration = Duration::from_secs(30);
 /// Codex переносит состояние в sqlite при первом запуске на доме и не отвечает
 /// на `initialize`, пока перенос идёт. Столько ждём, увидев об этом строку в stderr.
 const BACKFILL_TIMEOUT: Duration = Duration::from_secs(600);
@@ -142,7 +146,7 @@ pub struct CodexAdapter {
     cli_version_probe: Duration,
     /// Общий на процессы файл успешных проб: переживает смену сопровождения.
     cli_version_cache: Option<PathBuf>,
-    /// Срок шага рукопожатия; в тестах короче, чтобы не ждать 20 с.
+    /// Срок шага рукопожатия; в тестах короче, чтобы не ждать все 30 секунд.
     handshake_step: Duration,
     /// Сколько ждать `initialize`, пока app-server переносит состояние в sqlite.
     backfill_timeout: Duration,

@@ -208,7 +208,7 @@ impl Fake {
         Self::build(evidence, transmit_deadline, None)
     }
 
-    /// Короткая шкала рукопожатия: иначе проверка переноса sqlite ждала бы 20 с.
+    /// Короткая шкала рукопожатия: иначе проверка переноса sqlite ждала бы 30 секунд.
     fn with_timing(
         evidence: Vec<String>,
         handshake_step: Duration,
