@@ -1288,6 +1288,14 @@ pub struct SessionToolsConfig {
     /// сессий услышали об этом один раз. Короткий простой молчит.
     #[serde(with = "humantime_serde")]
     pub machine_unavailable_after: Duration,
+    /// Повторная проверка уборки принятой сессии, пока её исполнение ещё живо. Не читается
+    /// из hub.toml: короче задают только тесты.
+    #[serde(skip, default = "default_cleanup_recheck")]
+    pub cleanup_recheck: Duration,
+}
+
+fn default_cleanup_recheck() -> Duration {
+    Duration::from_secs(5)
 }
 
 impl Default for SessionToolsConfig {
@@ -1305,6 +1313,7 @@ impl Default for SessionToolsConfig {
             spawn_stagger: Duration::from_secs(20),
             accepted_retention: Duration::from_secs(3 * 86400),
             machine_unavailable_after: Duration::from_secs(3 * 60),
+            cleanup_recheck: default_cleanup_recheck(),
         }
     }
 }
@@ -1586,5 +1595,23 @@ impl MachinesConfig {
     /// Возврат к обычному состоянию с запасом: иначе колебания у порога мигают.
     pub fn disk_recover_bytes(&self) -> u64 {
         self.disk_warn_bytes().saturating_add(5_000_000_000)
+    }
+}
+
+#[cfg(test)]
+mod cleanup_recheck_tests {
+    use super::*;
+
+    /// Боевой период повторной проверки уборки: тесты подставляют короткий, а из hub.toml
+    /// он не читается.
+    #[test]
+    fn cleanup_recheck_is_five_seconds_and_not_configurable() {
+        assert_eq!(
+            SessionToolsConfig::default().cleanup_recheck,
+            Duration::from_secs(5)
+        );
+        let parsed: SessionToolsConfig = toml::from_str("pair_sends = 3").unwrap();
+        assert_eq!(parsed.cleanup_recheck, Duration::from_secs(5));
+        assert!(toml::from_str::<SessionToolsConfig>("cleanup_recheck = \"1s\"").is_err());
     }
 }

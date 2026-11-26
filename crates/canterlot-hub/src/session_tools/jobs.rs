@@ -466,7 +466,11 @@ pub async fn run_in_tx_with_cloud(
                 .await
         }
         Action::Cleanup => {
-            Ok(accept::cleanup_job(conn, job, subscriber, now, correlation_id).await?)
+            let recheck = spawn_runtime.map_or_else(
+                || crate::config::SessionToolsConfig::default().cleanup_recheck,
+                |runtime| runtime.session_tools.cleanup_recheck,
+            );
+            Ok(accept::cleanup_job(conn, job, subscriber, now, correlation_id, recheck).await?)
         }
         Action::AlarmDeliver => {
             crate::session_tools::alarms::deliver_job_in_tx(conn, job, now, correlation_id).await

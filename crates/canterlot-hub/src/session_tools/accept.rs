@@ -23,7 +23,6 @@ use crate::{
 };
 
 const CLOSED_BY_ACCEPT: &str = "accepted";
-const RECHECK: TimeDelta = TimeDelta::seconds(5);
 /// После этого срока живое исполнение останавливают принудительно.
 const FORCE_AFTER: TimeDelta = TimeDelta::minutes(10);
 /// Исполнение, которое не гаснет сутки (машина не вернулась), уборку не держит вечно.
@@ -711,12 +710,15 @@ struct CleanupJob {
 }
 
 /// Задание `cleanup`: доводит принятую сессию до конца под её очередью.
+/// `recheck` — `SessionToolsConfig::cleanup_recheck`: через столько уборка смотрит снова,
+/// пока исполнение принятой сессии живо.
 pub(crate) async fn cleanup_job(
     conn: &mut PgConnection,
     job: &ClaimedJob,
     id: Uuid,
     now: DateTime<Utc>,
     correlation_id: Uuid,
+    recheck: std::time::Duration,
 ) -> Result<JobOutcome, sqlx::Error> {
     let Ok(CleanupJob { force }) = serde_json::from_value(job.payload.clone()) else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
@@ -741,7 +743,7 @@ pub(crate) async fn cleanup_job(
             force_stop_once(conn, &child, execution_id, generation, correlation_id).await?;
         }
         return Ok(JobOutcome::Retry {
-            at: now + RECHECK,
+            at: now + TimeDelta::from_std(recheck).unwrap_or(TimeDelta::seconds(5)),
             poll: false,
         });
     }

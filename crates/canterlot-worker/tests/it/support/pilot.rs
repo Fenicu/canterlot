@@ -451,8 +451,10 @@ impl Pilot {
                     ..Default::default()
                 },
                 // Сценарии запускают детей вплотную: пауза проверяется в тестах очереди хаба.
+                // Уборка принятой сессии смотрит снова раз в 200 мс, а не в боевые 5 с.
                 session_tools: options.session_tools.unwrap_or(SessionToolsConfig {
                     spawn_stagger: Duration::ZERO,
+                    cleanup_recheck: ms(200),
                     ..Default::default()
                 }),
                 ..Default::default()
