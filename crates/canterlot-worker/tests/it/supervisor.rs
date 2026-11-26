@@ -509,6 +509,11 @@ async fn attach_requires_the_secret_and_same_uid() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o077, 0, "socket must be private");
+    // Без ShipFrom сопровождение не отдаёт журнал, а остановка ждёт его подтверждения:
+    // уборка высиживала бы весь срок ожидания выхода.
+    harness
+        .send(down::Msg::ShipFrom(ShipFrom { committed_seq: 0 }))
+        .await;
     harness.shutdown().await;
 }
 
