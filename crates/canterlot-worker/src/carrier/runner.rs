@@ -4,7 +4,7 @@
 use std::{
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime},
@@ -57,11 +57,13 @@ pub(super) fn hub_target(hub_url: &str) -> Option<String> {
     })
 }
 
-/// Счёт неудач по SSH и отправка наблюдений.
+/// Счёт неудач по SSH и отправка наблюдений. Состояние держится и на время отправки:
+/// петли проброса и присмотра пишут итоги параллельно, и без этого более старое наблюдение
+/// уходило после нового, а хаб хранит последнее пришедшее.
 struct Reach {
     machine_id: uuid::Uuid,
     control: Arc<dyn RunnerControl>,
-    state: Mutex<ReachState>,
+    state: tokio::sync::Mutex<ReachState>,
 }
 
 #[derive(Default)]
@@ -74,33 +76,27 @@ struct ReachState {
 impl Reach {
     /// Итог одной попытки SSH: уходит хабу сразу.
     async fn record(&self, ok: bool) {
-        let observation = {
-            let mut state = self.state.lock().unwrap();
-            state.failures = if ok {
-                0
-            } else {
-                state.failures.saturating_add(1)
-            };
-            state.reachable = Some(ok);
-            state.last_sent = Some(Instant::now());
-            self.observation(&state)
+        let mut state = self.state.lock().await;
+        state.failures = if ok {
+            0
+        } else {
+            state.failures.saturating_add(1)
         };
-        if let Some(observation) = observation {
+        state.reachable = Some(ok);
+        state.last_sent = Some(Instant::now());
+        if let Some(observation) = self.observation(&state) {
             self.control.report_observation(observation).await;
         }
     }
 
     /// Повтор последнего итога, если хаб давно ничего не слышал: свежесть — условие его «offline».
     async fn heartbeat(&self, every: Duration) {
-        let observation = {
-            let mut state = self.state.lock().unwrap();
-            if state.last_sent.is_some_and(|sent| sent.elapsed() < every) {
-                return;
-            }
-            state.last_sent = Some(Instant::now());
-            self.observation(&state)
-        };
-        if let Some(observation) = observation {
+        let mut state = self.state.lock().await;
+        if state.last_sent.is_some_and(|sent| sent.elapsed() < every) {
+            return;
+        }
+        state.last_sent = Some(Instant::now());
+        if let Some(observation) = self.observation(&state) {
             self.control.report_observation(observation).await;
         }
     }
@@ -184,7 +180,7 @@ pub(super) async fn run(
     let reach = Arc::new(Reach {
         machine_id: spec.machine_id,
         control: shared.control.clone(),
-        state: Mutex::default(),
+        state: tokio::sync::Mutex::default(),
     });
     let connects = Arc::new(AtomicU64::new(0));
     // Внутренний сигнал остановки: внешний пересылается в него, а отказ хаба в токене
