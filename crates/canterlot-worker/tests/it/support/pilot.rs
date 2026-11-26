@@ -558,6 +558,7 @@ impl Pilot {
 
     pub async fn start_worker(&mut self) {
         let store = WorkerStore::open(&self.config.data_dir).unwrap();
+        crate::support::seed_npm_cache(&self.config.data_dir, "");
         let worker = Worker::new(self.config.clone(), store)
             .with_runtime_dir(self.config.data_dir.join("runtime"));
         let state = worker.state();

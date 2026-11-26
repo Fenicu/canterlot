@@ -2,6 +2,7 @@ use std::{
     fs,
     net::SocketAddr,
     os::unix::fs::PermissionsExt,
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -461,6 +462,27 @@ impl Drop for TempSecrets {
     }
 }
 
+/// Свежий дисковый кэш последних выпусков CLI в каталоге данных воркера: стартовый
+/// `Probe::discover` не ходит в registry.npmjs.org. Без него каждый запуск воркера с CLI
+/// ждёт ответа реестра до `FETCH_TIMEOUT` (3 с), а тесты на остановленных часах tokio —
+/// бесконечно: таймаут на паузе в реальном времени не срабатывает. Метка из будущего
+/// свежа при любом реальном `now_ms` (срок 6 ч через `saturating_sub`). Часы здесь не
+/// читаем специально: храповик запрещает `SystemTime` в тестах. Пустой `latest` — то же,
+/// что воркер видит при недоступном реестре.
+pub fn seed_npm_cache(data_dir: &Path, latest: &str) {
+    let seeded = serde_json::json!({
+        "@anthropic-ai/claude-code": {"version": latest, "fetched_at_ms": u64::MAX},
+        "@openai/codex": {"version": latest, "fetched_at_ms": u64::MAX},
+        "opencode-ai": {"version": latest, "fetched_at_ms": u64::MAX},
+    });
+    fs::create_dir_all(data_dir).unwrap();
+    fs::write(
+        data_dir.join(".npm-latest.json"),
+        serde_json::to_vec(&seeded).unwrap(),
+    )
+    .unwrap();
+}
+
 pub struct ProtocolHub {
     pub events: mpsc::Receiver<Observed>,
     _directory: TempDir,
@@ -581,23 +603,7 @@ impl ProtocolHub {
             legacy_ignored: None,
         };
         let store = WorkerStore::open(&config.data_dir).unwrap();
-        // Тесты на остановленных часах tokio не должны зависеть от скорости
-        // registry.npmjs.org: стартовый `Probe::discover` воркера зовёт
-        // `LatestVersions::fetch` под `tokio::time::timeout`, который на паузе
-        // в реальном времени не срабатывает никогда. Запись дискового кэша
-        // с меткой из будущего свежа при любом реальном `now_ms` (срок 6 ч
-        // через `saturating_sub`), поэтому `latest` отдаётся без запросов в сеть.
-        // Часы здесь не читаем специально: храповик запрещает `SystemTime` в тестах.
-        let seeded = serde_json::json!({
-            "@anthropic-ai/claude-code": {"version": "0.0.0", "fetched_at_ms": u64::MAX},
-            "@openai/codex": {"version": "0.0.0", "fetched_at_ms": u64::MAX},
-            "opencode-ai": {"version": "0.0.0", "fetched_at_ms": u64::MAX},
-        });
-        fs::write(
-            config.data_dir.join(".npm-latest.json"),
-            serde_json::to_vec(&seeded).unwrap(),
-        )
-        .unwrap();
+        seed_npm_cache(&config.data_dir, "0.0.0");
         (
             Self {
                 events: receiver,

@@ -254,6 +254,7 @@ impl Fixture {
         let store = WorkerStore::open(&self.config.data_dir)
             .unwrap()
             .with_probe(self.store_probe.clone());
+        crate::support::seed_npm_cache(&self.config.data_dir, "");
         let worker = Worker::new(self.config.clone(), store)
             .with_runtime_dir(self.config.data_dir.join("runtime"))
             .with_session_probe(self.probe.clone());

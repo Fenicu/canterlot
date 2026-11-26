@@ -195,6 +195,7 @@ impl Stack {
         .await
         .unwrap();
         let store = WorkerStore::open(&config.data_dir).unwrap();
+        crate::support::seed_npm_cache(&config.data_dir, "");
         let machine_id = config.machine_id;
         let runtime_dir = config.data_dir.join("runtime");
         let mut worker = Worker::new(config, store).with_runtime_dir(runtime_dir);
