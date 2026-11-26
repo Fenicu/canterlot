@@ -19,6 +19,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 const QUIET: Duration = Duration::from_secs(5);
 
 struct Fx {
@@ -261,9 +263,7 @@ fn code(result: Result<Value, ToolError>) -> Code {
     result.expect_err("the call must fail").code
 }
 
-#[tokio::test]
-async fn send_marks_origin_and_prefix() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn send_marks_origin_and_prefix(pool: PgPool) {
     let f = Fx::new(pool).await;
     let sent = f.send(f.a, f.b, "собери отчёт").await.unwrap();
     assert_eq!(sent["deduplicated"], false);
@@ -321,9 +321,7 @@ async fn send_marks_origin_and_prefix() {
     assert_eq!(queued["origin"], Value::Null, "the owner has no origin");
 }
 
-#[tokio::test]
-async fn send_refuses_itself_strangers_and_bad_arguments() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn send_refuses_itself_strangers_and_bad_arguments(pool: PgPool) {
     let f = Fx::new(pool).await;
     assert_eq!(
         code(f.send(f.a, f.a, "сам себе").await),
@@ -370,9 +368,7 @@ async fn send_refuses_itself_strangers_and_bad_arguments() {
     assert_eq!(f.inputs(f.b).await, 0);
 }
 
-#[tokio::test]
-async fn send_queues_for_a_stopped_target_and_says_so() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn send_queues_for_a_stopped_target_and_says_so(pool: PgPool) {
     let f = Fx::new(pool).await;
     let sent = f.send(f.a, f.b, "проснись").await.unwrap();
     assert_eq!(sent["target_stopped"], true);
@@ -400,9 +396,7 @@ async fn send_queues_for_a_stopped_target_and_says_so() {
     );
 }
 
-#[tokio::test]
-async fn send_dedups_within_window() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn send_dedups_within_window(pool: PgPool) {
     let f = Fx::new(pool).await;
     let first = f.send(f.a, f.b, "одно и то же").await.unwrap();
     let again = f.send(f.a, f.b, "одно и то же").await.unwrap();
@@ -432,9 +426,7 @@ async fn send_dedups_within_window() {
     assert_ne!(late["input_id"], first["input_id"]);
 }
 
-#[tokio::test]
-async fn dedup_ends_when_the_first_input_is_finished() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn dedup_ends_when_the_first_input_is_finished(pool: PgPool) {
     let f = Fx::new(pool).await;
     let first = f.send(f.a, f.b, "повтор").await.unwrap();
     let input: Uuid = serde_json::from_value(first["input_id"].clone()).unwrap();
@@ -490,9 +482,7 @@ async fn dedup_ends_when_the_first_input_is_finished() {
     assert_eq!(again["deduplicated"], false, "the turn is over");
 }
 
-#[tokio::test]
-async fn dedup_does_not_spend_the_rate_limit_and_rearms_with_the_input_still_queued() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn dedup_does_not_spend_the_rate_limit_and_rearms_with_the_input_still_queued(pool: PgPool) {
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -521,9 +511,7 @@ async fn dedup_does_not_spend_the_rate_limit_and_rearms_with_the_input_still_que
     assert!(f.event_jobs(f.a).await.is_empty());
 }
 
-#[tokio::test]
-async fn a_finished_first_input_gets_a_new_input_before_the_rearm() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_finished_first_input_gets_a_new_input_before_the_rearm(pool: PgPool) {
     let f = Fx::new(pool).await;
     let now = Utc::now();
     let first = f.send(f.a, f.b, "текст").await.unwrap();
@@ -543,9 +531,7 @@ async fn a_finished_first_input_gets_a_new_input_before_the_rearm() {
     );
 }
 
-#[tokio::test]
-async fn transport_retry_of_a_finished_call_does_not_rearm() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn transport_retry_of_a_finished_call_does_not_rearm(pool: PgPool) {
     let f = Fx::new(pool).await;
     let caller = f.caller(f.a);
     let args = json!({"session_id": f.b, "text": "один раз"});
@@ -582,9 +568,7 @@ async fn transport_retry_of_a_finished_call_does_not_rearm() {
     assert_eq!(code(changed), Code::InvalidArguments);
 }
 
-#[tokio::test]
-async fn send_subscribes_by_default_and_opts_out() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn send_subscribes_by_default_and_opts_out(pool: PgPool) {
     let f = Fx::new(pool).await;
     let third = f.conversation().await;
     let quiet = f
@@ -617,9 +601,7 @@ async fn send_subscribes_by_default_and_opts_out() {
     assert_eq!(still["subscribed"], true);
 }
 
-#[tokio::test]
-async fn pair_rate_limit() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn pair_rate_limit(pool: PgPool) {
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -647,9 +629,7 @@ async fn pair_rate_limit() {
     f.send(f.a, f.b, "окно прошло").await.unwrap();
 }
 
-#[tokio::test]
-async fn sender_rate_limit() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn sender_rate_limit(pool: PgPool) {
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -670,9 +650,7 @@ async fn sender_rate_limit() {
         .unwrap();
 }
 
-#[tokio::test]
-async fn events_do_not_count_toward_the_rate_limit() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn events_do_not_count_toward_the_rate_limit(pool: PgPool) {
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -712,9 +690,7 @@ async fn events_do_not_count_toward_the_rate_limit() {
     assert_eq!(code(f.send(f.a, f.b, "второе").await), Code::RateLimited);
 }
 
-#[tokio::test]
-async fn chain_depth_stops_ping_pong() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn chain_depth_stops_ping_pong(pool: PgPool) {
     let f = Fx::new(pool).await;
     let (mut from, mut to) = (f.a, f.b);
     for depth in 1..=8 {
@@ -732,9 +708,7 @@ async fn chain_depth_stops_ping_pong() {
     assert_eq!(f.depths(f.b).await, vec![1, 3, 5, 7]);
 }
 
-#[tokio::test]
-async fn chain_depth_uses_the_input_of_the_running_turn() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn chain_depth_uses_the_input_of_the_running_turn(pool: PgPool) {
     let f = Fx::new(pool).await;
     let sent = f.send(f.a, f.b, "первое").await.unwrap();
     let input: Uuid = serde_json::from_value(sent["input_id"].clone()).unwrap();
@@ -756,9 +730,7 @@ async fn chain_depth_uses_the_input_of_the_running_turn() {
     assert_eq!(f.input(&back["input_id"]).await.1["chain_depth"], 2);
 }
 
-#[tokio::test]
-async fn owner_input_resets_chain() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn owner_input_resets_chain(pool: PgPool) {
     let f = Fx::new(pool).await;
     let (mut from, mut to) = (f.a, f.b);
     for _ in 0..8 {
@@ -776,9 +748,7 @@ async fn owner_input_resets_chain() {
     assert_eq!(f.input(&sent["input_id"]).await.1["chain_depth"], 1);
 }
 
-#[tokio::test]
-async fn subscription_event_does_not_grow_chain() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn subscription_event_does_not_grow_chain(pool: PgPool) {
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -811,9 +781,7 @@ async fn subscription_event_does_not_grow_chain() {
     assert_eq!(f.inputs(f.b).await, 25);
 }
 
-#[tokio::test]
-async fn read_only_sender_cannot_write_by_proxy() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn read_only_sender_cannot_write_by_proxy(pool: PgPool) {
     let f = Fx::new(pool).await;
     let set = |id: Uuid, mode: &'static str, pending: Value| {
         let pool = f.pool.clone();
@@ -859,9 +827,7 @@ async fn read_only_sender_cannot_write_by_proxy() {
     f.send(f.a, f.b, "можно").await.unwrap();
 }
 
-#[tokio::test]
-async fn subscribe_tool_reports_the_state_and_unsubscribe_cancels_the_pending_event() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn subscribe_tool_reports_the_state_and_unsubscribe_cancels_the_pending_event(pool: PgPool) {
     let f = Fx::new(pool).await;
     let now = Utc::now();
     f.refresh(f.b, now - TimeDelta::hours(1)).await;
@@ -930,9 +896,7 @@ async fn subscribe_tool_reports_the_state_and_unsubscribe_cancels_the_pending_ev
     );
 }
 
-#[tokio::test]
-async fn subscribe_refuses_strangers_and_itself() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn subscribe_refuses_strangers_and_itself(pool: PgPool) {
     let f = Fx::new(pool).await;
     for tool in ["sessions.subscribe", "sessions.unsubscribe"] {
         assert_eq!(
@@ -954,9 +918,7 @@ async fn subscribe_refuses_strangers_and_itself() {
     assert!(f.subscription(f.a, f.a).await.is_none());
 }
 
-#[tokio::test]
-async fn a_full_target_queue_is_a_tool_error() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn a_full_target_queue_is_a_tool_error(pool: PgPool) {
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -972,9 +934,7 @@ async fn a_full_target_queue_is_a_tool_error() {
     assert_eq!(code(f.send(f.a, f.b, "лишнее").await), Code::QueueFull);
 }
 
-#[tokio::test]
-async fn parallel_sends_cannot_outrun_the_limit_or_the_dedup() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn parallel_sends_cannot_outrun_the_limit_or_the_dedup(pool: PgPool) {
     let f = Fx::with(
         pool,
         SessionToolsConfig {
@@ -1026,9 +986,7 @@ async fn parallel_sends_cannot_outrun_the_limit_or_the_dedup() {
     assert_eq!(f.inputs(third).await, 1);
 }
 
-#[tokio::test]
-async fn attachments_of_the_callers_conversation_are_forwarded() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn attachments_of_the_callers_conversation_are_forwarded(pool: PgPool) {
     let f = Fx::new(pool).await;
     let file = f.attachment(f.a, "report.pdf", "application/pdf").await;
     let answer = f
@@ -1056,9 +1014,7 @@ async fn attachments_of_the_callers_conversation_are_forwarded() {
     assert_eq!(linked, 1);
 }
 
-#[tokio::test]
-async fn foreign_attachment_is_refused() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn foreign_attachment_is_refused(pool: PgPool) {
     let f = Fx::new(pool).await;
     let other = f.conversation().await;
     let file = f.attachment(other, "secret.pdf", "application/pdf").await;
@@ -1074,9 +1030,7 @@ async fn foreign_attachment_is_refused() {
     assert_eq!(f.inputs(f.b).await, 0);
 }
 
-#[tokio::test]
-async fn image_attachment_is_refused_when_the_target_cannot_take_images() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn image_attachment_is_refused_when_the_target_cannot_take_images(pool: PgPool) {
     let f = Fx::new(pool).await;
     let file = f.attachment(f.a, "shot.png", "image/png").await;
     let error = f
@@ -1091,9 +1045,7 @@ async fn image_attachment_is_refused_when_the_target_cannot_take_images() {
     assert!(error.message.contains("does not accept"));
 }
 
-#[tokio::test]
-async fn an_old_worker_without_pilot_refuses_attachments_cleanly() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn an_old_worker_without_pilot_refuses_attachments_cleanly(pool: PgPool) {
     let f = Fx::new(pool).await;
     let file = f.attachment(f.a, "old.pdf", "application/pdf").await;
     sqlx::query("update machines set capabilities=array[]::text[] where id=$1")
@@ -1111,4 +1063,62 @@ async fn an_old_worker_without_pilot_refuses_attachments_cleanly() {
         .unwrap_err();
     assert_eq!(error.code, Code::CapabilityMissing);
     assert_eq!(f.inputs(f.b).await, 0);
+}
+
+/// session_send: метка источника, отказы, остановленная цель, повтор в окне,
+/// завершённый первый ввод, повтор транспорта, подписка по умолчанию.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn send_and_dedup_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        send_marks_origin_and_prefix,
+        send_refuses_itself_strangers_and_bad_arguments,
+        send_queues_for_a_stopped_target_and_says_so,
+        send_dedups_within_window,
+        dedup_ends_when_the_first_input_is_finished,
+        dedup_does_not_spend_the_rate_limit_and_rearms_with_the_input_still_queued,
+        a_finished_first_input_gets_a_new_input_before_the_rearm,
+        transport_retry_of_a_finished_call_does_not_rearm,
+        send_subscribes_by_default_and_opts_out,
+    );
+}
+
+/// Лимиты пары и отправителя, глубина цепочки, ввод владельца, событие подписки,
+/// прокси только для чтения, инструмент подписки.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn rate_and_chain_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        pair_rate_limit,
+        sender_rate_limit,
+        events_do_not_count_toward_the_rate_limit,
+        chain_depth_stops_ping_pong,
+        chain_depth_uses_the_input_of_the_running_turn,
+        owner_input_resets_chain,
+        subscription_event_does_not_grow_chain,
+        read_only_sender_cannot_write_by_proxy,
+        subscribe_tool_reports_the_state_and_unsubscribe_cancels_the_pending_event,
+    );
+}
+
+/// Отказы подписки, полная очередь цели, параллельные отправки, вложения своей
+/// сессии, чужие и картинки, старый воркер без pilot.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn queue_and_attachment_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        subscribe_refuses_strangers_and_itself,
+        a_full_target_queue_is_a_tool_error,
+        parallel_sends_cannot_outrun_the_limit_or_the_dedup,
+        attachments_of_the_callers_conversation_are_forwarded,
+        foreign_attachment_is_refused,
+        image_attachment_is_refused_when_the_target_cannot_take_images,
+        an_old_worker_without_pilot_refuses_attachments_cleanly,
+    );
 }
