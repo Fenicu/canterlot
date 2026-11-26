@@ -6,9 +6,11 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
     return 0
 fi
 # Чистка старых релизов: держит RETAIN_COUNT свежих на каждом компоненте плюс каждый
-# релиз, из которого живёт процесс. Удаление только буквальными абсолютными путями,
-# каждый проверен перед удалением: не цель current/build, ни один процесс не
-# исполняет файл из каталога. Без --apply только печатает, ничего не удаляет.
+# релиз, из которого живёт процесс. Записи env веба (canterlot.env.<sha>) идут за
+# релизами веба: живут, пока жив их релиз (свежие, build, Caddy, --keep), иначе
+# удаляются. Удаление только буквальными абсолютными путями, каждый проверен перед
+# удалением: не цель current/build, ни один процесс не исполняет файл из каталога.
+# Без --apply только печатает, ничего не удаляет.
 # Использование: scripts/deploy/retain.sh [--apply]
 set -euo pipefail
 
@@ -59,7 +61,15 @@ for raw in $(ssh_web "ls -dt '${WEB_RELEASES}'/*/"); do
         break
     fi
 done
-[ -n "${CADDY_LIVE_RELEASE}" ] || die "caddy serves ${CADDY_VERSION}, but no release directory matches it"
+# Каталога раздаваемого релиза может уже не быть (его удалила прошлая чистка).
+# Тогда берём id прямо из version.json: удалять чужие каталоги это не позволяет
+# (совпавшего каталога нет), но env-запись этого релиза всё равно надо сохранить.
+if [ -z "${CADDY_LIVE_RELEASE}" ]; then
+    require_release_id "${CADDY_VERSION}" \
+        || die "caddy serves ${CADDY_VERSION}, which is not a release id and matches no release directory"
+    CADDY_LIVE_RELEASE="${CADDY_VERSION}"
+    log "caddy serves ${CADDY_VERSION}: no release directory matches it; its env record is still kept"
+fi
 require_release_id "${CADDY_LIVE_RELEASE}"
 
 # Релиз процесса хаба (живой) и релизы живых супервизоров (эта машина). Только имена.
@@ -111,12 +121,80 @@ plan_releases() {
     log "${label}: ${rank} releases total"
 }
 
-plan_releases "hub" "$(ssh_hub "ls -dt '${HUB_RELEASES}'/*/")" "hub" \
+HUB_RELEASE_LIST="$(ssh_hub "ls -dt '${HUB_RELEASES}'/*/")"
+WEB_RELEASE_LIST="$(ssh_web "ls -dt '${WEB_RELEASES}'/*/")"
+WORKER_RELEASE_LIST="$(ls -dt "${WORKER_RELEASES}"/*/)"
+plan_releases "hub" "${HUB_RELEASE_LIST}" "hub" \
     "${HUB_EXE_RELEASE} ${HUB_CURRENT_TARGET}${KEEP_IDS}"
-plan_releases "web" "$(ssh_web "ls -dt '${WEB_RELEASES}'/*/")" "web" \
+plan_releases "web" "${WEB_RELEASE_LIST}" "web" \
     "${WEB_BUILD_TARGET} ${CADDY_LIVE_RELEASE}${KEEP_IDS}"
-plan_releases "worker" "$(ls -dt "${WORKER_RELEASES}"/*/)" "local" \
+plan_releases "worker" "${WORKER_RELEASE_LIST}" "local" \
     "${WORKER_LIVE} ${WORKER_CURRENT_TARGET}${KEEP_IDS}"
+
+# Набор релизов веба, чьи env-записи обязаны остаться: свежие RETAIN_COUNT, ссылка
+# build, релиз Caddy (version.json) и каждый --keep. Cutover передаёт в --keep в том
+# числе PREV_WEB_SHA — прежний build до flip, из которого rollback возвращает PWA;
+# поэтому запись прежнего релиза цела, даже если его каталог уже удалён раньше.
+WEB_NEWEST_IDS=""
+rank=0
+# shellcheck disable=SC2086
+for raw in ${WEB_RELEASE_LIST}; do
+    dir="${raw%/}"
+    rank=$((rank + 1))
+    [ "${rank}" -le "${RETAIN_COUNT}" ] || break
+    name="${dir##*/}"
+    WEB_NEWEST_IDS+=" ${name}"
+done
+WEB_KEPT_IDS="${WEB_BUILD_TARGET} ${CADDY_LIVE_RELEASE}${KEEP_IDS}${WEB_NEWEST_IDS}"
+WEB_KEPT_IDS="$(printf '%s\n' "${WEB_KEPT_IDS}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+WEB_KEPT_IDS="${WEB_KEPT_IDS% }"
+
+# Записи env и остатки .stage в каталоге Caddy. Скрипт только читает и печатает
+# строки kind|id|age|path; возраст считается по часам самого веб-хоста.
+# shellcheck disable=SC2016 # удалённый скрипт раскрывает свои позиционные аргументы
+ENV_FILES_SCRIPT='env="$1"; dir="${env%/*}"; base="${env##*/}"; now="$(date -u +%s)"
+for f in "$dir/$base".*; do
+    [ -f "$f" ] || continue
+    if [ -L "$f" ]; then continue; fi
+    n="${f##*/}"
+    kind=""; rest=""
+    case "$n" in
+        "$base".*.stage) kind="stage"; rest="${n#"$base".}"; rest="${rest%.stage}" ;;
+        "$base".*) kind="record"; rest="${n#"$base".}" ;;
+        *) continue ;;
+    esac
+    case "$rest" in "" | *[!0-9a-f]*) continue ;; esac
+    { [ "${#rest}" -eq 12 ] || [ "${#rest}" -eq 40 ]; } || continue
+    m="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
+    case "$m" in "" | *[!0-9]*) m=0 ;; esac
+    if [ "$m" -gt 0 ]; then age=$((now - m)); else age=-1; fi
+    printf "%s|%s|%s|%s\n" "$kind" "$rest" "$age" "$f"
+done'
+
+plan_env_files() {
+    local kind id age path listing
+    listing="$(ssh_web "$(script_cmd_text "${ENV_FILES_SCRIPT}" "${WEB_ENV}")")" \
+        || die "cannot list env records in ${WEB_ENV%/*}"
+    while IFS='|' read -r kind id age path; do
+        [ -n "${path}" ] || continue
+        if [ "${kind}" = "record" ]; then
+            case " ${WEB_KEPT_IDS} " in
+                *" ${id} "*) log "keep ${path} (env record of a kept web release)" ;;
+                *)
+                    log "REMOVE ${path}"
+                    printf 'webenv|%s\n' "${path}" >>"${REMOVE_LIST}" ;;
+            esac
+        else
+            if [ "${age}" -ge 0 ] && [ "${age}" -gt "${ENV_STAGE_MIN_AGE}" ]; then
+                log "REMOVE ${path}"
+                printf 'webstage|%s\n' "${path}" >>"${REMOVE_LIST}"
+            else
+                log "keep ${path} (env stage younger than ${ENV_STAGE_MIN_AGE} s, or age unreadable)"
+            fi
+        fi
+    done <<<"${listing}"
+}
+plan_env_files
 
 # Локальный dist: держать 3 свежих плюс всё, что передано в --keep (цель и
 # текущие релизы). Удаление — только буквальные абсолютные пути под DIST_BASE.
@@ -257,6 +335,99 @@ if [ ! -s "${REMOVE_LIST}" ]; then
 fi
 log "applying removals, each guarded by literal-path checks"
 while IFS='|' read -r hostkind path; do
+    case "${hostkind}" in
+        webenv|webstage)
+            case "${path}" in
+                "${WEB_ENV}".*) rest="${path#"${WEB_ENV}".}" ;;
+                *) die "refusing odd env path: ${path}" ;;
+            esac
+            if [ "${hostkind}" = "webenv" ]; then
+                is_release_id "${rest}" || die "refusing odd env record: ${path}"
+                env_id="${rest}"
+                case " ${WEB_KEPT_IDS} " in
+                    *" ${env_id} "*) die "guard: ${path} is a kept web env record" ;;
+                esac
+                remove_rc=0
+                # Сверка имени, живого релиза, резерва и удаление — одна удалённая
+                # команда под тем же lock, что build flip и compose up.
+                run_write "remove web env record" web_locked '
+                    env="$1"; path="$2"; id="$3"; base="$4"; container="$5"; version_json="$6"; build="$7"
+                    [ -f "${path}" ] || { echo "guard: ${path} is not a regular file" >&2; exit 4; }
+                    if [ -L "${path}" ]; then echo "guard: ${path} is a symlink" >&2; exit 2; fi
+                    case "${path}" in
+                        "${env}".*) got="${path#"${env}".}" ;;
+                        *) echo "guard: ${path} is not an env record" >&2; exit 2 ;;
+                    esac
+                    [ "${got}" = "${id}" ] || { echo "guard: ${path} name mismatch" >&2; exit 2; }
+                    case "${id}" in *[!0-9a-f]*) echo "guard: odd release id ${id}" >&2; exit 2 ;; esac
+                    { [ "${#id}" -eq 12 ] || [ "${#id}" -eq 40 ]; } \
+                        || { echo "guard: odd release id ${id}" >&2; exit 2; }
+                    [ ! -e "${base}/.reserved.${id}" ] \
+                        || { echo "guard: ${path} is reserved by a running operation" >&2; exit 6; }
+                    now="$(docker exec "${container}" cat "${version_json}")" \
+                        || { echo "guard: cannot read caddy version.json" >&2; exit 4; }
+                    ver="$(printf "%s" "${now}" | sed -n "s/.*\"version\"[ ]*:[ ]*\"\([0-9a-zA-Z]\+\)\".*/\1/p")"
+                    [ -n "${ver}" ] || { echo "guard: cannot parse caddy version.json" >&2; exit 4; }
+                    if [ "${#id}" -lt "${#ver}" ]; then short="${id}"; long="${ver}"; else short="${ver}"; long="${id}"; fi
+                    if [ "${#short}" -ge 7 ]; then
+                        case "${long}" in "${short}"*) echo "guard: ${path} belongs to the release caddy serves now" >&2; exit 5 ;; esac
+                    fi
+                    cur="$(readlink "${build}")" || { echo "guard: cannot read web build" >&2; exit 4; }
+                    cur="${cur##*/}"
+                    [ "${cur}" != "${id}" ] || { echo "guard: ${path} is the web build now" >&2; exit 5; }
+                    rm -f "${path}"
+                ' "${WEB_ENV}" "${path}" "${env_id}" "${WEB_SITES_BASE}" "${WEB_CONTAINER}" "${WEB_CONTAINER_VERSION_JSON}" "${WEB_BUILD_LINK}" \
+                    || remove_rc=$?
+            else
+                case "${rest}" in
+                    *.stage) env_id="${rest%.stage}" ;;
+                    *) die "refusing odd env stage: ${path}" ;;
+                esac
+                is_release_id "${env_id}" || die "refusing odd env stage: ${path}"
+                remove_rc=0
+                run_write "remove web env stage" web_locked '
+                    env="$1"; path="$2"; id="$3"; min_age="$4"
+                    [ -f "${path}" ] || { echo "guard: ${path} is not a regular file" >&2; exit 4; }
+                    if [ -L "${path}" ]; then echo "guard: ${path} is a symlink" >&2; exit 2; fi
+                    case "${path}" in
+                        "${env}".*.stage) got="${path#"${env}".}"; got="${got%.stage}" ;;
+                        *) echo "guard: ${path} is not an env stage" >&2; exit 2 ;;
+                    esac
+                    [ "${got}" = "${id}" ] || { echo "guard: ${path} name mismatch" >&2; exit 2; }
+                    case "${id}" in *[!0-9a-f]*) echo "guard: odd release id ${id}" >&2; exit 2 ;; esac
+                    { [ "${#id}" -eq 12 ] || [ "${#id}" -eq 40 ]; } \
+                        || { echo "guard: odd release id ${id}" >&2; exit 2; }
+                    m="$(stat -c %Y "${path}" 2>/dev/null)" \
+                        || { echo "guard: cannot read ${path} mtime" >&2; exit 4; }
+                    now="$(date -u +%s)"
+                    age=$((now - m))
+                    [ "${age}" -gt "${min_age}" ] \
+                        || { echo "guard: ${path} is younger than ${min_age} s" >&2; exit 7; }
+                    rm -f "${path}"
+                ' "${WEB_ENV}" "${path}" "${env_id}" "${ENV_STAGE_MIN_AGE}" \
+                    || remove_rc=$?
+            fi
+            if [ "${remove_rc}" = "6" ]; then
+                log "skip ${path}: reserved by a running operation"
+                continue
+            fi
+            if [ "${remove_rc}" = "7" ]; then
+                log "skip ${path}: env stage is younger than ${ENV_STAGE_MIN_AGE} s"
+                continue
+            fi
+            if [ "${remove_rc}" != "0" ]; then
+                die "removal of ${path} failed (rc ${remove_rc})"
+            fi
+            if is_rehearse; then
+                log "rehearse: ${path} would be removed (nothing was written)"
+            elif path_is_gone web "${path}"; then
+                log "removed ${path}"
+            else
+                log "skip ${path}: still present after the remove"
+            fi
+            continue
+            ;;
+    esac
     case "${path}" in
         "${HUB_RELEASES}"/????????????|"${WEB_RELEASES}"/????????????|"${WORKER_RELEASES}"/????????????|"${HUB_BACKUP_DIR}"/canterlot-pre-*.dump) ;;
         "${DIST_BASE:-/nonexistent}"/????????????) ;;

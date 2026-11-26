@@ -19,6 +19,13 @@ setup_retain() {
         deploy_release worker "00000000000${i}"
         sleep 0.05
     done
+    # Записи env каждого релиза и посторонние файлы рядом: retention обязан
+    # трогать только canterlot.env.<release id>.
+    for i in 1 2 3 4 5; do
+        printf 'CANTERLOT_CSP="csp-%s"\n' "${i}" >"${WEB_ENV}.00000000000${i}"
+    done
+    printf 'CANTERLOT_CSP="live"\n' >"${WEB_ENV}"
+    printf 'UNRELATED=1\n' >"$(dirname "${WEB_ENV}")/.env"
     # Живой хаб поднимаем из rel1, затем возвращаем current на rel5: живой релиз
     # обязан быть старше трёх свежих и удержаться только как live.
     ln -sfn "releases/000000000001" "${HUB_CURRENT}"
@@ -46,6 +53,9 @@ setup_retain() {
 # R1: план — удалять rel1,rel2 (старые, не живые), держать остальное + дампы 4,5 + текущий.
 case_begin "retain plan"
 setup_retain plan
+OLD_STAGE="${WEB_ENV}.000000000002.stage"
+printf 'CANTERLOT_CSP="old-stage"\n' >"${OLD_STAGE}"
+touch -d '2 hours ago' "${OLD_STAGE}"
 if bash "${DEPLOY_DIR}/retain.sh" >"${FAKE_ROOT}/retain.log" 2>&1; then
     case_ok "exit 0"
 else
@@ -63,7 +73,12 @@ assert_contains "${FAKE_ROOT}/retain.log" "REMOVE ${WORKER_RELEASES}/00000000000
 assert_contains "${FAKE_ROOT}/retain.log" "keep dump ${FAKE_ROOT}/hub/backups/canterlot-pre-000000000003.dump" "third-newest dump kept"
 assert_contains "${FAKE_ROOT}/retain.log" "REMOVE ${FAKE_ROOT}/hub/backups/canterlot-pre-000000000002.dump" "dump 2 planned"
 assert_contains "${FAKE_ROOT}/retain.log" "REMOVE ${FAKE_ROOT}/hub/backups/canterlot-pre-000000000001.dump" "old dump planned"
+assert_contains "${FAKE_ROOT}/retain.log" "keep ${WEB_ENV}.000000000001 (env record of a kept web release)" "served release env record kept"
+assert_contains "${FAKE_ROOT}/retain.log" "REMOVE ${WEB_ENV}.000000000002" "old web env record planned"
+assert_contains "${FAKE_ROOT}/retain.log" "REMOVE ${OLD_STAGE}" "old env stage planned"
 [ -d "${HUB_RELEASES}/000000000001" ] && case_ok "nothing deleted without --apply" || case_fail "deleted in plan mode"
+[ -f "${WEB_ENV}.000000000002" ] && [ -f "${OLD_STAGE}" ] \
+    && case_ok "plan mode leaves env records and stages in place" || case_fail "plan mode deleted env files"
 teardown_case
 case_end
 
@@ -93,6 +108,11 @@ fi
 [ -d "${WEB_RELEASES}/000000000001" ] && [ ! -e "${WEB_RELEASES}/000000000002" ] \
     && case_ok "caddy-served web release kept, old web release removed" \
     || case_fail "caddy-served web release removed or old kept"
+[ ! -e "${WEB_ENV}.000000000002" ] && [ -f "${WEB_ENV}.000000000001" ] \
+    && [ -f "${WEB_ENV}.000000000003" ] && [ -f "${WEB_ENV}.000000000004" ] \
+    && [ -f "${WEB_ENV}.000000000005" ] && [ -f "${WEB_ENV}" ] \
+    && case_ok "env records follow kept web releases; the live env stays" \
+    || case_fail "env records kept/deleted wrong"
 [ -d "${WORKER_RELEASES}/000000000001" ] && [ ! -e "${WORKER_RELEASES}/000000000002" ] \
     && case_ok "live worker release kept, old worker release removed" \
     || case_fail "live worker release removed or old worker kept"
@@ -216,14 +236,16 @@ else
 fi
 [ -d "${HUB_RELEASES}/000000000002" ] && [ -d "${WEB_RELEASES}/000000000002" ] && [ -d "${WORKER_RELEASES}/000000000002" ] \
     && case_ok "reserved release kept on all three hosts" || case_fail "reserved release was removed"
+[ -f "${WEB_ENV}.000000000002" ] && case_ok "reserved release env record kept" || case_fail "reserved env record was removed"
 assert_contains "${FAKE_ROOT}/retain.log" "reserved by a running operation" "skip reported"
 assert_not_contains "${FAKE_ROOT}/retain.log" "removed ${HUB_RELEASES}/000000000002" "hub not reported as removed"
 assert_not_contains "${FAKE_ROOT}/retain.log" "removed ${WEB_RELEASES}/000000000002" "web not reported as removed"
 assert_not_contains "${FAKE_ROOT}/retain.log" "removed ${WORKER_RELEASES}/000000000002" "worker not reported as removed"
 [ ! -e "${HUB_BACKUP_DIR}/canterlot-pre-000000000001.dump" ] && case_ok "unrelated dump rotation still happens" || case_fail "dump rotation stopped"
-rm -f "${HUB_BASE}/.reserved.000000000002"
+rm -f "${HUB_BASE}/.reserved.000000000002" "${WEB_SITES_BASE}/.reserved.000000000002" "${WORKER_BASE}/.reserved.000000000002"
 bash "${DEPLOY_DIR}/retain.sh" --apply >"${FAKE_ROOT}/retain2.log" 2>&1 || case_fail "second retain failed"
 [ ! -e "${HUB_RELEASES}/000000000002" ] && case_ok "without the reservation the release is removed" || case_fail "release kept without reservation"
+[ ! -e "${WEB_ENV}.000000000002" ] && case_ok "without the reservation the env record is removed" || case_fail "env record kept without reservation"
 teardown_case
 case_end
 
@@ -359,6 +381,95 @@ fi
     && case_ok "nothing removed" || case_fail "something was removed in a rehearsal"
 assert_contains "${FAKE_ROOT}/retain.log" "WOULD-WRITE" "deletions printed as WOULD-WRITE"
 assert_contains "${FAKE_ROOT}/retain.log" "(remove hub release)" "hub deletion printed"
+teardown_case
+case_end
+
+# --- env-записи: только canterlot.env.<release id>, живые и --keep целы ---
+case_begin "retain reduces many old env records to the kept web set"
+setup_retain envmany
+for n in $(seq 100 199); do
+    printf 'CANTERLOT_CSP="old-%s"\n' "${n}" >"${WEB_ENV}.$(printf '%012d' "${n}")"
+done
+if bash "${DEPLOY_DIR}/retain.sh" --apply --keep 000000000002 >"${FAKE_ROOT}/retain.log" 2>&1; then
+    case_ok "exit 0"
+else
+    case_fail "exit nonzero"; tail -8 "${FAKE_ROOT}/retain.log"
+fi
+LEFT="$(find "$(dirname "${WEB_ENV}")" -maxdepth 1 -type f -name 'canterlot.env.*' -printf '%f\n' | sort | grep -c . || true)"
+[ "${LEFT}" = "5" ] && case_ok "100 old records reduced to the five kept ones" || case_fail "${LEFT} env records left, want 5"
+[ ! -e "${WEB_ENV}.000000000100" ] && case_ok "an old record is removed" || case_fail "old record kept"
+[ -f "${WEB_ENV}.000000000002" ] && case_ok "--keep id keeps its env record" || case_fail "--keep env record removed"
+[ -f "${WEB_ENV}.000000000001" ] && [ -f "${WEB_ENV}.000000000005" ] \
+    && case_ok "served and current env records kept" || case_fail "served/current env record removed"
+assert_contains "${FAKE_ROOT}/retain.log" "REMOVE ${WEB_ENV}.000000000100" "old record planned by literal path"
+teardown_case
+case_end
+
+case_begin "retain keeps live and previous env records after their release dirs are pruned"
+setup_retain envpruned
+rm -rf "${WEB_RELEASES}/000000000005" "${WEB_RELEASES}/000000000002" "${WEB_RELEASES}/000000000001"
+printf 'CANTERLOT_CSP="orphan"\n' >"${WEB_ENV}.000000000009"
+if bash "${DEPLOY_DIR}/retain.sh" --apply --keep 000000000002 >"${FAKE_ROOT}/retain.log" 2>&1; then
+    case_ok "exit 0"
+else
+    case_fail "exit nonzero"; tail -8 "${FAKE_ROOT}/retain.log"
+fi
+[ -f "${WEB_ENV}.000000000005" ] && case_ok "live (build link) record kept without its release dir" || case_fail "live record removed"
+[ -f "${WEB_ENV}.000000000002" ] && case_ok "previous record kept without its release dir" || case_fail "previous record removed"
+[ -f "${WEB_ENV}.000000000001" ] && case_ok "caddy-served record kept without its release dir" || case_fail "caddy-served record removed"
+[ ! -e "${WEB_ENV}.000000000009" ] && case_ok "record with no release and no guard removed" || case_fail "unguarded orphan record kept"
+assert_contains "${FAKE_ROOT}/retain.log" "keep ${WEB_ENV}.000000000005 (env record of a kept web release)" "live record keep explained"
+assert_contains "${FAKE_ROOT}/retain.log" "no release directory matches it; its env record is still kept" "served record without a dir explained"
+teardown_case
+case_end
+
+case_begin "retain never touches the live env, .env or non-release env names"
+setup_retain envnames
+for odd in canterlot.env.notahex canterlot.env.00000000000g canterlot.env.000000000002.stage.extra test.env.000000000002; do
+    printf 'KEEP=1\n' >"$(dirname "${WEB_ENV}")/${odd}"
+done
+LIVE_BEFORE="$(cat "${WEB_ENV}")"
+DOTENV_BEFORE="$(cat "$(dirname "${WEB_ENV}")/.env")"
+if bash "${DEPLOY_DIR}/retain.sh" --apply >"${FAKE_ROOT}/retain.log" 2>&1; then
+    case_ok "exit 0"
+else
+    case_fail "exit nonzero"; tail -8 "${FAKE_ROOT}/retain.log"
+fi
+[ -f "${WEB_ENV}" ] && [ "$(cat "${WEB_ENV}")" = "${LIVE_BEFORE}" ] \
+    && case_ok "canterlot.env itself untouched" || case_fail "canterlot.env changed"
+[ -f "$(dirname "${WEB_ENV}")/.env" ] && [ "$(cat "$(dirname "${WEB_ENV}")/.env")" = "${DOTENV_BEFORE}" ] \
+    && case_ok ".env untouched" || case_fail ".env changed"
+for odd in canterlot.env.notahex canterlot.env.00000000000g canterlot.env.000000000002.stage.extra test.env.000000000002; do
+    [ -f "$(dirname "${WEB_ENV}")/${odd}" ] && case_ok "${odd} untouched" || case_fail "${odd} removed"
+done
+[ ! -e "${WEB_ENV}.000000000002" ] && case_ok "the real record is still pruned" || case_fail "real record kept"
+teardown_case
+case_end
+
+case_begin "retain removes only old env stage leftovers"
+setup_retain envstage
+OLD_STAGE="${WEB_ENV}.000000000002.stage"
+OLD_LIVE_STAGE="${WEB_ENV}.000000000001.stage"
+FRESH_STAGE="${WEB_ENV}.000000000003.stage"
+printf 'old\n' >"${OLD_STAGE}"
+printf 'old\n' >"${OLD_LIVE_STAGE}"
+printf 'fresh\n' >"${FRESH_STAGE}"
+touch -d '2 hours ago' "${OLD_STAGE}" "${OLD_LIVE_STAGE}"
+mkdir -p "${WEB_ENV}.000000000005.stage"
+printf 'keep\n' >"${WEB_ENV}.stage"
+printf 'keep\n' >"${WEB_ENV}.000000000004.stage.extra"
+if bash "${DEPLOY_DIR}/retain.sh" --apply >"${FAKE_ROOT}/retain.log" 2>&1; then
+    case_ok "exit 0"
+else
+    case_fail "exit nonzero"; tail -8 "${FAKE_ROOT}/retain.log"
+fi
+[ ! -e "${OLD_STAGE}" ] && case_ok "old stage of a pruned release removed" || case_fail "old stage kept"
+[ ! -e "${OLD_LIVE_STAGE}" ] && case_ok "old stage of a live release removed" || case_fail "live old stage kept"
+[ -f "${FRESH_STAGE}" ] && case_ok "fresh stage kept (an operation may be writing it)" || case_fail "fresh stage removed"
+[ -d "${WEB_ENV}.000000000005.stage" ] && case_ok "directory with a stage-like name untouched" || case_fail "stage directory touched"
+[ -f "${WEB_ENV}.stage" ] && [ -f "${WEB_ENV}.000000000004.stage.extra" ] \
+    && case_ok "names that are not exact stage leftovers untouched" || case_fail "odd stage-like name removed"
+assert_contains "${FAKE_ROOT}/retain.log" "younger than" "fresh stage keep explained"
 teardown_case
 case_end
 
