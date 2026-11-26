@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 struct Fx {
     pool: PgPool,
     client: TestClient,
@@ -74,9 +76,7 @@ fn subjects(page: &Value) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test]
-async fn owner_list_requires_domain_and_never_mixes() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn owner_list_requires_domain_and_never_mixes(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let work = fx
         .create("work", "Сборка воркера", "cargo build -p worker")
@@ -222,9 +222,7 @@ async fn owner_list_requires_domain_and_never_mixes() {
     let _ = fx.owner;
 }
 
-#[tokio::test]
-async fn owner_put_wrong_version_409() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn owner_put_wrong_version_409(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let created = fx.create("work", "Порт стенда", "5432").await;
     let id = created["id"].as_str().unwrap();
@@ -267,9 +265,7 @@ async fn owner_put_wrong_version_409() {
     assert_eq!(saved["subject"], "Порт стенда");
 }
 
-#[tokio::test]
-async fn owner_secret_warning_needs_force() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn owner_secret_warning_needs_force(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let secret = "ключ sk-abcdefghijklmnop1234 для вызова";
     let payload = |force: Option<bool>| {
@@ -340,9 +336,7 @@ async fn owner_secret_warning_needs_force() {
     assert_eq!(allowed.status.as_u16(), 200);
 }
 
-#[tokio::test]
-async fn hard_delete_404_after() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn hard_delete_404_after(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let created = fx.create("personal", "Старая заметка", "текст").await;
     let id = created["id"].as_str().unwrap();
@@ -394,9 +388,7 @@ async fn hard_delete_404_after() {
     assert!(subjects(&archived).is_empty());
 }
 
-#[tokio::test]
-async fn conversation_info_carries_memory_domain_and_conflict() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn conversation_info_carries_memory_domain_and_conflict(pool: PgPool) {
     let fx = Fx::new(pool.clone()).await;
     let machine = Uuid::now_v7();
     sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'test')")
@@ -450,9 +442,7 @@ async fn conversation_info_carries_memory_domain_and_conflict() {
     assert_eq!(conflict["memory_conflict"], true);
 }
 
-#[tokio::test]
-async fn owner_put_can_move_an_entry_between_projects() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn owner_put_can_move_an_entry_between_projects(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let created = fx
         .call(
@@ -490,4 +480,21 @@ async fn owner_put_can_move_an_entry_between_projects() {
         .await
         .json::<Value>();
     assert_eq!(kept["project"], "/h/work/beta");
+}
+
+/// API памяти владельца: домен и карточка сессии, удаление, список по домену,
+/// перенос между проектами, версия, предупреждение о секрете.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn memory_http_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        owner_list_requires_domain_and_never_mixes,
+        owner_put_wrong_version_409,
+        owner_secret_warning_needs_force,
+        hard_delete_404_after,
+        conversation_info_carries_memory_domain_and_conflict,
+        owner_put_can_move_an_entry_between_projects,
+    );
 }
