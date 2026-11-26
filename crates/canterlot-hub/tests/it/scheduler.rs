@@ -751,7 +751,7 @@ async fn scheduler_sleeps_until_next_due_and_wakes_on_new_job() {
 }
 
 #[tokio::test]
-async fn idempotent_schedule_returns_the_same_job() {
+async fn a_scheduled_message_is_idempotent_and_foreign_ids_are_not_found() {
     let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let now = Utc::now();
@@ -798,15 +798,11 @@ async fn idempotent_schedule_returns_the_same_job() {
         Err(ScheduleError::IdempotencyConflict)
     ));
     assert_eq!(count(&pool, "select count(*) from scheduled_jobs").await, 1);
-}
 
-#[tokio::test]
-async fn foreign_job_ids_are_not_found() {
-    let pool = canterlot_hub::testkit::db().await;
-    let s = testkit::seed(&pool).await;
+    // ── Чужие номера заданий не находятся ни одним путём ──
     let other = testkit::seed(&pool).await;
     let now = Utc::now();
-    let m = scheduled(&pool, &s, "one", now).await;
+    let m = scheduled(&pool, &s, "foreign", now).await;
     assert!(matches!(
         scheduler::cancel_message(&pool, other.owner_id, m.id, "cancel", Uuid::now_v7()).await,
         Err(ScheduleError::NotFound)

@@ -682,7 +682,7 @@ async fn resume_does_not_fire_the_occurrence_that_passed_while_paused() {
 /// при заявке, поэтому после шести часов простоя запуск уходил в работу. Теперь заявка
 /// старше окна записывается пропущенной.
 #[tokio::test]
-async fn a_stranded_claim_past_its_catch_up_window_is_missed_not_started() {
+async fn a_stranded_claim_is_missed_readmitted_or_failed_by_age() {
     let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
@@ -708,18 +708,13 @@ async fn a_stranded_claim_past_its_catch_up_window_is_missed_not_started() {
 
     scheduler(&f).tick(now).await.unwrap();
     let rid = run_id(&pool, &id).await;
-    let (state, detail) = state(&pool, rid).await;
-    assert_eq!(state, "missed", "{detail}");
+    let (missed_state, detail) = state(&pool, rid).await;
+    assert_eq!(missed_state, "missed", "{detail}");
     assert_eq!(detail["reason"], "catch_up_expired", "{detail}");
     assert_eq!(inputs_with_text(&pool, "посмотреть коммиты").await, 0);
     assert_eq!(runs_of(&pool, &id).await, 1);
-}
 
-#[tokio::test]
-async fn stranded_claimed_is_readmitted_and_young_prechecking_survives() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool.clone()).await;
-    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    // ── Брошенная заявка внутри окна возвращается, молодая чужая живёт ──
     let id = create(&f, existing(&f), "0 9 * * *").await;
     let schedule = Uuid::parse_str(&id).unwrap();
     let now = Utc::now();
@@ -763,14 +758,13 @@ async fn stranded_claimed_is_readmitted_and_young_prechecking_survives() {
     .unwrap();
     scheduler(&f).tick(now).await.unwrap();
     wait_state(&pool, rid, "started").await;
-    let (state, _): (String, Value) = state(&pool, young).await;
-    assert_eq!(state, "prechecking", "young prechecking is not reaped");
-}
+    let (young_state, _): (String, Value) = state(&pool, young).await;
+    assert_eq!(
+        young_state, "prechecking",
+        "young prechecking is not reaped"
+    );
 
-#[tokio::test]
-async fn interrupted_prechecking_is_failed_without_rerun() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool.clone()).await;
+    // ── Оборванная предпроверка падает без повтора ──
     let id = create(&f, existing(&f), "0 9 * * *").await;
     let schedule = Uuid::parse_str(&id).unwrap();
     let now = Utc::now();
@@ -795,8 +789,8 @@ async fn interrupted_prechecking_is_failed_without_rerun() {
         .await
         .unwrap();
     scheduler(&f).tick(now).await.unwrap();
-    let (state, detail) = state(&pool, rid).await;
-    assert_eq!(state, "failed");
+    let (failed_state, detail) = state(&pool, rid).await;
+    assert_eq!(failed_state, "failed");
     assert_eq!(detail["reason"], "precheck_result_unknown", "{detail}");
 }
 
@@ -2277,7 +2271,7 @@ async fn insert_run_at(
 /// 6: ручной запуск с тем же моментом, что у срабатывания по расписанию, его
 /// не подавляет: уникальность момента действует только для срабатываний.
 #[tokio::test]
-async fn manual_run_with_the_same_timestamp_does_not_suppress_the_cron_occurrence() {
+async fn a_run_at_the_same_timestamp_is_not_duplicated_and_moves_the_cursor() {
     let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
@@ -2299,14 +2293,8 @@ async fn manual_run_with_the_same_timestamp_does_not_suppress_the_cron_occurrenc
         cron, 1,
         "the cron occurrence is claimed beside the manual run"
     );
-}
 
-/// 6: если строка срабатывания уже есть, тик всё равно двигает `next_fire_at`.
-#[tokio::test]
-async fn claim_tick_advances_the_cursor_when_the_occurrence_row_exists() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fixture::new(pool.clone()).await;
-    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    // 6: если строка срабатывания уже есть, тик всё равно двигает `next_fire_at`.
     let id = create(&f, existing(&f), "0 9 * * *").await;
     let schedule = Uuid::parse_str(&id).unwrap();
     let at = Utc::now() - TimeDelta::seconds(30);
