@@ -3400,8 +3400,9 @@ async fn live_smoke() {
     }
     eprintln!("SMOKE: question turn finished");
     // Разрешение: перевод в read_only, команда создаёт файл, разрешаем.
-    let mut approval =
-        text("Create the file probe-smoke.txt with the single word SMOKE using a shell command.");
+    let mut approval = text(
+        "Create the file probe-smoke.txt with the single word SMOKE using a shell command. The sandbox is read-only, so request escalated permissions for that command.",
+    );
     approval.settings = Some(canterlot_worker::adapter::SettingsChange {
         model: None,
         effort: None,

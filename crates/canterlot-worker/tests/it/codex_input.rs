@@ -370,7 +370,8 @@ fn settings_become_turn_start_overrides() {
     assert_eq!(bypass["approvalPolicy"], "never");
     assert_eq!(bypass["sandboxPolicy"], json!({"type": "dangerFullAccess"}));
     let read_only = change(None, None, Some("read_only"));
-    assert_eq!(read_only["approvalPolicy"], "never");
+    // 0.172.0 при `never` молча отказывает, карточку даёт `on-request`.
+    assert_eq!(read_only["approvalPolicy"], "on-request");
     assert_eq!(
         read_only["sandboxPolicy"],
         json!({"type": "readOnly", "networkAccess": false})

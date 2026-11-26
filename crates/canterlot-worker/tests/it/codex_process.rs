@@ -482,7 +482,13 @@ fn permission_modes_map_to_thread_and_turn_policy() {
             Some("never"),
             Some("danger-full-access"),
         ),
-        (PermissionMode::ReadOnly, Some("never"), Some("read-only")),
+        // 0.172.0 при `never` молча отказывает: в read_only пишем `on-request`,
+        // иначе запрос выхода из песочницы не дойдёт до владельца.
+        (
+            PermissionMode::ReadOnly,
+            Some("on-request"),
+            Some("read-only"),
+        ),
         (PermissionMode::Owner, None, None),
     ] {
         let params = thread_start_params(mode, Some("gpt-6-luna"), workdir, "BLOCK");
@@ -514,10 +520,12 @@ fn permission_modes_map_to_thread_and_turn_policy() {
             Some(serde_json::json!({"type": "dangerFullAccess"}))
         )
     );
+    // 0.172.0 при `never` молча отказывает: в read_only пишем `on-request`,
+    // иначе запрос выхода из песочницы не дойдёт до владельца.
     assert_eq!(
         turn_policy(PermissionMode::ReadOnly, &empty),
         (
-            Some(serde_json::json!("never")),
+            Some(serde_json::json!("on-request")),
             Some(serde_json::json!({"type": "readOnly", "networkAccess": false}))
         )
     );

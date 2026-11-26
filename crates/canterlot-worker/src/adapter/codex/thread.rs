@@ -218,10 +218,12 @@ pub fn compose_developer_instructions(
 
 fn thread_policy(mode: PermissionMode) -> (Option<&'static str>, Option<&'static str>) {
     match mode {
-        // Везде yolo, кроме чтения: песочница только в read_only.
+        // Везде yolo, кроме чтения: песочница только в read_only. В нём
+        // `on-request`: 0.172.0 при `never` молча отказывает, а запрос выхода
+        // из песочницы должен дойти до владельца карточкой.
         PermissionMode::Ask => (Some("on-request"), Some("danger-full-access")),
         PermissionMode::Bypass => (Some("never"), Some("danger-full-access")),
-        PermissionMode::ReadOnly => (Some("never"), Some("read-only")),
+        PermissionMode::ReadOnly => (Some("on-request"), Some("read-only")),
         // Владелец: действует его конфигурация, поля опускаем.
         PermissionMode::Owner => (None, None),
     }
@@ -343,7 +345,7 @@ pub fn turn_policy(mode: PermissionMode, owner: &OwnerDefaults) -> (Option<Value
             Some(serde_json::json!({"type": "dangerFullAccess"})),
         ),
         PermissionMode::ReadOnly => (
-            Some("never".into()),
+            Some("on-request".into()),
             Some(serde_json::json!({"type": "readOnly", "networkAccess": false})),
         ),
         PermissionMode::Owner => {
