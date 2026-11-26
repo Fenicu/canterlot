@@ -8,6 +8,8 @@ use canterlot_hub::{
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 const WORK: &str = "/h/work/thing";
 
 fn at(day: u32) -> DateTime<Utc> {
@@ -44,9 +46,7 @@ async fn count(pool: &PgPool, table: &'static str) -> i64 {
     sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
 }
 
-#[tokio::test]
-async fn apply_dry_run_writes_nothing() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn apply_dry_run_writes_nothing(pool: PgPool) {
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let bundle = bundle(vec![
@@ -64,9 +64,7 @@ async fn apply_dry_run_writes_nothing() {
     assert_eq!(count(&pool, "memory_entries").await, 2);
 }
 
-#[tokio::test]
-async fn apply_is_idempotent() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn apply_is_idempotent(pool: PgPool) {
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let bundle = bundle(vec![entry(
@@ -100,9 +98,7 @@ async fn apply_is_idempotent() {
     assert_eq!(third.renamed_collisions, 1);
 }
 
-#[tokio::test]
-async fn apply_renames_subject_collision_with_suffix_2() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn apply_renames_subject_collision_with_suffix_2(pool: PgPool) {
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let bundle = bundle(vec![
@@ -129,9 +125,7 @@ async fn apply_renames_subject_collision_with_suffix_2() {
     }
 }
 
-#[tokio::test]
-async fn apply_refuses_secret_entry_even_if_bundle_has_it() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn apply_refuses_secret_entry_even_if_bundle_has_it(pool: PgPool) {
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let token = format!("ghp_{}", "x".repeat(36));
@@ -164,9 +158,7 @@ async fn apply_refuses_secret_entry_even_if_bundle_has_it() {
     );
 }
 
-#[tokio::test]
-async fn apply_refuses_index_and_credential_named_sources() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn apply_refuses_index_and_credential_named_sources(pool: PgPool) {
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let bundle = bundle(vec![
@@ -218,9 +210,7 @@ async fn import_lock_waiters(pool: &PgPool) -> i64 {
     .unwrap()
 }
 
-#[tokio::test]
-async fn concurrent_applies_of_one_bundle_create_each_entry_once() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn concurrent_applies_of_one_bundle_create_each_entry_once(pool: PgPool) {
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let bundle = bundle(vec![
@@ -266,9 +256,7 @@ async fn concurrent_applies_of_one_bundle_create_each_entry_once() {
     assert_eq!(count(&pool, "memory_entries").await, 2);
 }
 
-#[tokio::test]
-async fn frontmatter_description_to_subject_type_to_kind_modified_to_updated_at() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn frontmatter_description_to_subject_type_to_kind_modified_to_updated_at(pool: PgPool) {
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let long_subject = format!("{} конец", "слово ".repeat(40));
@@ -313,4 +301,22 @@ async fn frontmatter_description_to_subject_type_to_kind_modified_to_updated_at(
     );
     assert_eq!(kind, "decision");
     assert_eq!(*updated, at(3));
+}
+
+/// Импорт памяти: пробный прогон ничего не пишет, повтор идемпотентен, совпадение
+/// предмета, секреты и запрещённые источники, одновременный импорт, поля frontmatter.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn memory_import_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        apply_dry_run_writes_nothing,
+        apply_is_idempotent,
+        apply_renames_subject_collision_with_suffix_2,
+        apply_refuses_secret_entry_even_if_bundle_has_it,
+        apply_refuses_index_and_credential_named_sources,
+        concurrent_applies_of_one_bundle_create_each_entry_once,
+        frontmatter_description_to_subject_type_to_kind_modified_to_updated_at,
+    );
 }
