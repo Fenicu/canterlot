@@ -44,6 +44,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 const SECRET: &[u8] = b"proxy-secret-0123456789-abcdefghijklmnop-SECRETVALUE";
 
 // ---------------------------------------------------------------- журнал
@@ -380,7 +382,9 @@ fn ws_owner_headers() -> Vec<(&'static str, &'static str)> {
 }
 
 async fn seed_probe_tables(pool: &PgPool) {
+    // Таблицы проб не входят в снимок базы: случай таблицы заводит их заново.
     for statement in [
+        "drop table if exists probe_effects, probe_unique",
         "create table probe_effects (id uuid primary key default gen_random_uuid(), tag text not null)",
         "create table probe_unique (v text primary key)",
         "insert into probe_unique (v) values ('LEAK-DETAIL-MARKER')",
@@ -574,9 +578,7 @@ async fn background_services_stop_on_shutdown_and_release_their_locks() {
 
 // ---------------------------------------------------------------- вход
 
-#[tokio::test]
-async fn forged_user_header_from_untrusted_peer_is_unauthenticated() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn forged_user_header_from_untrusted_peer_is_unauthenticated(pool: PgPool) {
     let h = harness(pool).await;
     let none = h
         .outsider()
@@ -610,9 +612,7 @@ async fn forged_user_header_from_untrusted_peer_is_unauthenticated() {
     assert_eq!(h.hits(), 0);
 }
 
-#[tokio::test]
-async fn x_forwarded_for_never_grants_trust() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn x_forwarded_for_never_grants_trust(pool: PgPool) {
     let h = harness(pool).await;
     let baseline = h
         .outsider()
@@ -645,9 +645,7 @@ async fn x_forwarded_for_never_grants_trust() {
     assert_eq!(me(&trusted).await.status, 200);
 }
 
-#[tokio::test]
-async fn peer_address_is_taken_from_the_socket_not_headers() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn peer_address_is_taken_from_the_socket_not_headers(pool: PgPool) {
     let h = harness(pool).await;
     let from_proxy = me(&h.owner().await).await;
     assert_eq!(from_proxy.status, 200);
@@ -687,9 +685,7 @@ async fn peer_address_is_taken_from_the_socket_not_headers() {
     assert_eq!(upgrade_forged, 401);
 }
 
-#[tokio::test]
-async fn proxy_secret_is_required_when_configured() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn proxy_secret_is_required_when_configured(pool: PgPool) {
     captured();
     let marker_tag = marker("WRONGSECRET");
     let h = harness_with(pool, test_http_config(), Some(SECRET)).await;
@@ -780,9 +776,7 @@ async fn proxy_secret_is_required_when_configured() {
     }
 }
 
-#[tokio::test]
-async fn forged_identity_header_from_trusted_proxy_is_unauthenticated_and_flagged() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn forged_identity_header_from_trusted_proxy_is_unauthenticated_and_flagged(pool: PgPool) {
     let h = harness(pool).await;
     for login in [TEST_OWNER_LOGIN, "attacker", "Owner", ""] {
         let client = h
@@ -823,9 +817,7 @@ async fn forged_identity_header_from_trusted_proxy_is_unauthenticated_and_flagge
     assert_eq!(h.hits(), 0);
 }
 
-#[tokio::test]
-async fn missing_duplicated_or_unknown_session_cookie_is_unauthenticated() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn missing_duplicated_or_unknown_session_cookie_is_unauthenticated(pool: PgPool) {
     let h = harness(pool).await;
     let cookie = |value: &str| h.in_process().with_header("Cookie", value);
     let session = |token: &str| format!("__Host-canterlot_session={token}");
@@ -881,9 +873,7 @@ async fn session_lookup_database_error_is_503_not_401() {
     assert!(response.headers.get("set-cookie").is_none());
 }
 
-#[tokio::test]
-async fn ipv4_mapped_ipv6_peer_matches_trusted_cidr() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn ipv4_mapped_ipv6_peer_matches_trusted_cidr(pool: PgPool) {
     let nets: Vec<IpNet> = ["127.0.0.1/32", "10.0.0.0/8", "::1/128"]
         .iter()
         .map(|net| net.parse().unwrap())
@@ -972,9 +962,7 @@ fn proxy_secret_file_is_loaded_trimmed_and_validated() {
 
 // ---------------------------------------------------------------- CSRF и Origin
 
-#[tokio::test]
-async fn mutation_requires_allowed_origin_and_client_header() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn mutation_requires_allowed_origin_and_client_header(pool: PgPool) {
     let h = harness(pool).await;
     let body = Some(json!({"n": 1}));
     let base = || h.client();
@@ -1115,9 +1103,7 @@ async fn mutation_requires_allowed_origin_and_client_header() {
     assert_error(&response, 403, "origin_rejected", "auth", "never");
 }
 
-#[tokio::test]
-async fn safe_methods_need_no_origin() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn safe_methods_need_no_origin(pool: PgPool) {
     let h = harness(pool).await;
     let bare_owner = h.client().await.with_session(TEST_SESSION_TOKEN);
     let get = bare_owner.send(Method::GET, "/api/v1/me", None, None).await;
@@ -1133,9 +1119,7 @@ async fn safe_methods_need_no_origin() {
     assert_eq!(upgrade_status(h.addr, None, &ws_owner_headers()).await, 101);
 }
 
-#[tokio::test]
-async fn cross_origin_requests_get_no_cors_headers_and_options_is_405() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn cross_origin_requests_get_no_cors_headers_and_options_is_405(pool: PgPool) {
     let h = harness(pool).await;
     let no_cors = |response: &TestResponse| {
         for name in response.headers.keys() {
@@ -1321,9 +1305,7 @@ async fn every_route_requires_identity_unless_listed_public() {
 
 // ---------------------------------------------------------------- Idempotency-Key
 
-#[tokio::test]
-async fn idempotency_key_is_required_on_mutations_and_validated() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn idempotency_key_is_required_on_mutations_and_validated(pool: PgPool) {
     let h = harness(pool).await;
     let owner = h.owner().await;
     let body = Some(json!({"n": 7}));
@@ -1381,9 +1363,7 @@ async fn idempotency_key_is_required_on_mutations_and_validated() {
     assert_error(&twice, 400, "invalid_request", "browser", "never");
 }
 
-#[tokio::test]
-async fn idempotency_key_charset_excludes_internal_namespaces() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn idempotency_key_charset_excludes_internal_namespaces(pool: PgPool) {
     let h = harness(pool).await;
     let owner = h.owner().await;
     for key in ["sched:x", "wake:x", "sched:", "wake:0190b3a2", "SCHED:x"] {
@@ -1542,9 +1522,7 @@ async fn error_body_has_code_scope_retry_and_correlation_id_and_russian_message_
     }
 }
 
-#[tokio::test]
-async fn correlation_id_from_header_is_echoed_and_invalid_one_is_replaced() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn correlation_id_from_header_is_echoed_and_invalid_one_is_replaced(pool: PgPool) {
     let h = harness(pool).await;
     let owner = h.owner().await;
     let id = Uuid::now_v7();
@@ -1617,9 +1595,7 @@ async fn correlation_id_from_header_is_echoed_and_invalid_one_is_replaced() {
     Uuid::parse_str(header(&generated, "x-correlation-id").unwrap()).unwrap();
 }
 
-#[tokio::test]
-async fn request_log_has_no_header_values_query_or_body() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn request_log_has_no_header_values_query_or_body(pool: PgPool) {
     captured();
     let h = harness_with(pool, test_http_config(), Some(SECRET)).await;
     let leak = marker("LEAKED");
@@ -1717,9 +1693,7 @@ async fn request_log_has_no_header_values_query_or_body() {
     );
 }
 
-#[tokio::test]
-async fn oversized_json_body_is_413_resource_limit() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn oversized_json_body_is_413_resource_limit(pool: PgPool) {
     let mut config = test_http_config();
     config.max_json_body_bytes = 1024;
     let h = harness_with(pool, config, None).await;
@@ -1743,9 +1717,7 @@ async fn oversized_json_body_is_413_resource_limit() {
     assert_eq!(h.hits(), before);
 }
 
-#[tokio::test]
-async fn default_json_limit_is_512_kib() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn default_json_limit_is_512_kib(pool: PgPool) {
     let h = harness(pool).await;
     let owner = h.owner().await;
     let padded = |size: usize| format!("{{\"n\":1,\"pad\":\"{}\"}}", "x".repeat(size)).into_bytes();
@@ -1769,9 +1741,7 @@ async fn default_json_limit_is_512_kib() {
     assert_error(&over, 413, "resource_limit", "browser", "never");
 }
 
-#[tokio::test]
-async fn panic_in_a_handler_is_500_internal_without_details() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn panic_in_a_handler_is_500_internal_without_details(pool: PgPool) {
     let h = harness(pool).await;
     let owner = h.owner().await;
     let response = owner
@@ -1787,9 +1757,7 @@ async fn panic_in_a_handler_is_500_internal_without_details() {
 
 // ---------------------------------------------------------------- /config, /me, заголовки, OpenAPI
 
-#[tokio::test]
-async fn config_endpoint_matches_proto_limits_and_config_structs() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn config_endpoint_matches_proto_limits_and_config_structs(pool: PgPool) {
     let mut http = test_http_config();
     http.ws.delta_window = Duration::from_millis(40);
     let (mut deps, dir) = test_app_deps(pool, http, None).await;
@@ -1848,9 +1816,7 @@ async fn me_path(h: &Harness, path: &str) -> TestResponse {
     h.owner().await.send(Method::GET, path, None, None).await
 }
 
-#[tokio::test]
-async fn config_auth_is_empty_even_with_a_stale_logout_url() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn config_auth_is_empty_even_with_a_stale_logout_url(pool: PgPool) {
     let mut http = test_http_config();
     http.logout_url = Some("https://auth.example/logout?rd=https%3A%2F%2Fchat.test".into());
     let h = harness_with(pool, http, None).await;
@@ -1858,9 +1824,7 @@ async fn config_auth_is_empty_even_with_a_stale_logout_url() {
     assert_eq!(with["auth"], json!({}));
 }
 
-#[tokio::test]
-async fn config_exposes_reserve_and_warning_thresholds() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn config_exposes_reserve_and_warning_thresholds(pool: PgPool) {
     let h = harness(pool).await;
     let config: Value = me_path(&h, "/api/v1/config").await.json();
     let defaults = LimitsConfig::default();
@@ -1883,9 +1847,7 @@ async fn config_exposes_reserve_and_warning_thresholds() {
     assert_eq!(config["limit_thresholds"]["warn_pcts"], json!([80, 90, 95]));
 }
 
-#[tokio::test]
-async fn api_responses_carry_no_store_and_server_time() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn api_responses_carry_no_store_and_server_time(pool: PgPool) {
     let h = harness(pool).await;
     let owner = h.owner().await;
     let stranger = h.outsider().await.as_owner();
@@ -1949,9 +1911,7 @@ async fn api_responses_carry_no_store_and_server_time() {
     assert_eq!(header(&health, "cache-control"), Some("no-store"));
 }
 
-#[tokio::test]
-async fn openapi_is_served_and_committed_file_matches_generated() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn openapi_is_served_and_committed_file_matches_generated(pool: PgPool) {
     let h = harness(pool).await;
     let served = me_path(&h, "/api/v1/openapi.json").await;
     assert_eq!(served.status, 200);
@@ -2126,9 +2086,7 @@ async fn seed_owner(pool: &PgPool) -> Uuid {
     owner
 }
 
-#[tokio::test]
-async fn run_replays_stored_response_and_conflicts_on_other_request() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn run_replays_stored_response_and_conflicts_on_other_request(pool: PgPool) {
     seed_probe_tables(&pool).await;
     let owner = seed_owner(&pool).await;
     let other_owner = seed_owner(&pool).await;
@@ -2308,9 +2266,7 @@ async fn api_error_retries_only_a_deadlock_from_the_database() {
     );
 }
 
-#[tokio::test]
-async fn run_in_tx_executes_once_for_concurrent_same_key() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn run_in_tx_executes_once_for_concurrent_same_key(pool: PgPool) {
     seed_probe_tables(&pool).await;
     let owner = seed_owner(&pool).await;
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -2359,9 +2315,7 @@ async fn run_in_tx_executes_once_for_concurrent_same_key() {
     assert_eq!(recorded, 1);
 }
 
-#[tokio::test]
-async fn idempotent_mutation_retried_after_a_restart_replays_the_stored_response() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn idempotent_mutation_retried_after_a_restart_replays_the_stored_response(pool: PgPool) {
     seed_probe_tables(&pool).await;
     let first = harness(pool.clone()).await;
     let request = |h: Harness| async move {
@@ -2449,9 +2403,7 @@ async fn idempotent_mutation_retried_after_a_restart_replays_the_stored_response
 
 // ---------------------------------------------------------------- ошибки базы данных
 
-#[tokio::test]
-async fn db_error_logging_helper_returns_only_sqlstate_and_constraint() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn db_error_logging_helper_returns_only_sqlstate_and_constraint(pool: PgPool) {
     seed_probe_tables(&pool).await;
     let duplicate = sqlx::query("insert into probe_unique (v) values ('LEAK-DETAIL-MARKER')")
         .execute(&pool)
@@ -2516,9 +2468,7 @@ async fn db_error_logging_helper_returns_only_sqlstate_and_constraint() {
     assert!(!log_text().contains("LEAK-DETAIL-MARKER"));
 }
 
-#[tokio::test]
-async fn ws_without_upgrade_headers_uses_api_error_envelope() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn ws_without_upgrade_headers_uses_api_error_envelope(pool: PgPool) {
     let (deps, _directory) = test_app_deps(pool, test_http_config(), None).await;
     let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
     let response = client.send(Method::GET, "/api/v1/ws", None, None).await;
@@ -2527,4 +2477,79 @@ async fn ws_without_upgrade_headers_uses_api_error_envelope() {
     assert_eq!(body["error"]["code"], "invalid_request");
     assert_eq!(response.headers["cache-control"], "no-store");
     assert!(response.headers.contains_key("x-server-time-ms"));
+}
+
+/// Личность и доверие: заголовки от недоверенного соседа, адрес из сокета, cookie
+/// сеанса, адрес IPv4 внутри IPv6.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn identity_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        forged_user_header_from_untrusted_peer_is_unauthenticated,
+        x_forwarded_for_never_grants_trust,
+        peer_address_is_taken_from_the_socket_not_headers,
+        forged_identity_header_from_trusted_proxy_is_unauthenticated_and_flagged,
+        missing_duplicated_or_unknown_session_cookie_is_unauthenticated,
+        ipv4_mapped_ipv6_peer_matches_trusted_cidr,
+    );
+}
+
+/// Origin, CORS и секрет прокси. Перед каждым случаем база возвращается к снимку пустой
+/// базы; логи случаи различают по своей метке. Случай, который ставит перехват логов,
+/// идёт последним: после него все случаи пишут журнал уровня TRACE.
+#[tokio::test]
+async fn origin_and_proxy_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        mutation_requires_allowed_origin_and_client_header,
+        safe_methods_need_no_origin,
+        cross_origin_requests_get_no_cors_headers_and_options_is_405,
+        proxy_secret_is_required_when_configured,
+    );
+}
+
+/// Ключ идемпотентности, тело ошибки, идентификатор корреляции, лог запроса и
+/// пределы тела JSON.
+/// Перед каждым случаем база возвращается к снимку пустой базы; логи случаи различают
+/// по своей метке. Случай, который ставит перехват логов, идёт последним: после него
+/// все случаи пишут журнал уровня TRACE.
+#[tokio::test]
+async fn idempotency_and_errors_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        idempotency_key_is_required_on_mutations_and_validated,
+        idempotency_key_charset_excludes_internal_namespaces,
+        correlation_id_from_header_is_echoed_and_invalid_one_is_replaced,
+        oversized_json_body_is_413_resource_limit,
+        default_json_limit_is_512_kib,
+        panic_in_a_handler_is_500_internal_without_details,
+        request_log_has_no_header_values_query_or_body,
+    );
+}
+
+/// Конфигурация клиента, заголовки ответа, документ OpenAPI, повтор сохранённого
+/// ответа и одновременный ключ.
+/// Перед каждым случаем база возвращается к снимку пустой базы; логи случаи различают
+/// по своей метке. Случай, который ставит перехват логов, идёт последним: после него
+/// все случаи пишут журнал уровня TRACE.
+#[tokio::test]
+async fn config_and_replay_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        config_endpoint_matches_proto_limits_and_config_structs,
+        config_auth_is_empty_even_with_a_stale_logout_url,
+        config_exposes_reserve_and_warning_thresholds,
+        api_responses_carry_no_store_and_server_time,
+        openapi_is_served_and_committed_file_matches_generated,
+        run_replays_stored_response_and_conflicts_on_other_request,
+        run_in_tx_executes_once_for_concurrent_same_key,
+        idempotent_mutation_retried_after_a_restart_replays_the_stored_response,
+        ws_without_upgrade_headers_uses_api_error_envelope,
+        db_error_logging_helper_returns_only_sqlstate_and_constraint,
+    );
 }
