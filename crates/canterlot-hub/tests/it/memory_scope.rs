@@ -14,6 +14,8 @@ use canterlot_proto::worker::v1::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 const WORK: &str = "/h/work";
 const BASE: &str = "/h/data/worktrees";
 
@@ -98,9 +100,7 @@ fn classify_work_personal_neutral() {
     assert_eq!(classify("/h/work/x", &roots, None), Classification::Work);
 }
 
-#[tokio::test]
-async fn new_root_under_work_gets_work_and_its_project() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn new_root_under_work_gets_work_and_its_project(pool: PgPool) {
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     let work = create(&pool, &registry, request(&seed, "/h/work/p", None))
         .await
@@ -127,9 +127,7 @@ async fn new_root_under_work_gets_work_and_its_project() {
     assert_eq!(scope(&pool, neutral).await, (None, None));
 }
 
-#[tokio::test]
-async fn new_root_without_capability_gets_null() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn new_root_without_capability_gets_null(pool: PgPool) {
     let (seed, registry) = fixture(&pool, &["pilot_v1"]).await;
     let id = create(&pool, &registry, request(&seed, "/h/work/p", None))
         .await
@@ -157,9 +155,7 @@ fn hub_negotiates_memory_scope_v1() {
 
 /// Корни не присланы или список пуст (у воркера нет `~/work`): домен выдаёт правило по
 /// умолчанию `/home/<user>/work`, а не пустое значение.
-#[tokio::test]
-async fn unknown_or_empty_work_roots_fall_back_to_the_default_rule() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn unknown_or_empty_work_roots_fall_back_to_the_default_rule(pool: PgPool) {
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     sqlx::query("update machines set allowed_roots='[\"/home\"]' where id=$1")
         .bind(seed.machine_id)
@@ -202,9 +198,7 @@ async fn unknown_or_empty_work_roots_fall_back_to_the_default_rule() {
     }
 }
 
-#[tokio::test]
-async fn spawn_side_fork_routine_copy_inherit_parent_scope() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn spawn_side_fork_routine_copy_inherit_parent_scope(pool: PgPool) {
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     let _lease = registry.connect_for_tests(
         seed.machine_id,
@@ -267,9 +261,7 @@ async fn own_worktree(pool: &PgPool, owner: Uuid, path: &str) {
         .unwrap();
 }
 
-#[tokio::test]
-async fn spawn_into_a_worktree_is_classified_by_the_conversation_that_owns_it() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn spawn_into_a_worktree_is_classified_by_the_conversation_that_owns_it(pool: PgPool) {
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     let work = create(&pool, &registry, request(&seed, "/h/work/p", None))
         .await
@@ -305,9 +297,7 @@ async fn spawn_into_a_worktree_is_classified_by_the_conversation_that_owns_it() 
     assert_eq!(scope(&pool, child).await, some("work", "/h/work/p"));
 }
 
-#[tokio::test]
-async fn child_with_other_domain_workdir_is_domain_mismatch() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn child_with_other_domain_workdir_is_domain_mismatch(pool: PgPool) {
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     let work = create(&pool, &registry, request(&seed, "/h/work/p", None))
         .await
@@ -404,9 +394,7 @@ async fn conflicts(pool: &PgPool, conversation: Uuid) -> i64 {
     .unwrap()
 }
 
-#[tokio::test]
-async fn isolated_launch_is_classified_by_its_source_repo() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn isolated_launch_is_classified_by_its_source_repo(pool: PgPool) {
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     // Личный на вид путь, за которым рабочий репозиторий; копия лежит в нейтральной базе.
     let linked = create(&pool, &registry, request(&seed, "/h/play/link", None))
@@ -439,9 +427,7 @@ async fn isolated_launch_is_classified_by_its_source_repo() {
     assert_eq!(scope(&pool, old).await, some("personal", "/h/play/old"));
 }
 
-#[tokio::test]
-async fn launch_canonical_path_contradicting_domain_sets_null_and_records_conflict() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn launch_canonical_path_contradicting_domain_sets_null_and_records_conflict(pool: PgPool) {
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     // Личный путь, который симлинк ведёт в рабочий корень.
     let linked = create(&pool, &registry, request(&seed, "/h/play/link", None))
@@ -495,9 +481,7 @@ async fn launch_canonical_path_contradicting_domain_sets_null_and_records_confli
 /// Отправка держит `for key share` на разговоре цели и потом ждёт её очередь; приём журнала
 /// держит очередь. Проверка запуска не должна ждать `key share`, иначе цикл: PostgreSQL
 /// оборвёт одну из транзакций. Здесь отправка держит строку, а запуск идёт мимо неё.
-#[tokio::test]
-async fn launch_recheck_does_not_wait_for_key_share_held_by_send() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn launch_recheck_does_not_wait_for_key_share_held_by_send(pool: PgPool) {
     let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
     // Совпавший домен и домен, который придётся обнулить: оба хода не ждут `key share`.
     for (workdir, canonical, expected) in [
@@ -724,4 +708,24 @@ async fn migration_removes_cross_domain_subscriptions_and_alarms(pool: PgPool) {
         .unwrap();
     assert_eq!(alarms, vec![alarm_same]);
     assert!(!alarms.contains(&alarm_cross) && !alarms.contains(&alarm_null));
+}
+
+/// Домен памяти сессии: корень под work, без способности, запасное правило, копии и
+/// рабочие копии наследуют домен, ребёнок другого домена.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn memory_scope_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        new_root_under_work_gets_work_and_its_project,
+        new_root_without_capability_gets_null,
+        unknown_or_empty_work_roots_fall_back_to_the_default_rule,
+        spawn_side_fork_routine_copy_inherit_parent_scope,
+        spawn_into_a_worktree_is_classified_by_the_conversation_that_owns_it,
+        child_with_other_domain_workdir_is_domain_mismatch,
+        isolated_launch_is_classified_by_its_source_repo,
+        launch_canonical_path_contradicting_domain_sets_null_and_records_conflict,
+        launch_recheck_does_not_wait_for_key_share_held_by_send,
+    );
 }
