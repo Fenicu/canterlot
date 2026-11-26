@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 use crate::support::auth::{AuthHub, PASSWORD, error_code, session_token, set_cookie};
 
 async fn me(hub: &AuthHub, token: &str) -> TestResponse {
@@ -26,9 +28,7 @@ fn cleared(response: &TestResponse) -> bool {
         .is_some_and(|(value, attributes)| value.is_empty() && attributes.ends_with("Max-Age=0"))
 }
 
-#[tokio::test]
-async fn auth_sessions_idle_session_expires_and_follows_the_setting() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_sessions_idle_session_expires_and_follows_the_setting(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let (id, token) = hub.session(SignInMethod::Password, None).await;
     sqlx::query("update owner_sessions set last_seen_at=now()-interval '91 days' where id=$1")
@@ -86,9 +86,7 @@ async fn auth_sessions_idle_session_expires_and_follows_the_setting() {
     }
 }
 
-#[tokio::test]
-async fn auth_sessions_revoked_session_names_the_reason_and_survives_as_a_tombstone() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_sessions_revoked_session_names_the_reason_and_survives_as_a_tombstone(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let (other, token) = hub.session(SignInMethod::Password, None).await;
     let deleted = hub
@@ -145,9 +143,7 @@ async fn auth_sessions_revoked_session_names_the_reason_and_survives_as_a_tombst
     assert_eq!(unknown.status, 404);
 }
 
-#[tokio::test]
-async fn auth_sessions_logout_revokes_only_itself_and_clears_the_cookie() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_sessions_logout_revokes_only_itself_and_clears_the_cookie(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let (phone, phone_token) = hub.session(SignInMethod::Password, None).await;
     let (approved, approved_token) = hub.session(SignInMethod::Qr, Some(phone)).await;
@@ -193,9 +189,7 @@ async fn auth_sessions_logout_revokes_only_itself_and_clears_the_cookie() {
     assert_eq!(hub.revoke_reason(approved).await.as_deref(), Some("logout"));
 }
 
-#[tokio::test]
-async fn auth_sessions_owner_revocation_cascades_over_qr_approvals() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_sessions_owner_revocation_cascades_over_qr_approvals(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let (phone, _) = hub.session(SignInMethod::Password, None).await;
     let (laptop, laptop_token) = hub.session(SignInMethod::Qr, Some(phone)).await;
@@ -271,9 +265,7 @@ async fn auth_sessions_owner_revocation_cascades_over_qr_approvals() {
     assert_eq!(hub.revoke_reason(child).await, None);
 }
 
-#[tokio::test]
-async fn auth_sessions_cascade_spares_the_acting_session() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_sessions_cascade_spares_the_acting_session(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let (phone, _) = hub.session(SignInMethod::Password, None).await;
     // Текущий сеанс вошёл по QR с телефона, затем доказал пароль.
@@ -298,9 +290,7 @@ async fn auth_sessions_cascade_spares_the_acting_session() {
     assert_eq!(hub.revoke_reason(child_of_current).await, None);
 }
 
-#[tokio::test]
-async fn auth_sessions_revoke_others_keeps_only_the_current() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_sessions_revoke_others_keeps_only_the_current(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let (a, a_token) = hub.session(SignInMethod::Password, None).await;
     let (b, _) = hub.session(SignInMethod::Qr, Some(TEST_SESSION_ID)).await;
@@ -331,9 +321,7 @@ async fn auth_sessions_revoke_others_keeps_only_the_current() {
     assert_eq!(list["current_id"], TEST_SESSION_ID.to_string());
 }
 
-#[tokio::test]
-async fn auth_sessions_password_change_revokes_others() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_sessions_password_change_revokes_others(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let (other, other_token) = hub.session(SignInMethod::Password, None).await;
@@ -383,9 +371,7 @@ async fn auth_sessions_password_change_revokes_others() {
     );
 }
 
-#[tokio::test]
-async fn auth_sessions_fifty_live_sessions_at_most() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_sessions_fifty_live_sessions_at_most(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let mut ids = Vec::new();
     for _ in 0..49 {
@@ -423,9 +409,7 @@ async fn auth_sessions_fifty_live_sessions_at_most() {
     assert_eq!(hub.revoke_reason(ids[1]).await.as_deref(), Some("limit"));
 }
 
-#[tokio::test]
-async fn auth_sessions_last_seen_is_written_once_a_minute_or_on_ip_change() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_sessions_last_seen_is_written_once_a_minute_or_on_ip_change(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let (id, token) = hub.session(SignInMethod::Password, None).await;
     let at = |offset: &str| {
@@ -478,9 +462,7 @@ async fn auth_sessions_last_seen_is_written_once_a_minute_or_on_ip_change() {
     assert_eq!(seen().await.1.as_deref(), Some("198.51.100.7"));
 }
 
-#[tokio::test]
-async fn auth_sessions_list_rename_and_order() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_sessions_list_rename_and_order(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let signed = hub
@@ -556,9 +538,7 @@ async fn auth_sessions_list_rename_and_order() {
     assert_eq!(missing.status, 404);
 }
 
-#[tokio::test]
-async fn auth_sessions_hourly_maintenance_purges_auth_rows() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn auth_sessions_hourly_maintenance_purges_auth_rows(pool: PgPool) {
     let hub = AuthHub::new(pool).await;
     let (old, token) = hub.session(SignInMethod::Password, None).await;
     sessions::revoke(
@@ -608,4 +588,26 @@ async fn auth_sessions_hourly_maintenance_purges_auth_rows() {
         assert_eq!(count, left, "{table}");
     }
     assert_eq!(reason(&me(&hub, &token).await), "owner");
+}
+
+/// Сеансы владельца: простой и настройка, отзыв с причиной, выход, каскад по QR,
+/// отзыв остальных, смена пароля.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn auth_session_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        auth_sessions_idle_session_expires_and_follows_the_setting,
+        auth_sessions_revoked_session_names_the_reason_and_survives_as_a_tombstone,
+        auth_sessions_logout_revokes_only_itself_and_clears_the_cookie,
+        auth_sessions_owner_revocation_cascades_over_qr_approvals,
+        auth_sessions_cascade_spares_the_acting_session,
+        auth_sessions_revoke_others_keeps_only_the_current,
+        auth_sessions_password_change_revokes_others,
+        auth_sessions_fifty_live_sessions_at_most,
+        auth_sessions_last_seen_is_written_once_a_minute_or_on_ip_change,
+        auth_sessions_list_rename_and_order,
+        auth_sessions_hourly_maintenance_purges_auth_rows,
+    );
 }
