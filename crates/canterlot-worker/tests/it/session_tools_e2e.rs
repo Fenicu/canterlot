@@ -16,7 +16,10 @@ use std::{
     time::Duration,
 };
 
-use canterlot_hub::{config::ActivityConfig, testkit::Method};
+use canterlot_hub::{
+    config::{ActivityConfig, SessionToolsConfig},
+    testkit::Method,
+};
 use canterlot_worker::config::ClaudeCodeConfig;
 use pilot::*;
 use rustix::process::Signal;
@@ -1191,11 +1194,27 @@ async fn loop_is_stopped_end_to_end() {
 #[tokio::test]
 async fn event_after_message_lowers_depth_and_the_rate_limit_stops_the_loop() {
     let pool = canterlot_hub::testkit::db().await;
-    let mut b = Bench::new(&pool).await;
+    // Пределы ужаты в той же пропорции, что боевые (пара 10 больше глубины 8): без сброса
+    // глубины событием петлю остановила бы глубина, а не предел пары. Каждый оборот — это
+    // три хода и окно тишины, и десять оборотов шли 20-40 с.
+    const PAIR_SENDS: i64 = 3;
+    let mut b = Bench::with(
+        &pool,
+        PilotOptions {
+            session_tools: Some(SessionToolsConfig {
+                spawn_stagger: Duration::ZERO,
+                pair_sends: PAIR_SENDS as u32,
+                max_chain_depth: 2,
+                ..Default::default()
+            }),
+            ..options()
+        },
+    )
+    .await;
     let work = b.p.work.clone();
     let first = b.session("synthetic", &work).await;
     let second = b.session("synthetic", &work).await;
-    const CYCLES: usize = 11;
+    const CYCLES: usize = PAIR_SENDS as usize + 1;
     let files = |name: &str| -> Vec<PathBuf> {
         (0..=CYCLES)
             .map(|n| work.join(format!("{name}-{n}.json")))
@@ -1217,8 +1236,7 @@ async fn event_after_message_lowers_depth_and_the_rate_limit_stops_the_loop() {
     b.p.submit(first, &hop(&sends[0]), &[]).await;
     // Обороты идут строго друг за другом: три хода и окно тишины на каждый. Срок держит один
     // оборот, а не всю цепочку: когда fsync соседей на общем диске идёт по полсекунды, оборот
-    // длится секунды, и общий срок на десять оборотов кончался раньше отказа по пределу.
-    const PAIR_SENDS: i64 = 10;
+    // длится секунды, и общий срок на все обороты кончался раньше отказа по пределу.
     for sent in 1..=PAIR_SENDS {
         until(&format!("message {sent} of the pair"), async || {
             let delivered: i64 = sqlx::query_scalar(
@@ -1250,7 +1268,7 @@ async fn event_after_message_lowers_depth_and_the_rate_limit_stops_the_loop() {
     .unwrap();
     assert_eq!(
         depths,
-        vec![1; 10],
+        vec![1; PAIR_SENDS as usize],
         "an event resets the chain, as D16 reads"
     );
     b.finish().await;

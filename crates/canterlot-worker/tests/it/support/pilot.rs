@@ -374,6 +374,8 @@ pub struct PilotOptions {
     /// Файлы секретов: `None` — временная база на tmpfs, которую создаёт стенд;
     /// тестовый воркер никогда не трогает `$XDG_RUNTIME_DIR`.
     pub secrets: Option<canterlot_worker::config::SecretConfig>,
+    /// Пределы межсессионных инструментов; `None` — боевые, без паузы между запусками детей.
+    pub session_tools: Option<SessionToolsConfig>,
 }
 
 impl Default for PilotOptions {
@@ -394,6 +396,7 @@ impl Default for PilotOptions {
             metrics_interval: Duration::from_secs(30),
             claude_code: None,
             secrets: None,
+            session_tools: None,
         }
     }
 }
@@ -448,10 +451,10 @@ impl Pilot {
                     ..Default::default()
                 },
                 // Сценарии запускают детей вплотную: пауза проверяется в тестах очереди хаба.
-                session_tools: SessionToolsConfig {
+                session_tools: options.session_tools.unwrap_or(SessionToolsConfig {
                     spawn_stagger: Duration::ZERO,
                     ..Default::default()
-                },
+                }),
                 ..Default::default()
             },
         )
