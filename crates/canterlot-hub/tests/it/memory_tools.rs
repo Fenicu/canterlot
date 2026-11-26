@@ -19,6 +19,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::{Snapshot, restore, run_cases};
+
 const WORK_A: &str = "/h/work/alpha";
 const WORK_B: &str = "/h/work/beta";
 const HOME_A: &str = "/h/home/alpha";
@@ -157,9 +159,7 @@ fn memory_tools_are_session_tools_with_documented_defaults() {
     assert_eq!(config.search_limit, 20);
 }
 
-#[tokio::test]
-async fn search_get_update_delete_never_cross_domain_guessed_id_is_not_found() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn search_get_update_delete_never_cross_domain_guessed_id_is_not_found(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let work = fx.session(Some("work"), Some(WORK_A)).await;
     let personal = fx.session(Some("personal"), Some(HOME_A)).await;
@@ -232,9 +232,7 @@ async fn search_get_update_delete_never_cross_domain_guessed_id_is_not_found() {
     assert_eq!(kept.version, 1);
 }
 
-#[tokio::test]
-async fn include_other_projects_stays_in_domain_and_allows_get() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn include_other_projects_stays_in_domain_and_allows_get(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let alpha = fx.session(Some("work"), Some(WORK_A)).await;
     let beta = fx.session(Some("work"), Some(WORK_B)).await;
@@ -295,9 +293,7 @@ async fn include_other_projects_stays_in_domain_and_allows_get() {
     }
 }
 
-#[tokio::test]
-async fn null_domain_caller_gets_memory_unavailable() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn null_domain_caller_gets_memory_unavailable(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let none = fx.session(None, None).await;
     let id = Uuid::now_v7().to_string();
@@ -327,9 +323,7 @@ async fn null_domain_caller_gets_memory_unavailable() {
     );
 }
 
-#[tokio::test]
-async fn write_returns_id_version_level_domain() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn write_returns_id_version_level_domain(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let work = fx.session(Some("work"), Some(WORK_A)).await;
     let project = fx
@@ -365,9 +359,7 @@ async fn write_returns_id_version_level_domain() {
     assert_eq!(events, 2);
 }
 
-#[tokio::test]
-async fn same_subject_active_is_subject_exists_with_id() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn same_subject_active_is_subject_exists_with_id(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let work = fx.session(Some("work"), Some(WORK_A)).await;
     let id = fx.write(&work, "Release checklist", "one", "project").await;
@@ -398,9 +390,7 @@ async fn same_subject_active_is_subject_exists_with_id() {
         .await;
 }
 
-#[tokio::test]
-async fn update_wrong_version_is_version_conflict_with_current() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn update_wrong_version_is_version_conflict_with_current(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let work = fx.session(Some("work"), Some(WORK_A)).await;
     let id = fx.write(&work, "Counter", "v1", "project").await;
@@ -480,9 +470,7 @@ async fn update_wrong_version_is_version_conflict_with_current() {
     assert!(cleared["valid_until"].is_null());
 }
 
-#[tokio::test]
-async fn concurrent_updates_one_wins() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn concurrent_updates_one_wins(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let work = fx.session(Some("work"), Some(WORK_A)).await;
     let id = fx.write(&work, "Race", "v1", "project").await;
@@ -568,9 +556,7 @@ fn patch_of(body: &str) -> Patch {
     }
 }
 
-#[tokio::test]
-async fn archive_create_same_subject_then_restore_is_subject_exists() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn archive_create_same_subject_then_restore_is_subject_exists(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let work = fx.session(Some("work"), Some(WORK_A)).await;
     let first = fx.write(&work, "Flaky test", "old", "project").await;
@@ -627,9 +613,7 @@ async fn archive_create_same_subject_then_restore_is_subject_exists() {
     ));
 }
 
-#[tokio::test]
-async fn revisions_capped_at_20() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn revisions_capped_at_20(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let work = fx.session(Some("work"), Some(WORK_A)).await;
     let scope = MemoryScope::owner(MemoryDomain::Work, Some(WORK_A.into()));
@@ -672,9 +656,7 @@ async fn revisions_capped_at_20() {
     assert!(kept.iter().all(|revision| revision.action == "update"));
 }
 
-#[tokio::test]
-async fn hard_delete_keeps_contentless_events() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn hard_delete_keeps_contentless_events(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let work = fx.session(Some("work"), Some(WORK_A)).await;
     let id = fx
@@ -731,9 +713,7 @@ async fn hard_delete_keeps_contentless_events() {
     ));
 }
 
-#[tokio::test]
-async fn rate_limit_61st_write_in_an_hour_is_rate_limited_under_parallel_writes() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn rate_limit_61st_write_in_an_hour_is_rate_limited_under_parallel_writes(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let work = fx.session(Some("work"), Some(WORK_A)).await;
     let context = Arc::new(fx.context());
@@ -776,9 +756,7 @@ async fn rate_limit_61st_write_in_an_hour_is_rate_limited_under_parallel_writes(
     fx.write(&other, "Fresh note", "text", "project").await;
 }
 
-#[tokio::test]
-async fn domain_full_at_2000() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn domain_full_at_2000(pool: PgPool) {
     let fx = Fx::with(
         pool,
         MemoryConfig {
@@ -821,9 +799,7 @@ async fn domain_full_at_2000() {
     fx.write(&work, "One more", "b", "domain").await;
 }
 
-#[tokio::test]
-async fn bad_level_for_project_level_without_project() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn bad_level_for_project_level_without_project(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let bare = fx.session(Some("personal"), None).await;
     let refused = error(
@@ -848,9 +824,7 @@ async fn bad_level_for_project_level_without_project() {
     assert_eq!(up.code, Code::BadLevel);
 }
 
-#[tokio::test]
-async fn own_project_before_domain_before_other_projects_expired_last() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn own_project_before_domain_before_other_projects_expired_last(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let alpha = fx.session(Some("work"), Some(WORK_A)).await;
     let beta = fx.session(Some("work"), Some(WORK_B)).await;
@@ -919,9 +893,7 @@ async fn own_project_before_domain_before_other_projects_expired_last() {
     assert_eq!(limited["count"], json!(2));
 }
 
-#[tokio::test]
-async fn exact_code_token_matches_via_simple_config() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn exact_code_token_matches_via_simple_config(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let work = fx.session(Some("work"), Some(WORK_A)).await;
     let id = fx
@@ -961,9 +933,7 @@ async fn exact_code_token_matches_via_simple_config() {
     assert_eq!(found["count"], json!(1), "{found}");
 }
 
-#[tokio::test]
-async fn secrets_and_bad_fields_are_refused_with_metadata() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn secrets_and_bad_fields_are_refused_with_metadata(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let work = fx.session(Some("work"), Some(WORK_A)).await;
     let token = "ghp_abcdefghijklmnopqrstuvwxyz0123";
@@ -1093,9 +1063,7 @@ async fn secrets_and_bad_fields_are_refused_with_metadata() {
     assert_eq!(unknown.code, Code::InvalidArguments);
 }
 
-#[tokio::test]
-async fn owner_scope_writes_skip_the_detector_but_agents_cannot() {
-    let pool = canterlot_hub::testkit::db().await;
+async fn owner_scope_writes_skip_the_detector_but_agents_cannot(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let owner = MemoryScope::owner(MemoryDomain::Personal, None);
     let mut conn = fx.pool.acquire().await.unwrap();
@@ -1128,4 +1096,43 @@ async fn owner_scope_writes_skip_the_detector_but_agents_cannot() {
         .await,
         Err(MemoryError::LooksLikeSecret { .. })
     ));
+}
+
+/// Инструменты памяти: домены и проекты не пересекаются, сессия без домена, запись,
+/// тот же предмет, конфликт версии.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn memory_tool_access_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        search_get_update_delete_never_cross_domain_guessed_id_is_not_found,
+        include_other_projects_stays_in_domain_and_allows_get,
+        null_domain_caller_gets_memory_unavailable,
+        write_returns_id_version_level_domain,
+        same_subject_active_is_subject_exists_with_id,
+        update_wrong_version_is_version_conflict_with_current,
+        concurrent_updates_one_wins,
+        archive_create_same_subject_then_restore_is_subject_exists,
+        revisions_capped_at_20,
+    );
+}
+
+/// Удаление без содержимого, лимит записей в час, полный домен, уровни, порядок
+/// выдачи, поиск по коду, секреты.
+/// Перед каждым случаем база возвращается к снимку пустой базы.
+#[tokio::test]
+async fn memory_tool_limits_cases() {
+    let pool = canterlot_hub::testkit::db().await;
+    Snapshot::take(&pool).await;
+    run_cases!(pool.clone(), before = restore;
+        hard_delete_keeps_contentless_events,
+        rate_limit_61st_write_in_an_hour_is_rate_limited_under_parallel_writes,
+        domain_full_at_2000,
+        bad_level_for_project_level_without_project,
+        own_project_before_domain_before_other_projects_expired_last,
+        exact_code_token_matches_via_simple_config,
+        secrets_and_bad_fields_are_refused_with_metadata,
+        owner_scope_writes_skip_the_detector_but_agents_cannot,
+    );
 }
