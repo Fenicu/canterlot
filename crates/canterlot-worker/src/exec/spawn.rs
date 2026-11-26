@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use super::ExecError;
 use crate::{
-    config::SupervisorTimers,
+    config::{SupervisorPeriods, SupervisorTimers},
     supervisor::ipc::{IpcError, read_message, validate_socket_path, write_message},
 };
 
@@ -131,7 +131,17 @@ pub(crate) fn base_spec_toml(
     );
     let socket_spec = toml::Value::String(socket.to_string_lossy().into_owned()).to_string();
     let cache_spec = toml::Value::String(version_cache.to_string_lossy().into_owned()).to_string();
-    format!("ipc_socket = {socket_spec}\nversion_cache = {cache_spec}\n{core}")
+    // Таблица периодов только у тестов: сопровождение прежнего выпуска отвергает
+    // незнакомый ключ, поэтому боевая спека её не содержит.
+    let periods = if timers.periods == SupervisorPeriods::default() {
+        String::new()
+    } else {
+        format!(
+            "\n[periods]\ngroup_record = {}\n",
+            millis(timers.periods.group_record)
+        )
+    };
+    format!("ipc_socket = {socket_spec}\nversion_cache = {cache_spec}\n{core}{periods}")
 }
 
 /// Готовит каталог исполнения и пишет уже собранную `supervisor_spec_toml` приватным файлом.
@@ -311,6 +321,37 @@ pub(super) async fn connect_attach(
 #[cfg(test)]
 mod tests {
     use super::{build_jobs_env, spawn_supervisor};
+
+    #[test]
+    fn periods_table_is_written_only_for_non_default_periods() {
+        use crate::config::{SupervisorPeriods, SupervisorTimers};
+        use crate::supervisor::SupervisorSpec;
+        use std::{path::Path, time::Duration};
+        let spec = |timers: &SupervisorTimers| {
+            super::base_spec_toml(
+                uuid::Uuid::nil(),
+                1,
+                uuid::Uuid::nil(),
+                0,
+                timers,
+                Path::new("/srv/ipc.sock"),
+                Path::new("/srv/cache.json"),
+            )
+        };
+        // Боевая спека та же, что читает сопровождение прежнего выпуска.
+        let prod = spec(&SupervisorTimers::default());
+        assert!(!prod.contains("periods"), "{prod}");
+        let parsed: SupervisorSpec = toml::from_str(&prod).unwrap();
+        assert_eq!(parsed.periods, SupervisorPeriods::default());
+        let short = SupervisorTimers {
+            periods: SupervisorPeriods {
+                group_record: Duration::from_millis(100),
+            },
+            ..SupervisorTimers::default()
+        };
+        let parsed: SupervisorSpec = toml::from_str(&spec(&short)).unwrap();
+        assert_eq!(parsed.periods.group_record, Duration::from_millis(100));
+    }
 
     #[test]
     fn cargo_build_jobs_defaults_but_never_overrides_the_parent() {

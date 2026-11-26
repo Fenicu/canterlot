@@ -67,8 +67,6 @@ const MAX_PENDING_MEDIA: usize = 32;
 const ORPHAN_REAP_PERIOD: Duration = Duration::from_secs(30);
 /// Как редко сигнал жизни хода (размышление без текста, повтор запроса) пишется в журнал.
 const PROGRESS_REEMIT: Duration = Duration::from_secs(30);
-/// Период снимка участников: он находит потомков, потерявших метку группы.
-const GROUP_RECORD_PERIOD: Duration = Duration::from_secs(5);
 /// Подготовка файла и ожидание очереди: срок не должен истекать, пока передача
 /// ждёт за другой загрузкой, поэтому здесь отдельный щедрый запас.
 const SHARE_QUEUE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -592,9 +590,9 @@ async fn reap_orphans(containment: Arc<dyn Containment>) {
     }
 }
 
-async fn record_group(containment: Arc<dyn Containment>, exec_dir: PathBuf) {
-    let mut tick =
-        tokio::time::interval_at(Instant::now() + GROUP_RECORD_PERIOD, GROUP_RECORD_PERIOD);
+/// Снимок участников раз в `period`: он находит потомков, потерявших метку группы.
+async fn record_group(containment: Arc<dyn Containment>, exec_dir: PathBuf, period: Duration) {
+    let mut tick = tokio::time::interval_at(Instant::now() + period, period);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
@@ -745,6 +743,7 @@ impl Supervisor {
         let recorder = tokio::spawn(record_group(
             self.containment.clone(),
             self.exec_dir.clone(),
+            self.spec.periods.group_record,
         ));
         let (control_tx, mut control_rx) = mpsc::unbounded_channel::<Control>();
         loop {
@@ -4170,6 +4169,7 @@ mod tests {
                 version_cache: None,
                 agent_nice: 0,
                 timers: Default::default(),
+                periods: Default::default(),
                 claude_code: None,
                 codex: None,
                 opencode: None,

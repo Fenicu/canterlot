@@ -281,6 +281,28 @@ pub struct SupervisorTimers {
     pub stop_grace: Duration,
     #[serde(with = "humantime_serde")]
     pub stop_retry: Duration,
+    /// Не читается из worker.toml: короткие значения задают только тесты, а в spec.toml
+    /// таблица `[periods]` попадает, лишь когда отличается от боевой.
+    #[serde(skip)]
+    pub periods: SupervisorPeriods,
+}
+
+/// Внутренние периоды сопровождения. Боевые значения — `Default`; тесты укорачивают их,
+/// чтобы не высиживать боевой период.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SupervisorPeriods {
+    /// Период снимка участников группы: он находит потомков, потерявших метку группы.
+    #[serde(with = "humantime_serde")]
+    pub group_record: Duration,
+}
+
+impl Default for SupervisorPeriods {
+    fn default() -> Self {
+        Self {
+            group_record: Duration::from_secs(5),
+        }
+    }
 }
 
 impl Default for SupervisorTimers {
@@ -293,6 +315,7 @@ impl Default for SupervisorTimers {
             cli_version_probe: Duration::from_secs(5),
             stop_grace: Duration::from_secs(5),
             stop_retry: Duration::from_secs(2),
+            periods: SupervisorPeriods::default(),
         }
     }
 }
@@ -867,6 +890,75 @@ impl WorkerAttachmentsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Боевые сроки и периоды: тесты подставляют короткие, поэтому изменение боевого
+    /// значения должно быть намеренным и менять эту проверку.
+    #[test]
+    fn prod_timer_defaults_are_pinned() {
+        let worker = WorkerTimers::default();
+        assert_eq!(
+            [
+                worker.handshake,
+                worker.http2_keepalive_interval,
+                worker.http2_keepalive_timeout,
+                worker.heartbeat,
+                worker.heartbeat_ack,
+                worker.range_ack,
+                worker.backoff_min,
+                worker.backoff_max,
+                worker.backoff_reset_after,
+            ],
+            [
+                Duration::from_secs(10),
+                Duration::from_secs(30),
+                Duration::from_secs(10),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_secs(10),
+                Duration::from_millis(250),
+                Duration::from_secs(30),
+                Duration::from_secs(30),
+            ]
+        );
+        let supervisor = SupervisorTimers::default();
+        assert_eq!(
+            [
+                supervisor.attach_wait,
+                supervisor.ready_deadline,
+                supervisor.transmit_deadline,
+                supervisor.cli_version_probe,
+                supervisor.stop_grace,
+                supervisor.stop_retry,
+                supervisor.periods.group_record,
+            ],
+            [
+                Duration::from_secs(30),
+                Duration::from_secs(90),
+                Duration::from_secs(10),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_secs(2),
+                Duration::from_secs(5),
+            ]
+        );
+    }
+
+    #[test]
+    fn supervisor_periods_are_not_read_from_worker_toml() {
+        let text = r#"
+hub_url = "https://localhost:1"
+ca_cert = "/tmp/ca.pem"
+token_file = "/tmp/token"
+machine_id = "00000000-0000-0000-0000-000000000001"
+installation_id = "00000000-0000-0000-0000-000000000002"
+restore_generation = "00000000-0000-0000-0000-000000000003"
+data_dir = "/tmp/store"
+
+[execution.supervisor.periods]
+group_record = "1ms"
+"#;
+        assert!(toml::from_str::<WorkerConfig>(text).is_err());
+    }
 
     #[test]
     fn ready_deadline_outlasts_the_cli_mcp_startup_timeout() {

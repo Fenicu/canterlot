@@ -63,6 +63,9 @@ pub struct SupervisorSpec {
     pub agent_nice: u32,
     #[serde(default)]
     pub timers: SupervisorTimers,
+    /// Короткие периоды тестов; боевая спека таблицы не содержит (`exec::spawn`).
+    #[serde(default)]
+    pub periods: crate::config::SupervisorPeriods,
     #[serde(default)]
     pub claude_code: Option<crate::config::ClaudeCodeConfig>,
     #[serde(default)]
