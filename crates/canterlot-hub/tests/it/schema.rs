@@ -10,6 +10,10 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::support::cases::run_cases;
+
+/// Миграции с нуля на пустой базе. Остальные проверки схемы идут на клоне шаблона:
+/// шаблон строит тот же набор миграций.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn migrations_apply_and_seed_works(pool: PgPool) -> Result<(), sqlx::Error> {
     let seed = testkit::seed(&pool).await;
@@ -82,7 +86,6 @@ async fn assert_initial_queue(pool: &PgPool, conversation_id: Uuid) -> Result<()
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn input_seq_unique_per_conversation(pool: PgPool) -> Result<(), sqlx::Error> {
     let seed = testkit::seed(&pool).await;
     insert_input(&pool, &seed, 1, "queued").await?;
@@ -138,7 +141,6 @@ async fn insert_input(
     Ok(input_id)
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn one_live_execution_per_conversation(pool: PgPool) -> Result<(), sqlx::Error> {
     let seed = testkit::seed(&pool).await;
     let first = Uuid::now_v7();
@@ -186,14 +188,14 @@ async fn one_live_execution_per_conversation(pool: PgPool) -> Result<(), sqlx::E
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn state_check_constraints(pool: PgPool) -> Result<(), sqlx::Error> {
     let seed = testkit::seed(&pool).await;
     let error = insert_input(&pool, &seed, 1, "bogus").await.unwrap_err();
     let error = error.as_database_error().unwrap();
     assert!(error.is_check_violation());
     assert_eq!(error.constraint(), Some("inputs_state_check"));
-    let count: i64 = sqlx::query_scalar("select count(*) from inputs")
+    let count: i64 = sqlx::query_scalar("select count(*) from inputs where conversation_id = $1")
+        .bind(seed.conversation_id)
         .fetch_one(&pool)
         .await?;
     assert_eq!(count, 0);
@@ -430,7 +432,6 @@ async fn execution_for_blocks(pool: &PgPool, seed: &Seed) -> Result<Uuid, sqlx::
     Ok(execution_id)
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn blocks_enforce_kind_and_state(pool: PgPool) -> Result<(), sqlx::Error> {
     let seed = testkit::seed(&pool).await;
     let execution_id = execution_for_blocks(&pool, &seed).await?;
@@ -464,7 +465,6 @@ async fn blocks_enforce_kind_and_state(pool: PgPool) -> Result<(), sqlx::Error> 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn journal_cursor_links_execution_and_closed_defaults_false(
     pool: PgPool,
 ) -> Result<(), sqlx::Error> {
@@ -494,7 +494,6 @@ async fn journal_cursor_links_execution_and_closed_defaults_false(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn execution_columns_exist(pool: PgPool) -> Result<(), sqlx::Error> {
     let seed = testkit::seed(&pool).await;
     let execution_id = execution_for_blocks(&pool, &seed).await?;
@@ -645,7 +644,6 @@ fn derived_holds_serialise_in_the_view_but_never_parse_as_stored_holds() {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn migration_maps_existing_conversations_to_owner(pool: PgPool) -> Result<(), sqlx::Error> {
     // Договор миграции 0022: новые строки чистые по умолчанию; старые значения,
     // отличные от 'clean', стали 'owner'; ссылки UUID требуют закреплённую версию.
@@ -758,7 +756,6 @@ async fn approved_by_migration_rewrites_only_rows_it_normalizes(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn migration_adds_session_tools_schema(pool: PgPool) -> Result<(), sqlx::Error> {
     let seed = testkit::seed(&pool).await;
     let parent = seed.conversation_id;
@@ -876,7 +873,6 @@ async fn migration_adds_session_tools_schema(pool: PgPool) -> Result<(), sqlx::E
 
 // Удаление разговора проверяет каждый внешний ключ на удаляемые строки: без индекса на
 // ссылающемся столбце это полное чтение таблицы на каждую строку.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn foreign_keys_into_deleted_history_have_indexes(pool: PgPool) -> Result<(), sqlx::Error> {
     // Малые таблицы, которые удаление читает одним проходом.
     const SMALL: &[&str] = &[
@@ -921,7 +917,6 @@ async fn plan(pool: &PgPool, query: &str) -> Result<String, sqlx::Error> {
 }
 
 // Горячие пути команд и проверки ключей при удалении не читают таблицу целиком.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn command_and_block_lookups_use_indexes(pool: PgPool) -> Result<(), sqlx::Error> {
     let id = "'00000000-0000-7000-8000-000000000000'::uuid";
     for query in [
@@ -958,7 +953,6 @@ async fn command_and_block_lookups_use_indexes(pool: PgPool) -> Result<(), sqlx:
 
 /// Раз в 5 секунд диспетчер гасит просроченные вливания: запрос должен идти
 /// частичным индексом, а не перебирать таблицу команд.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn steer_expiry_query_uses_the_partial_index(pool: PgPool) -> Result<(), sqlx::Error> {
     let mut conn = pool.acquire().await?;
     sqlx::query("set enable_seqscan = off")
@@ -982,7 +976,6 @@ async fn steer_expiry_query_uses_the_partial_index(pool: PgPool) -> Result<(), s
 
 /// Уникальность `side_of` держит только чат, а поиск копий родителя и проверка внешнего ключа
 /// идут по `side_of` без вида: им нужен индекс на всех непустых значениях.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn side_of_lookups_by_parent_alone_use_an_index(pool: PgPool) -> Result<(), sqlx::Error> {
     let mut tx = canterlot_hub::db::begin(&pool).await?;
     sqlx::query("set local enable_seqscan = off")
@@ -1000,4 +993,33 @@ async fn side_of_lookups_by_parent_alone_use_an_index(pool: PgPool) -> Result<()
     );
     tx.rollback().await?;
     Ok(())
+}
+
+/// Ограничения и столбцы итоговой схемы: каждый случай заводит своего владельца.
+#[tokio::test]
+async fn final_schema_constraints() {
+    let pool = canterlot_hub::testkit::db().await;
+    run_cases!(pool.clone();
+        input_seq_unique_per_conversation,
+        one_live_execution_per_conversation,
+        state_check_constraints,
+        blocks_enforce_kind_and_state,
+        journal_cursor_links_execution_and_closed_defaults_false,
+        execution_columns_exist,
+        migration_maps_existing_conversations_to_owner,
+        migration_adds_session_tools_schema,
+    );
+}
+
+/// Горячие запросы идут индексами; план берётся с `enable_seqscan = off`, поэтому
+/// строки других случаев на него не влияют.
+#[tokio::test]
+async fn final_schema_indexes() {
+    let pool = canterlot_hub::testkit::db().await;
+    run_cases!(pool.clone();
+        foreign_keys_into_deleted_history_have_indexes,
+        command_and_block_lookups_use_indexes,
+        steer_expiry_query_uses_the_partial_index,
+        side_of_lookups_by_parent_alone_use_an_index,
+    );
 }
