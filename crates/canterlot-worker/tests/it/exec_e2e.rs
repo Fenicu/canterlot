@@ -2123,12 +2123,13 @@ async fn wave_w_d6_stop_behind_slow_sj_backlog() {
     let pool = canterlot_hub::testkit::db().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
-    // Пакет до 256 записей и секундная пауза на пакет: за 2 с ожидания хаб принимает не больше
-    // двух пакетов, то есть меньше 800 записей.
+    // Пакет до 256 записей и пауза 500 мс на пакет: за секунду ожидания хаб принимает не больше
+    // двух пакетов, то есть меньше 800 записей. Очередь пакетов за паузой ждёт меньше срока
+    // подтверждения (3 с): с секундной паузой она его переходила, и воркер переподключал поток.
     const DELTAS: usize = 800;
     fixture
         .faults()
-        .set_sj_batch_pause(Duration::from_millis(1000));
+        .set_sj_batch_pause(Duration::from_millis(500));
     let mut steps: Vec<Value> = (0..DELTAS).map(|_| json!({"delta":"x"})).collect();
     steps.push(json!({"hang":true}));
     fixture.submit(json!({"synthetic":steps}).to_string()).await;
@@ -2151,7 +2152,7 @@ async fn wave_w_d6_stop_behind_slow_sj_backlog() {
             .any(|b| matches!(b, Body::JournalClosed(_)))
     })
     .await;
-    sleep(Duration::from_secs(2)).await;
+    sleep(Duration::from_secs(1)).await;
     assert!(
         same_process(identities.0),
         "draining supervisor exited behind backlog"
