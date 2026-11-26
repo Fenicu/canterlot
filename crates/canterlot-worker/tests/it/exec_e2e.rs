@@ -65,7 +65,7 @@ fn hub_timers() -> HubTimers {
 }
 
 /// Подтверждения SJ теряются нарочно: воркер повторяет диапазон по `range_ack`, и с
-/// боевыми 3 с тест высиживал по 6 с на каждом шаге потока.
+/// 3 с тест высиживал по 6 с на каждом шаге потока.
 fn lost_ack_timers() -> WorkerTimers {
     WorkerTimers {
         range_ack: Duration::from_millis(500),
@@ -1750,16 +1750,9 @@ async fn orphan_process_waits_for_the_owner_and_stop_leads_to_the_resolve() {
 #[tokio::test]
 async fn exit_of_a_lost_session_survives_an_ack_the_supervisor_never_saved() {
     let pool = canterlot_hub::testkit::db().await;
-    let mut fixture = Fixture::new_full_with_timers(
-        &pool,
-        "synthetic",
-        &[],
-        false,
-        true,
-        None,
-        lost_ack_timers(),
-    )
-    .await;
+    // Боевой срок повтора диапазона: с коротким воркер успевал переподключить поток данных,
+    // пока подтверждения ещё терялись, и повтор упирался в замороженное сопровождение.
+    let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     fixture.faults().drop_next_sj_acks(usize::MAX);
     fixture
