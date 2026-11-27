@@ -98,6 +98,13 @@ export function activityLine(
         return { text: "Усыплена", tone: "default", live: false };
       if (evidence.outcome === "user_stop")
         return { text: "Остановлена вами", tone: "default", live: false };
+      // Следующее сообщение продолжит сессию, владельцу ничего решать не нужно.
+      if (evidence.outcome === "machine_shutdown")
+        return {
+          text: "Остановлена: машина выключалась",
+          tone: "default",
+          live: false,
+        };
       if (evidence.outcome === "force_stopped")
         return {
           text: "Остановлена принудительно",

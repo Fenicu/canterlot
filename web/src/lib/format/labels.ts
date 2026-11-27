@@ -233,6 +233,7 @@ const OUTCOMES: Record<string, string> = {
   force_stopped: "Остановлено принудительно",
   normal_exit: "Завершено штатно",
   start_cancelled: "Запуск отменён",
+  machine_shutdown: "Остановлено перед выключением машины",
 };
 
 export function executionOutcomeLabel(value: Value): string {
