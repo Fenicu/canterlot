@@ -54,8 +54,6 @@ phase() { printf '\n==> %s\n' "$1"; phase_started=$SECONDS; }
 phase_done() { printf '    %s: %ds\n' "$1" $((SECONDS - phase_started)); }
 die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
 
-# Содержимое EXPECT по выводу `canterlot-worker capabilities`: что предлагает
-# воркер выпуска. Выкладка сверяет с ним развёрнутый воркер.
 # Публикуемый CSP строится только для адреса примера: настоящий домен пилота
 # остаётся в непубликуемом csp.txt и в выпуск не попадает.
 publish_csp() {
@@ -64,15 +62,20 @@ publish_csp() {
         >"$out/publish/canterlot-csp-$version.txt"
 }
 
+# Домен пилота стоит в CSP со схемой wss://, поэтому сверяется хост, а не адрес целиком.
 check_published_csp() {
-    local file=$1 site=$2 n
+    local file=$1 site=$2 n host
     n=$(grep -o -F -- 'wss://chat.example.com' "$file" | wc -l)
     [[ "$n" = "1" ]] || die "в опубликованном CSP не ровно один wss://chat.example.com: $n"
-    if [[ "$site" != "https://chat.example.com" ]] && grep -q -F -- "$site" "$file"; then
+    host=${site#*://}
+    host=${host%%/*}
+    if [[ "$host" != "chat.example.com" ]] && grep -q -F -- "$host" "$file"; then
         die "опубликованный CSP содержит адрес пилота $site"
     fi
 }
 
+# Содержимое EXPECT по выводу `canterlot-worker capabilities`: что предлагает
+# воркер выпуска. Выкладка сверяет с ним развёрнутый воркер.
 expect_of() {
     local listing kind name rest capabilities="" harnesses=""
     listing=$("$1" capabilities) || die "$1 capabilities завершился с ошибкой"

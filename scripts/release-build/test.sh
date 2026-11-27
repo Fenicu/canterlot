@@ -100,6 +100,10 @@ printf '%s\n' "default-src 'self'; connect-src 'self' wss://chat.example.com" >"
 run 0 check_published_csp "$tmp/good-csp" https://hub.example.internal
 run 1 check_published_csp "$tmp/publish/canterlot-csp-1.2.3.txt" https://hub.example.internal
 grep -q 'адрес пилота' "$out" || fail "проверка не отказывает на адрес пилота"
+# В CSP домен пилота стоит со схемой wss://, а не https://: сверяется хост.
+printf '%s\n' "connect-src 'self' wss://chat.example.com wss://hub.example.internal" >"$tmp/wss-csp"
+run 1 check_published_csp "$tmp/wss-csp" https://hub.example.internal
+grep -q 'адрес пилота' "$out" || fail "проверка не видит домен пилота с wss://"
 printf '%s\n' "connect-src wss://chat.example.com wss://chat.example.com" >"$tmp/two-csp"
 run 1 check_published_csp "$tmp/two-csp" https://hub.example.internal
 grep -q 'ровно один' "$out" || fail "проверка не отказывает на два адреса примера"
