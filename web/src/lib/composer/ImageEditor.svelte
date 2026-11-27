@@ -197,6 +197,7 @@
    * Размер сцены считаем от окна и его неизменной обвязки: сама сцена в расчёте не участвует,
    * иначе её resize породил бы бесконечный цикл. Высота окна не фиксирована — оно сжимается
    * до вписанной картинки, а предел берём из max-height с учётом панелей и отступов.
+   * Картинка стоит с запасом от края сцены: в него рисуются ручки рамки и линия обрезки.
    */
   function refit(): void {
     if (!dialog || !stage || !canvas) return;
@@ -216,15 +217,22 @@
     );
     const limit = parseFloat(styles.maxHeight) || window.innerHeight;
     const height = Math.max(1, limit - chrome);
-    const box = image.width ? fitImage(image, { width, height }) : { x: 0, y: 0, width, height };
-    const stageWidth = Math.max(1, Math.round(box.width));
-    const stageHeight = Math.max(1, Math.round(box.height));
+    // Квадрат ручки 10×10 и скругление сцены требуют запаса вокруг картинки.
+    const inset = parseFloat(styles.getPropertyValue('--s6')) || 12;
+    const box = image.width
+      ? fitImage(image, { width: Math.max(1, width - 2 * inset), height: Math.max(1, height - 2 * inset) })
+      : { x: 0, y: 0, width, height };
+    const pictureWidth = Math.max(1, Math.round(box.width));
+    const pictureHeight = Math.max(1, Math.round(box.height));
+    const margin = image.width ? inset : 0;
+    const stageWidth = pictureWidth + 2 * margin;
+    const stageHeight = pictureHeight + 2 * margin;
     stage.style.width = `${stageWidth}px`;
     stage.style.height = `${stageHeight}px`;
     dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = Math.round(stageWidth * dpr);
     canvas.height = Math.round(stageHeight * dpr);
-    view = { x: 0, y: 0, width: stageWidth, height: stageHeight };
+    view = { x: margin, y: margin, width: pictureWidth, height: pictureHeight };
     fitted = image.width > 0;
     draw();
   }
@@ -490,7 +498,12 @@
       {/each}
     </div>
   </div>
-  <div class="stage" data-ready={fitted ? 'true' : undefined} bind:this={stage}>
+  <div
+    class="stage"
+    data-ready={fitted ? 'true' : undefined}
+    data-frame={`${view.x},${view.y},${view.width},${view.height}`}
+    bind:this={stage}
+  >
     <canvas
       bind:this={canvas}
       aria-label="Снимок с рамкой обрезки и рисунками от руки"

@@ -33,6 +33,15 @@ describe('image edit geometry', () => {
 		expect(toScreenPoint({ x: 200, y: 100 }, view, bounds)).toEqual({ x: 100, y: 100 });
 	});
 
+	it('keeps pointer mapping correct when the image is inset for crop handles', () => {
+		const view = { x: 12, y: 12, width: 400, height: 200 };
+		expect(toScreenPoint({ x: 0, y: 0 }, view, bounds)).toEqual({ x: 12, y: 12 });
+		expect(toScreenPoint({ x: 400, y: 200 }, view, bounds)).toEqual({ x: 412, y: 212 });
+		expect(toImagePoint({ x: 12, y: 12 }, view, bounds)).toEqual({ x: 0, y: 0 });
+		expect(toImagePoint({ x: 212, y: 112 }, view, bounds)).toEqual({ x: 200, y: 100 });
+		expect(toImagePoint({ x: 412, y: 212 }, view, bounds)).toEqual({ x: 400, y: 200 });
+	});
+
 	it('clamps a crop frame inside the image, shrinking oversized frames', () => {
 		expect(clampRect({ x: -10, y: 190, width: 100, height: 100 }, bounds)).toEqual({
 			x: 0,

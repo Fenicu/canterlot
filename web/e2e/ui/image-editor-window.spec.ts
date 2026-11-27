@@ -67,6 +67,24 @@ test('редактор — окно с полями по краям, холст 
     expect(canvas.y).toBeGreaterThanOrEqual(box.y);
     expect(canvas.x + canvas.width).toBeLessThanOrEqual(box.x + box.width);
     expect(canvas.y + canvas.height).toBeLessThanOrEqual(box.y + box.height);
+    // Все четыре угловые ручки целиком попадают в видимую (в том числе скруглённую) сцену.
+    const corners = await dialog.locator('.stage').evaluate((node) => {
+      const [x = 0, y = 0, width = 0, height = 0] = (node.getAttribute('data-frame') ?? '').split(',').map(Number);
+      const radius = parseFloat(getComputedStyle(node).borderTopLeftRadius) || 0;
+      const stageWidth = node.clientWidth;
+      const stageHeight = node.clientHeight;
+      const half = 5;
+      const points: [number, number][] = [[x, y], [x + width, y], [x, y + height], [x + width, y + height]];
+      return points.map(([cx, cy]) => {
+        const px = cx < stageWidth / 2 ? cx - half : cx + half;
+        const py = cy < stageHeight / 2 ? cy - half : cy + half;
+        const dx = px < radius ? radius - px : px > stageWidth - radius ? px - (stageWidth - radius) : 0;
+        const dy = py < radius ? radius - py : py > stageHeight - radius ? py - (stageHeight - radius) : 0;
+        return px >= 0 && py >= 0 && px <= stageWidth && py <= stageHeight &&
+          (dx === 0 || dy === 0 || Math.hypot(dx, dy) <= radius);
+      });
+    });
+    expect(corners).toEqual([true, true, true, true]);
     expect(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight)).toBe(true);
 
     await expect(dialog.getByRole('button', { name: 'Обрезать' })).toHaveAttribute('title', 'Обрезать');
