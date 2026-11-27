@@ -157,12 +157,7 @@ fn kind(kind: OpKind) -> &'static str {
 fn outcome(result: &Option<OpResult>) -> String {
     match result {
         None => "in progress".into(),
-        Some(OpResult::Done) => "done".into(),
-        Some(OpResult::FailedBeforeChange { reason }) => {
-            format!("failed before change: {reason}")
-        }
-        Some(OpResult::RolledBack { reason }) => format!("rolled back: {reason}"),
-        Some(OpResult::NeedsOwner { .. }) => "needs owner".into(),
+        Some(result) => result.to_string(),
     }
 }
 

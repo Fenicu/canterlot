@@ -55,6 +55,18 @@ pub enum OpResult {
     NeedsOwner { steps: Vec<String> },
 }
 
+/// Человеческий текст для отчётов: `Debug` здесь печатал бы имена вариантов и `Some(…)`.
+impl fmt::Display for OpResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Done => f.write_str("done"),
+            Self::FailedBeforeChange { reason } => write!(f, "failed before change: {reason}"),
+            Self::RolledBack { reason } => write!(f, "rolled back: {reason}"),
+            Self::NeedsOwner { .. } => f.write_str("needs owner"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkerUpdate {
     pub machine_id: Uuid,

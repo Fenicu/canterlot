@@ -27,6 +27,12 @@ fn print_finished_here(in_unit: bool, result: &OpResult) -> bool {
     in_unit && matches!(result, OpResult::Done)
 }
 
+/// Сообщение о неуспешном обновлении печатает внутренний процесс: внешний уже пересылает
+/// его вывод, и повторная строка снаружи давала бы одну и ту же ошибку дважды.
+fn worker_update_failure(in_unit: bool, result: &OpResult) -> Option<String> {
+    in_unit.then(|| format!("worker update: {result}"))
+}
+
 /// Пути воркера — от домашнего каталога того, кто запустил утилиту.
 fn user_layout() -> Layout {
     Layout::new(
@@ -135,7 +141,12 @@ async fn run(cli: Cli) -> Result<bool, CtlError> {
                             }
                             Ok(true)
                         }
-                        other => Err(CtlError::Other(format!("worker update: {other:?}"))),
+                        other => {
+                            if let Some(message) = worker_update_failure(host.in_unit, &other) {
+                                eprintln!("error: {message}");
+                            }
+                            Ok(false)
+                        }
                     }
                 }
                 HostRoute::NeedsRoot => Err(CtlError::RootRequired("update".into())),
@@ -170,5 +181,24 @@ mod tests {
                 reason: "test".into()
             }
         ));
+    }
+
+    fn refused() -> OpResult {
+        OpResult::FailedBeforeChange {
+            reason: "hub_older_than_target: the hub runs 1.99.1".into(),
+        }
+    }
+
+    #[test]
+    fn outer_process_does_not_repeat_the_inner_failure() {
+        assert_eq!(worker_update_failure(false, &refused()), None);
+    }
+
+    #[test]
+    fn inner_process_prints_the_failure_in_plain_words() {
+        let message = worker_update_failure(true, &refused()).unwrap();
+        assert!(message.contains("hub_older_than_target"), "{message}");
+        assert!(!message.contains("FailedBeforeChange"), "{message}");
+        assert!(!message.contains("reason:"), "{message}");
     }
 }
