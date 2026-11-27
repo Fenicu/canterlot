@@ -79,9 +79,9 @@ fi
 reset_assets
 before=$(api_hits)
 status=0
-run_install "$tmp/out" status || status=$?
+run_install "$tmp/out" install || status=$?
 expect 0 "$status"
-expect "$(printf '%s\n' status --version 1.2.3)" "$(cat "$tmp/out")"
+expect "$(printf '%s\n' install --version 1.2.3)" "$(cat "$tmp/out")"
 after=$(api_hits)
 expect 1 "$((after - before))"
 printf 'latest_resolved_once: OK\n'
@@ -125,5 +125,18 @@ expect "$(printf '%s\n' join --hub hub.example.internal:7443 --pin sha256:ab --c
 after=$(api_hits)
 expect 0 "$((after - before))"
 printf 'args_passed_through: OK\n'
+
+# --version понимают только install, join и update; остальным подкомандам его передавать нельзя.
+reset_assets
+status=0
+run_install "$tmp/out" uninstall || status=$?
+expect 0 "$status"
+expect "$(printf '%s\n' uninstall)" "$(cat "$tmp/out")"
+reset_assets
+status=0
+run_install "$tmp/out" join --hub h:1 --pin sha256:00 || status=$?
+expect 0 "$status"
+expect "$(printf '%s\n' join --hub h:1 --pin sha256:00 --version 1.2.3)" "$(cat "$tmp/out")"
+printf 'version_only_for_install_join_update: OK\n'
 
 printf 'install.sh: все проверки прошли\n'

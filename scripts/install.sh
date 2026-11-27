@@ -74,5 +74,8 @@ listing=$(tar -tzf "$tmp/$ctl_name") || fail unsafe_archive
 tar -xzf "$tmp/$ctl_name" -C "$tmp" || fail unsafe_archive
 [[ -x "$tmp/canterlot" ]] || fail unsafe_archive
 
-args+=(--version "$version")
+# --version — аргумент только трёх подкоманд; остальные разбирают argv без него.
+case "${args[0]}" in
+    install | join | update) args+=(--version "$version") ;;
+esac
 "$tmp/canterlot" "${args[@]}"
