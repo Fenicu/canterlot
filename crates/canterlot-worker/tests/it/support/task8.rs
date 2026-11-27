@@ -90,7 +90,8 @@ async fn worker_without_exec_capability_echo_rejects_start() {
             "goals_v1",
             "memory_scope_v1",
             "jobs_inplace_v1",
-            "remote_spawn_v1"
+            "remote_spawn_v1",
+            "shutdown_stop_v1"
         ]
     );
     hub.send(ControlDown {
