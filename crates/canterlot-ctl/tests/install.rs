@@ -584,8 +584,16 @@ async fn failed_install_keeps_created_paths_for_a_retry() {
     install(bad_args, &fx.layout, &fx.runner, &offline_source(), &host())
         .await
         .unwrap_err();
+    // Как на ВМ: прерванная попытка уже создала каталоги и УЦ и оставила запись операции.
     assert!(fx.layout.root.join("etc/canterlot").is_dir());
     assert!(fx.layout.root.join("var/lib/canterlot").is_dir());
+    assert!(fx.layout.ca_dir().join("ca.crt").is_file());
+    assert!(fx.layout.ca_dir().join("ca.key").is_file());
+    let unfinished = ops::unfinished(&fx.layout.ops_dir())
+        .unwrap()
+        .expect("failed attempt must leave an unfinished install record");
+    assert_eq!(unfinished.kind, OpKind::Install);
+    assert!(unfinished.result.is_none());
 
     let mut retry_args = args();
     retry_args.from_dir = Some(good.path().to_path_buf());
@@ -598,6 +606,12 @@ async fn failed_install_keeps_created_paths_for_a_retry() {
     )
     .await
     .unwrap();
+    let done = ops::latest(&fx.layout.ops_dir()).unwrap().unwrap();
+    assert_eq!(
+        done.id, unfinished.id,
+        "the rerun must resume the failed attempt's record"
+    );
+    assert_eq!(done.result, Some(OpResult::Done));
     let created = relative_created(&fx);
     for want in [
         "etc/canterlot",
