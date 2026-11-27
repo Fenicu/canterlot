@@ -99,6 +99,35 @@ fn position(text: &str, needle: &str) -> usize {
 }
 
 #[test]
+fn caddyfile_sets_default_sni_for_ip_site_only() {
+    let v4 = state(TlsMode::SelfSigned);
+    let text = render_caddyfile(&v4, "default-src 'self'");
+    assert!(
+        text.starts_with("{\n    default_sni 192.0.2.10\n}\n\n192.0.2.10 {\n"),
+        "{text}"
+    );
+
+    let mut v6 = state(TlsMode::SelfSigned);
+    v6.origin = Some("https://[2001:db8::1]".into());
+    v6.grpc_endpoint = Some("[2001:db8::1]:7443".into());
+    let text = render_caddyfile(&v6, "default-src 'self'");
+    assert!(text.contains("    default_sni 2001:db8::1\n"), "{text}");
+    assert!(text.contains("[2001:db8::1] {\n"), "{text}");
+    assert!(!text.contains("default_sni ["), "{text}");
+
+    // Для имени default_sni не нужен: у клиента есть SNI, сертификат выбирается по нему.
+    for mode in [TlsMode::Acme, TlsMode::External, TlsMode::SelfSigned] {
+        let mut s = state(mode);
+        s.origin = Some("https://chat.example.com".into());
+        if mode == TlsMode::External {
+            s.front_ip = Some("192.0.2.20".parse().unwrap());
+        }
+        let text = render_caddyfile(&s, "default-src 'self'");
+        assert!(!text.contains("default_sni"), "{mode:?}: {text}");
+    }
+}
+
+#[test]
 fn caddyfile_scrubs_headers_before_proxy() {
     for mode in [TlsMode::Acme, TlsMode::External, TlsMode::SelfSigned] {
         let text = render_caddyfile(&state(mode), "default-src 'self'");

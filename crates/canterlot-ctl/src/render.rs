@@ -2,7 +2,11 @@
 //! Всё детерминировано: одинаковое состояние даёт байт-в-байт одинаковый файл, поэтому
 //! установка и обновление просто перерисовывают их.
 
-use std::{fmt::Write as _, net::SocketAddr, path::Path};
+use std::{
+    fmt::Write as _,
+    net::{IpAddr, SocketAddr},
+    path::Path,
+};
 
 use url::Url;
 
@@ -152,6 +156,17 @@ pub fn render_caddyfile(s: &InstallState, csp: &str) -> String {
     let origin = s.origin.as_deref().unwrap_or("https://localhost");
     let host = host_of(origin);
     let mut out = String::new();
+    // Клиенты по IP не шлют SNI: без default_sni у `tls internal` нет сертификата для
+    // рукопожатия. Имя в default_sni — голый адрес, без скобок IPv6.
+    let site_ip = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .ok();
+    let mut globals = String::new();
+    if let Some(ip) = &site_ip {
+        let _ = writeln!(globals, "    default_sni {ip}");
+    }
     let (client_ip, preamble) = match s.tls {
         Some(TlsMode::External) => {
             // Внешнему прокси доверяем ровно по его адресу; strict берёт адрес справа,
@@ -164,9 +179,10 @@ pub fn render_caddyfile(s: &InstallState, csp: &str) -> String {
                 })
                 .unwrap_or_default();
             let _ = write!(
-                out,
-                "{{\n    servers {{\n        trusted_proxies static {front}\n        trusted_proxies_strict\n    }}\n}}\n\n:80 {{\n"
+                globals,
+                "    servers {{\n        trusted_proxies static {front}\n        trusted_proxies_strict\n    }}\n"
             );
+            let _ = write!(out, "{{\n{globals}}}\n\n:80 {{\n");
             // Порт опубликован на всех интерфейсах: фаервол обходится напрямую,
             // поэтому отсекаем чужие пиры здесь. abort идёт первой директивой
             // внутри route — снаружи Caddy поставил бы её после хендлеров.
@@ -178,10 +194,16 @@ pub fn render_caddyfile(s: &InstallState, csp: &str) -> String {
             )
         }
         Some(TlsMode::SelfSigned) => {
+            if !globals.is_empty() {
+                let _ = write!(out, "{{\n{globals}}}\n\n");
+            }
             let _ = write!(out, "{host} {{\n    tls internal\n");
             ("{remote_host}", "    route {\n".to_owned())
         }
         Some(TlsMode::Acme) | None => {
+            if !globals.is_empty() {
+                let _ = write!(out, "{{\n{globals}}}\n\n");
+            }
             let _ = writeln!(out, "{host} {{");
             ("{remote_host}", "    route {\n".to_owned())
         }
