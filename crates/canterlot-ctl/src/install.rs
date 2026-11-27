@@ -828,6 +828,13 @@ pub async fn install(
     if class == HostClass::NativeInstall {
         return Err(CtlError::NativeInstallFound);
     }
+    // Локальный выпуск проверяется до первой записи: негодная CSP не оставляет каталогов.
+    if let Some(dir) = &args.from_dir {
+        let found = release::dir_version(dir)?;
+        let assets = release::asset_names(&found);
+        let csp_txt = std::fs::read_to_string(dir.join(assets.csp))?;
+        render::csp_for_origin(&csp_txt, "https://chat.example.com")?;
+    }
 
     let ops_dir = layout.ops_dir();
     fsx::ensure_dir(&layout.root, &ops_dir, 0o700)?;
@@ -937,6 +944,10 @@ pub async fn install(
             staged.version
         )));
     }
+    // Плохой выпуск отклоняется до первой записи в каталоги установки.
+    let csp_txt = std::fs::read_to_string(staged_file(&staged, &assets.csp)?)?;
+    render::csp_for_origin(&csp_txt, state.origin.as_deref().unwrap_or_default())?;
+
     let result = run(
         layout,
         runner,

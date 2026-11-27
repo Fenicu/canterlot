@@ -49,7 +49,6 @@ export CARGO_HOME=${CARGO_HOME:-/usr/local/cargo}
 export npm_config_cache=${npm_config_cache:-$HOME/.npm}
 site_origin=${SITE_ORIGIN:-https://hub.example.com}
 wss_origin=${WSS_ORIGIN:-wss://hub.example.com}
-
 started=$SECONDS
 phase() { printf '\n==> %s\n' "$1"; phase_started=$SECONDS; }
 phase_done() { printf '    %s: %ds\n' "$1" $((SECONDS - phase_started)); }
@@ -57,6 +56,23 @@ die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
 
 # Содержимое EXPECT по выводу `canterlot-worker capabilities`: что предлагает
 # воркер выпуска. Выкладка сверяет с ним развёрнутый воркер.
+# Публикуемый CSP строится только для адреса примера: настоящий домен пилота
+# остаётся в непубликуемом csp.txt и в выпуск не попадает.
+publish_csp() {
+    local out=$1 src=$2 version=$3
+    node "$src/web/scripts/print-csp.mjs" https://chat.example.com \
+        >"$out/publish/canterlot-csp-$version.txt"
+}
+
+check_published_csp() {
+    local file=$1 site=$2 n
+    n=$(grep -o -F -- 'wss://chat.example.com' "$file" | wc -l)
+    [[ "$n" = "1" ]] || die "в опубликованном CSP не ровно один wss://chat.example.com: $n"
+    if [[ "$site" != "https://chat.example.com" ]] && grep -q -F -- "$site" "$file"; then
+        die "опубликованный CSP содержит адрес пилота $site"
+    fi
+}
+
 expect_of() {
     local listing kind name rest capabilities="" harnesses=""
     listing=$("$1" capabilities) || die "$1 capabilities завершился с ошибкой"
@@ -150,7 +166,7 @@ pack "canterlot-hub-$version-$triple.tar.gz" "$out/hub/bin"
 pack "canterlot-worker-$version-$triple.tar.gz" "$out/worker/bin"
 pack "canterlot-web-$version.tar.gz" "$out/web"
 pack "canterlot-$version-x86_64-linux.tar.gz" "$out/ctl/bin"
-cp "$out/csp.txt" "$out/publish/canterlot-csp-$version.txt"
+publish_csp "$out" "$src" "$version"
 (cd "$out/publish" && sha256sum -- *.tar.gz *.txt install.sh >SHA256SUMS)
 phase_done "утилита и публикуемые файлы"
 
@@ -205,6 +221,7 @@ LD_LIBRARY_PATH="$cuda_root/lib:$cuda_root/lib/stubs" ldd "$speech_bin" | sed 's
     || die "hub openapi отличается от docs/api/openapi.json"
 wss_n=$(grep -c -- "$wss_origin" "$out/csp.txt" || true)
 [[ "$wss_n" = "1" ]] || die "в csp.txt не ровно один $wss_origin: $wss_n"
+check_published_csp "$out/publish/canterlot-csp-$version.txt" "$site_origin"
 [[ "$(grep -o "'sha256-[^']*'" "$out/csp.txt" | wc -l)" -ge 1 ]] || die "в csp.txt нет хэша скрипта"
 [[ "$(jq -r .version "$out/web/_app/version.json")" = "$sha" ]] \
     || die "web _app/version.json не $sha"

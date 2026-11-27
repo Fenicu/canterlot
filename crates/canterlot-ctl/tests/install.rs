@@ -424,6 +424,44 @@ async fn install_from_dir_with_bad_checksum_is_refused() {
     assert!(!fx.layout.hub_current().exists());
 }
 
+#[tokio::test]
+async fn install_refuses_bad_csp_before_creating_files() {
+    let release = tempfile::tempdir().unwrap();
+    release_dir(release.path(), VERSION);
+    let csp = release
+        .path()
+        .join(format!("canterlot-csp-{VERSION}.txt"));
+    let bad = b"default-src 'self'; connect-src 'self' wss://hub.example.internal\n".to_vec();
+    std::fs::write(&csp, &bad).unwrap();
+    // Контрольные суммы пересчитаны: отказ должен быть именно из-за CSP.
+    let mut sums = String::new();
+    for (name, body) in release_files(VERSION) {
+        let body = if name.starts_with("canterlot-csp-") {
+            bad.clone()
+        } else {
+            body
+        };
+        let _ = writeln!(sums, "{}  {name}", hex(&Sha256::digest(&body)));
+    }
+    std::fs::write(release.path().join("SHA256SUMS"), sums).unwrap();
+
+    let fx = fixture();
+    let mut args = args();
+    args.from_dir = Some(release.path().to_path_buf());
+    let err = install(args, &fx.layout, &fx.runner, &offline_source(), &host())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("csp_invalid"), "{err}");
+    for path in [
+        fx.layout.root.join("etc/canterlot"),
+        fx.layout.root.join("var/lib/canterlot"),
+        fx.layout.root.join("opt/canterlot"),
+        fx.layout.ctl_link(),
+    ] {
+        assert!(!path.exists(), "created before the CSP check: {}", path.display());
+    }
+}
+
 fn retained(fx: &Fixture) {
     std::fs::create_dir_all(fx.layout.pg_data()).unwrap();
     std::fs::create_dir_all(fx.layout.manifest_dir()).unwrap();

@@ -25,7 +25,7 @@ run() {
     local want=$1
     shift
     local got=0
-    "$@" >"$out" 2>&1 || got=$?
+    ( "$@" ) >"$out" 2>&1 || got=$?
     [[ "$got" == "$want" ]] || { cat "$out" >&2; fail "ожидался код $want, получен $got: $*"; }
 }
 
@@ -78,8 +78,34 @@ run 1 env -u CARGO_TARGET_DIR bash scripts/release-build/in-container.sh \
     --sha 2f1ebd179c9b --commit 2f1ebd179c9b77cc4e822366d27c40ff3207f690
 grep -q 'CARGO_TARGET_DIR не задан' "$out" || fail "нет отказа без CARGO_TARGET_DIR"
 
-# EXPECT пишется до SHA256SUMS, иначе он не попадёт в суммы выпуска.
+# Публикуемый CSP обязан содержать адрес примера, а не настоящий адрес пилота:
+# утилита ищет в нём wss://chat.example.com, а публикация не должна течь домен.
 ic=scripts/release-build/in-container.sh
+die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
+eval "$(sed -n '/^publish_csp() {$/,/^}$/p' "$ic")"
+eval "$(sed -n '/^check_published_csp() {$/,/^}$/p' "$ic")"
+mkdir -p "$tmp/publish" "$tmp/fakebin"
+cat >"$tmp/fakebin/node" <<'EOF'
+#!/bin/sh
+printf '%s\n' "default-src 'self'; connect-src 'self' wss://chat.example.com https://hub.example.internal"
+EOF
+chmod +x "$tmp/fakebin/node"
+(
+    export PATH="$tmp/fakebin:$PATH"
+    publish_csp "$tmp" "$tmp/src" 1.2.3
+)
+grep -qF 'wss://chat.example.com' "$tmp/publish/canterlot-csp-1.2.3.txt" \
+    || fail "publish_csp не вызвал print-csp.mjs с адресом примера"
+printf '%s\n' "default-src 'self'; connect-src 'self' wss://chat.example.com" >"$tmp/good-csp"
+run 0 check_published_csp "$tmp/good-csp" https://hub.example.internal
+run 1 check_published_csp "$tmp/publish/canterlot-csp-1.2.3.txt" https://hub.example.internal
+grep -q 'адрес пилота' "$out" || fail "проверка не отказывает на адрес пилота"
+printf '%s\n' "connect-src wss://chat.example.com wss://chat.example.com" >"$tmp/two-csp"
+run 1 check_published_csp "$tmp/two-csp" https://hub.example.internal
+grep -q 'ровно один' "$out" || fail "проверка не отказывает на два адреса примера"
+run 0 check_published_csp "$tmp/good-csp" https://chat.example.com
+
+# EXPECT пишется до SHA256SUMS, иначе он не попадёт в суммы выпуска.
 # shellcheck disable=SC2016 # ищется буквальный текст скрипта
 expect_line=$(grep -nF '>"$out/EXPECT"' "$ic" | cut -d: -f1)
 sums_line=$(grep -nF 'sha256sum >SHA256SUMS.new' "$ic" | cut -d: -f1)
