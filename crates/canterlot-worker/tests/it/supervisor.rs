@@ -2997,6 +2997,7 @@ async fn a_finished_turn_leaves_the_terminal_state_without_git_facts() {
             command_id: Uuid::now_v7().to_string(),
             dispatch_attempt: 1,
             force: false,
+            ..Default::default()
         }))
         .await;
     let bodies = harness.wait_records("closed", journal_closed).await;
