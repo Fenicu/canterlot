@@ -391,7 +391,14 @@ impl Fixture {
             execution: ExecutionConfig {
                 allowed_workdir_roots: vec![workdir.clone()],
                 supervisor_exe: Some(wrapper),
-                spawn_timeout: Duration::from_secs(2),
+                // Срок запуска сопровождения: проверяет его только тест с затвором перед
+                // присоединением. Остальным 2 с не хватало под нагрузкой гейта: старт падал с
+                // `supervisor_start_failed`, и тест до потолка ждал «running» (флейк 1.54.2).
+                spawn_timeout: if env.contains(&("CANTERLOT_FAULT_HOLD_AT", "before_attach")) {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::from_secs(30)
+                },
                 build_jobs: 6,
                 agent_nice: 0,
                 supervisor: SupervisorTimers {
