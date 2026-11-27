@@ -204,6 +204,18 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Машина — раннер: сессии на ней не запускаются",
   },
+  machine_not_pending: {
+    action: "none",
+    message: "Машина уже подключена: код привязки больше не нужен",
+  },
+  ca_unavailable: {
+    action: "none",
+    message: "В настройках хаба не задан корневой сертификат tls_ca",
+  },
+  enroll_endpoint_missing: {
+    action: "none",
+    message: "В настройках хаба не задан адрес для новых машин [enroll] grpc_endpoint",
+  },
   machine_offline: {
     action: "restore_connection",
     message: "Машина не на связи, попробуйте позже",

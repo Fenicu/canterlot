@@ -54,6 +54,9 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "machine_not_found",
   "machine_unavailable",
   "machine_is_runner",
+  "machine_not_pending",
+  "ca_unavailable",
+  "enroll_endpoint_missing",
   "machine_offline",
   "not_open",
   "not_delivered",
@@ -151,7 +154,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(98);
+    expect(ALL_ERROR_CODES.length).toBe(101);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(
