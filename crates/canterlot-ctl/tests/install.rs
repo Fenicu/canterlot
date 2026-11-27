@@ -21,14 +21,16 @@ use axum::{
     routing::get,
 };
 use canterlot_ctl::{
-    cli::{InstallArgs, TlsMode},
+    cli::{InstallArgs, TlsMode, UninstallArgs},
     error::CtlError,
     install::{Host, install},
     layout::Layout,
     ops::{self, DbIdentity, OpKind, OpRecord, OpResult},
     release::ReleaseSource,
     runner::{Cmd, FakeRunner, Output},
+    state::InstallState,
     status::status,
+    uninstall::uninstall_hub,
 };
 use flate2::{Compression, write::GzEncoder};
 use serde_json::json;
@@ -212,6 +214,7 @@ fn fixture() -> Fixture {
                 "getent" => Some(Output::ok(format!(
                     "worker:x:1000:1000::{home_text}:/bin/bash\n"
                 ))),
+                "id" => Some(Output::ok("1000\n")),
                 "df" => Some(Output::ok("Avail\n100000000000\n")),
                 "ldd" => Some(Output::ok("ldd (Debian GLIBC 2.41-12) 2.41\n")),
                 "sh" => {
@@ -261,6 +264,7 @@ fn fixture() -> Fixture {
                 }
                 "docker" if input.contains("pg_tables") => Some(Output::ok("0\n")),
                 "docker" if input.contains("availability") => Some(Output::ok("available\n")),
+                "docker" if input.contains("from executions") => Some(Output::ok("0\n")),
                 _ => None,
             }
         });
@@ -531,6 +535,115 @@ async fn install_registers_a_new_machine_when_the_kept_one_is_revoked() {
         "test-token-value"
     );
     server.abort();
+}
+
+/// Плохой архив проходит проверку сумм, но падает при распаковке после создания каталогов.
+fn release_dir_with_bad_hub(dir: &Path, version: &str) {
+    release_dir(dir, version);
+    let mut sums = String::new();
+    for (name, body) in release_files(version) {
+        let body = if name.starts_with("canterlot-hub-") {
+            b"not a gzip".to_vec()
+        } else {
+            body
+        };
+        let _ = writeln!(sums, "{}  {name}", hex(&Sha256::digest(&body)));
+    }
+    std::fs::write(dir.join("SHA256SUMS"), sums).unwrap();
+    std::fs::write(
+        dir.join(format!("canterlot-hub-{version}-x86_64-linux-gnu.tar.gz")),
+        b"not a gzip",
+    )
+    .unwrap();
+}
+
+fn relative_created(fx: &Fixture) -> Vec<PathBuf> {
+    let state = InstallState::load(&fx.layout).unwrap().unwrap();
+    let mut paths: Vec<_> = state
+        .created_paths
+        .iter()
+        .map(|p| p.strip_prefix(&fx.layout.root).unwrap().to_path_buf())
+        .collect();
+    paths.sort();
+    paths
+}
+
+#[tokio::test]
+async fn failed_install_keeps_created_paths_for_a_retry() {
+    let bad = tempfile::tempdir().unwrap();
+    release_dir_with_bad_hub(bad.path(), VERSION);
+    let good = tempfile::tempdir().unwrap();
+    release_dir(good.path(), VERSION);
+    let fx = fixture();
+    let mut bad_args = args();
+    bad_args.from_dir = Some(bad.path().to_path_buf());
+    install(bad_args, &fx.layout, &fx.runner, &offline_source(), &host())
+        .await
+        .unwrap_err();
+    assert!(fx.layout.root.join("etc/canterlot").is_dir());
+    assert!(fx.layout.root.join("var/lib/canterlot").is_dir());
+
+    let mut retry_args = args();
+    retry_args.from_dir = Some(good.path().to_path_buf());
+    install(retry_args, &fx.layout, &fx.runner, &offline_source(), &host())
+        .await
+        .unwrap();
+    let created = relative_created(&fx);
+    for want in [
+        "etc/canterlot",
+        "usr/local/bin/canterlot",
+        "var/lib/canterlot",
+        "opt/canterlot",
+    ] {
+        assert!(
+            created.iter().any(|p| p == Path::new(want) || p.starts_with(want)),
+            "{want} missing from {created:#?}"
+        );
+    }
+
+    let clean = fixture();
+    let mut clean_args = args();
+    clean_args.from_dir = Some(good.path().to_path_buf());
+    install(clean_args, &clean.layout, &clean.runner, &offline_source(), &host())
+        .await
+        .unwrap();
+    assert_eq!(created, relative_created(&clean), "different created_paths");
+}
+
+#[tokio::test]
+async fn purge_cleans_a_fresh_install_completely() {
+    let release = tempfile::tempdir().unwrap();
+    release_dir(release.path(), VERSION);
+    let fx = fixture();
+    let mut args = args();
+    args.from_dir = Some(release.path().to_path_buf());
+    install(args, &fx.layout, &fx.runner, &offline_source(), &host())
+        .await
+        .unwrap();
+    let purge = UninstallArgs {
+        purge: true,
+        ..UninstallArgs::default()
+    };
+    let report = uninstall_hub(
+        &purge,
+        &fx.layout,
+        &fx.runner,
+        &host(),
+        &mut |_| Ok("workstation".to_owned()),
+    )
+    .await
+    .unwrap();
+    assert!(report.succeeded(), "{report}");
+    let text = report.to_string();
+    assert!(!text.contains("`canterlot uninstall --purge` deletes it"), "{text}");
+    for path in [
+        fx.layout.root.join("etc/canterlot"),
+        fx.layout.root.join("var/lib/canterlot"),
+        fx.layout.root.join("opt/canterlot"),
+        fx.layout.ctl_link(),
+    ] {
+        assert!(!path.exists(), "still present: {}", path.display());
+    }
 }
 
 fn retained(fx: &Fixture) {

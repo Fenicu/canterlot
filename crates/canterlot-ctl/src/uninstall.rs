@@ -255,12 +255,25 @@ pub async fn uninstall_worker(
 const POSTGRES_UID: u32 = 999;
 const HOST_AGENT_UNIT: &str = "canterlot-host-agent.service";
 
+/// Путь, который `--purge` не удалил, с причиной для владельца.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotRemoved {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+impl fmt::Display for NotRemoved {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.path.display(), self.reason)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct HubUninstallReport {
     pub removed: Vec<PathBuf>,
     pub kept: Vec<PathBuf>,
     /// Пути, которые утилита отказалась удалять: удалить вручную после проверки.
-    pub manual: Vec<PathBuf>,
+    pub manual: Vec<NotRemoved>,
     /// Вывод удаления воркера этого хоста (от имени его учётной записи).
     pub worker: Option<String>,
     /// Был ли запрошен `--purge`: при запросе остатки означают неуспех.
@@ -291,11 +304,7 @@ impl fmt::Display for HubUninstallReport {
             )?;
         }
         for path in &self.manual {
-            writeln!(
-                f,
-                "Not removed (adopted, outside the installer's paths or behind a link): {}",
-                path.display()
-            )?;
+            writeln!(f, "Not removed: {path}")?;
         }
         if let Some(worker) = &self.worker {
             write!(f, "{worker}")?;
@@ -371,6 +380,7 @@ pub async fn uninstall_hub(
 
     let mut report = HubUninstallReport {
         purge: args.purge,
+        ok: true,
         ..HubUninstallReport::default()
     };
     // Воркер удаляется этой же утилитой, пока она ещё установлена: после удаления
@@ -438,7 +448,10 @@ pub async fn uninstall_hub(
     }
     let opt = layout.root.join("opt/canterlot");
     if state.adopted_paths.iter().any(|a| related(a, &opt)) {
-        report.manual.push(opt);
+        report.manual.push(NotRemoved {
+            path: opt,
+            reason: "adopted from a native install".into(),
+        });
     } else if crate::remove::remove_tree(&layout.root, &opt)? {
         report.removed.push(opt);
     }
@@ -448,12 +461,31 @@ pub async fn uninstall_hub(
     state.components.caddy = false;
     state.components.host_agent = false;
     state.save(layout)?;
+    // Запись операции лежит внутри удаляемого `/var/lib/canterlot/ops`: завершаем её
+    // до purge, иначе запись создаст каталог заново.
+    ops::finish(&ops_dir, &mut rec, OpResult::Done)?;
 
     if args.purge {
-        ops::advance(&ops_dir, &mut rec, "purge")?;
         let (removed, manual) = purge(layout, &state);
         report.removed.extend(removed);
         report.manual.extend(manual);
+        // При `--purge` оставшиеся корни — не «сохранённые данные», а непройденные пути.
+        for path in [
+            layout.root.join("etc/canterlot"),
+            layout.root.join("var/lib/canterlot"),
+        ] {
+            if path.exists()
+                && !report
+                    .manual
+                    .iter()
+                    .any(|item| item.path.starts_with(&path) || path.starts_with(&item.path))
+            {
+                report.manual.push(NotRemoved {
+                    path,
+                    reason: "not recorded as created by this installer".into(),
+                });
+            }
+        }
     } else {
         for kept in [
             layout.root.join("etc/canterlot"),
@@ -464,7 +496,6 @@ pub async fn uninstall_hub(
             }
         }
     }
-    ops::finish(&ops_dir, &mut rec, OpResult::Done)?;
     Ok(report)
 }
 
@@ -499,16 +530,21 @@ fn parents_are_dirs(base: &Path, path: &Path) -> bool {
     true
 }
 
-/// Удаляет записанные как созданные пути. Сначала проверяются все, затем удаляются
-/// прошедшие: удаление одного пути не меняет решения о другом.
-pub fn purge(layout: &Layout, state: &InstallState) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    let roots = [
+/// Корни, которые установка создаёт сама и может удалить `--purge`.
+pub fn install_roots(layout: &Layout) -> Vec<PathBuf> {
+    vec![
         layout.root.join("etc/canterlot"),
         layout.root.join("opt/canterlot"),
         layout.root.join("var/lib/canterlot"),
         layout.root.join("run/canterlot-host"),
         layout.ctl_link(),
-    ];
+    ]
+}
+
+/// Удаляет записанные как созданные пути. Сначала проверяются все, затем удаляются
+/// прошедшие: удаление одного пути не меняет решения о другом. Каждый отказ объяснён.
+pub fn purge(layout: &Layout, state: &InstallState) -> (Vec<PathBuf>, Vec<NotRemoved>) {
+    let roots = install_roots(layout);
     let owners = [
         0,
         state.hub_uid,
@@ -520,14 +556,35 @@ pub fn purge(layout: &Layout, state: &InstallState) -> (Vec<PathBuf>, Vec<PathBu
     for path in &state.created_paths {
         let under_root = roots.iter().any(|r| path.starts_with(r));
         let adopted = state.adopted_paths.iter().any(|a| related(a, path));
-        if !normal(path) || !under_root || adopted || !parents_are_dirs(&layout.root, path) {
-            manual.push(path.clone());
+        let reason = if !normal(path) {
+            Some("not an absolute path under the installer roots")
+        } else if !under_root {
+            Some("outside the installer paths")
+        } else if adopted {
+            Some("adopted from a native install")
+        } else if !parents_are_dirs(&layout.root, path) {
+            Some("a parent is a link or missing")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            manual.push(NotRemoved {
+                path: path.clone(),
+                reason: reason.into(),
+            });
             continue;
         }
         match std::fs::symlink_metadata(path) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Ok(meta) if owners.contains(&meta.uid()) => accepted.push(path.clone()),
-            _ => manual.push(path.clone()),
+            Ok(meta) => manual.push(NotRemoved {
+                path: path.clone(),
+                reason: format!("owned by uid {}, not by this installer", meta.uid()),
+            }),
+            Err(err) => manual.push(NotRemoved {
+                path: path.clone(),
+                reason: err.to_string(),
+            }),
         }
     }
     let mut removed = Vec::new();
@@ -535,7 +592,10 @@ pub fn purge(layout: &Layout, state: &InstallState) -> (Vec<PathBuf>, Vec<PathBu
         match crate::remove::remove_tree(&layout.root, &path) {
             Ok(true) => removed.push(path),
             Ok(false) => {}
-            Err(_) => manual.push(path),
+            Err(err) => manual.push(NotRemoved {
+                path,
+                reason: err.to_string(),
+            }),
         }
     }
     (removed, manual)

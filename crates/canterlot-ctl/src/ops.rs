@@ -99,6 +99,10 @@ pub struct OpDetails {
     /// Имя, которое добавляет `tls add-name`.
     #[serde(default)]
     pub name: Option<String>,
+    /// Каталоги, созданные установкой: переживают прерванную попытку, чтобы повтор
+    /// знал, что можно удалить `--purge`.
+    #[serde(default)]
+    pub created_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

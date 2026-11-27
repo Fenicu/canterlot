@@ -476,13 +476,32 @@ struct Owners {
     postgres: Vec<PathBuf>,
 }
 
-fn remember(state: &mut InstallState, created: Vec<PathBuf>) {
-    // Для удаления важен верхний созданный каталог: всё под ним тоже наше.
-    if let Some(top) = created.into_iter().next()
-        && !state.created_paths.iter().any(|p| top.starts_with(p))
-    {
-        state.created_paths.push(top);
+/// В список для `--purge` кладём верхний созданный каталог: всё под ним тоже наше.
+fn merge_created(paths: &mut Vec<PathBuf>, candidate: &Path) {
+    if paths.iter().any(|p| candidate.starts_with(p)) {
+        return;
     }
+    paths.retain(|p| !p.starts_with(candidate));
+    paths.push(candidate.to_path_buf());
+}
+
+/// Список сразу пишется в запись операции: если установка прервётся между созданием
+/// каталога и сохранением install.toml, повтор знает, что именно создал первый запуск.
+fn remember(
+    layout: &Layout,
+    state: &mut InstallState,
+    rec: &mut OpRecord,
+    created: Vec<PathBuf>,
+) -> Result<(), CtlError> {
+    let roots = crate::uninstall::install_roots(layout);
+    if let Some(top) = created
+        .into_iter()
+        .find(|p| roots.iter().any(|r| p.starts_with(r)))
+    {
+        merge_created(&mut state.created_paths, &top);
+    }
+    rec.details.created_paths = state.created_paths.clone();
+    ops::checkpoint(&layout.ops_dir(), rec)
 }
 
 struct HubFiles {
@@ -492,6 +511,7 @@ struct HubFiles {
 fn write_hub_files(
     layout: &Layout,
     state: &mut InstallState,
+    rec: &mut OpRecord,
     staged: &Staged,
     version: &Version,
     owners: &mut Owners,
@@ -515,7 +535,7 @@ fn write_hub_files(
         (layout.web_parent().join("releases"), 0o755),
     ] {
         let created = fsx::ensure_dir(root, &dir, mode)?;
-        remember(state, created);
+        remember(layout, state, rec, created)?;
     }
     owners.hub_group.push(layout.hub_etc());
     owners.hub_group.push(layout.hub_etc().join("tls"));
@@ -845,6 +865,8 @@ pub async fn install(
     if class == HostClass::NativeInstall {
         return Err(CtlError::NativeInstallFound);
     }
+    // Чистая установка сама создаёт эти корни, в том числе каталог блокировки ops.
+    let fresh = class == HostClass::Fresh;
     // Локальный выпуск проверяется до первой записи: негодная CSP не оставляет каталогов.
     if let Some(dir) = &args.from_dir {
         let found = release::dir_version(dir)?;
@@ -891,6 +913,12 @@ pub async fn install(
             ops::begin(&ops_dir, rec)?
         }
     };
+    if fresh && rec.details.created_paths.is_empty() {
+        for root in crate::uninstall::install_roots(layout) {
+            merge_created(&mut rec.details.created_paths, &root);
+        }
+        ops::checkpoint(&ops_dir, &rec)?;
+    }
     let version = rec
         .target
         .clone()
@@ -999,10 +1027,17 @@ async fn run(
     mut warnings: Vec<String>,
 ) -> Result<InstallReport, CtlError> {
     let ops_dir = layout.ops_dir();
+    // Повтор после прерванной попытки продолжает её список созданных путей.
+    for path in rec.details.created_paths.clone() {
+        merge_created(&mut state.created_paths, &path);
+    }
     ops::advance(&ops_dir, rec, "configs")?;
     let mut owners = Owners::default();
-    let files = write_hub_files(layout, state, staged, version, &mut owners)?;
+    let files = write_hub_files(layout, state, rec, staged, version, &mut owners)?;
     let ctl_link = install_self(layout, host)?;
+    if let Some(link) = &ctl_link {
+        remember(layout, state, rec, vec![link.clone()])?;
+    }
     state.save(layout)?;
     chown(runner, &format!("0:{}", state.hub_gid), &owners.hub_group).await?;
     chown(

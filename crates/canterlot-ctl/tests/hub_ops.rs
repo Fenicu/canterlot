@@ -159,13 +159,21 @@ async fn purge_does_not_follow_symlinks() {
     );
     assert!(l.root.join("srv/elsewhere").is_dir());
     assert!(
-        report.manual.contains(&l.root.join("srv/elsewhere")),
+        report
+            .manual
+            .iter()
+            .any(|item| item.path == l.root.join("srv/elsewhere")),
         "{report:?}"
     );
     assert!(
-        report.manual.contains(&l.caddy_data().join("sub")),
+        report
+            .manual
+            .iter()
+            .any(|item| item.path == l.caddy_data().join("sub")),
         "{report:?}"
     );
+    assert!(!report.succeeded());
+    assert!(report.to_string().contains("Not removed:"));
     assert!(!l.root.join("etc/canterlot").exists());
 }
 
@@ -184,11 +192,22 @@ async fn purge_skips_adopted_dirs() {
     assert!(l.pg_data().join("..").exists());
     assert!(l.pg_data().is_dir());
     assert!(l.manifest_dir().join("installation.toml").is_file());
-    assert!(report.manual.contains(&l.pg_data()), "{report:?}");
     assert!(
-        report.manual.contains(&l.root.join("etc/canterlot")),
+        report
+            .manual
+            .iter()
+            .any(|item| item.path == l.pg_data() && item.reason.contains("adopted")),
         "{report:?}"
     );
+    assert!(
+        report
+            .manual
+            .iter()
+            .any(|item| item.path == l.root.join("etc/canterlot")),
+        "{report:?}"
+    );
+    assert!(!report.succeeded());
+    assert!(!report.to_string().contains("`canterlot uninstall --purge` deletes it"));
     assert!(!l.hub_data().exists());
     assert!(!l.backups().exists());
 }
