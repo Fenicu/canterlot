@@ -61,6 +61,7 @@ api_hits() { grep -c 'GET /api/repos/Fenicu/canterlot/releases/latest' "$tmp/htt
 run_install() {
     local out=$1 status=0
     shift
+    CANTERLOT_INSTALL_TEST_HTTP=1 \
     CANTERLOT_API_BASE="http://127.0.0.1:$port/api/repos/Fenicu/canterlot" \
     CANTERLOT_RELEASE_BASE="http://127.0.0.1:$port/download" \
         bash "$install" "$@" >"$out" 2>&1 || status=$?
@@ -138,5 +139,14 @@ run_install "$tmp/out" join --hub h:1 --pin sha256:00 || status=$?
 expect 0 "$status"
 expect "$(printf '%s\n' join --hub h:1 --pin sha256:00 --version 1.2.3)" "$(cat "$tmp/out")"
 printf 'version_only_for_install_join_update: OK\n'
+
+# Без тестового флага открытый HTTP запрещён: загрузка даже не начинается.
+status=0
+CANTERLOT_API_BASE="http://127.0.0.1:$port/api/repos/Fenicu/canterlot" \
+CANTERLOT_RELEASE_BASE="http://127.0.0.1:$port/download" \
+    bash "$install" install >"$tmp/out" 2>&1 || status=$?
+expect 1 "$status"
+expect_code insecure_base
+printf 'https_enforced_without_test_flag: OK\n'
 
 printf 'install.sh: все проверки прошли\n'

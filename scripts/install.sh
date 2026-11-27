@@ -28,6 +28,16 @@ fi
 api_base=${CANTERLOT_API_BASE:-https://api.github.com/repos/Fenicu/canterlot}
 release_base=${CANTERLOT_RELEASE_BASE:-https://github.com/Fenicu/canterlot/releases/download}
 
+# Публичная загрузка — только HTTPS; редирект релиза на другой HTTPS-хост допустим.
+# Открытый HTTP разрешён лишь офлайн-проверкам с обоими адресами из окружения.
+if [[ ${CANTERLOT_INSTALL_TEST_HTTP:-} == 1 ]]; then
+    [[ -n ${CANTERLOT_API_BASE:-} && -n ${CANTERLOT_RELEASE_BASE:-} ]] || fail insecure_base
+    curl_proto=(--proto '=http,https' --proto-redir '=http,https')
+else
+    [[ $api_base == https://* && $release_base == https://* ]] || fail insecure_base
+    curl_proto=(--proto '=https' --proto-redir '=https')
+fi
+
 # --version — флаг подкоманды утилиты: убираем его из начала и добавляем после подкоманды.
 original=("$@")
 args=()
@@ -48,7 +58,7 @@ done
 if [[ -n "$version" ]]; then
     printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || fail bad_version
 else
-    json=$(curl -fsSL "$api_base/releases/latest") || fail download_failed
+    json=$(curl "${curl_proto[@]}" -fsSL "$api_base/releases/latest") || fail download_failed
     tag=$(printf '%s\n' "$json" | grep -m1 -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
         | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
     printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || fail bad_tag
@@ -59,8 +69,8 @@ tag="v$version"
 ctl_name="canterlot-$version-x86_64-linux.tar.gz"
 tmp=$(mktemp -d) || fail mktemp_failed
 trap 'rm -rf -- "$tmp"' EXIT
-curl -fsSL -o "$tmp/SHA256SUMS" "$release_base/$tag/SHA256SUMS" || fail download_failed
-curl -fsSL -o "$tmp/$ctl_name" "$release_base/$tag/$ctl_name" || fail download_failed
+curl "${curl_proto[@]}" -fsSL -o "$tmp/SHA256SUMS" "$release_base/$tag/SHA256SUMS" || fail download_failed
+curl "${curl_proto[@]}" -fsSL -o "$tmp/$ctl_name" "$release_base/$tag/$ctl_name" || fail download_failed
 
 # Берём только точную строку для архива: в SHA256SUMS перечислены и другие файлы.
 pattern="^[[:xdigit:]]{64}[[:space:]]+\\*?${ctl_name//./[.]}$"
