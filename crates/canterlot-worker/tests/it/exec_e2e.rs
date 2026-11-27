@@ -411,6 +411,7 @@ impl Fixture {
             legacy_ignored: None,
             hub_dial: None,
             runners: Default::default(),
+            shutdown_inhibit: false,
         };
         let owner = hub.installation.owner_id;
         let conversation = testkit::seed_conversation(pool, owner, machine.machine_id).await;

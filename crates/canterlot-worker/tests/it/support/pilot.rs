@@ -517,6 +517,7 @@ impl Pilot {
             legacy_ignored: None,
             hub_dial: None,
             runners: Default::default(),
+            shutdown_inhibit: false,
             secrets,
             memory: Default::default(),
             jobs: Default::default(),

@@ -128,6 +128,7 @@ async fn carrier_worker_brings_a_runner_online_through_the_real_hub() {
                 lease_slots: 1,
             }],
         },
+        shutdown_inhibit: false,
     };
     let runtime_dir = config.data_dir.join("runtime");
     let worker = Worker::new(config, store).with_runtime_dir(runtime_dir);
@@ -305,6 +306,7 @@ async fn an_owner_job_with_source_and_outputs_runs_on_the_runner_end_to_end() {
                 lease_slots: 1,
             }],
         },
+        shutdown_inhibit: false,
     };
     let runtime_dir = config.data_dir.join("runtime");
     let socket = canterlot_worker::owner_jobs::socket_path(Some(&runtime_dir), &data_dir);

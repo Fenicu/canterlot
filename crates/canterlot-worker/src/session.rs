@@ -76,6 +76,10 @@ pub const CAPABILITY_JOBS_INPLACE_V1: &str = "jobs_inplace_v1";
 /// наблюдения. Объявляется только с `[[runners.ssh]]`; хаб принимает сообщения лишь от несущей.
 pub const CAPABILITY_RUNNERS_V1: &str = "runners_v1";
 
+/// Хаб принимает `stopped(machine_shutdown)`; без неё задержка выключения ничего не
+/// останавливает (`shutdown.rs`).
+pub const CAPABILITY_SHUTDOWN_STOP_V1: &str = "shutdown_stop_v1";
+
 /// Носитель раннеров и его связь с потоком управления; создаётся только с `[[runners.ssh]]`.
 struct RunnersLink {
     bridge: std::sync::Arc<crate::carrier::bridge::ControlBridge>,
@@ -151,6 +155,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_JOBS_INPLACE_V1,
     CAPABILITY_REMOTE_SPAWN_V1,
     CAPABILITY_RUNNERS_V1,
+    CAPABILITY_SHUTDOWN_STOP_V1,
 ];
 
 /// Возможности, которые воркер объявляет хабу. Без таблицы `[claude_code]` Claude Code
@@ -1206,6 +1211,22 @@ impl Worker {
                 shutdown.clone(),
             ))))
         });
+        // Задержка выключения у logind. Без `shutdown_inhibit` к системной шине никто не
+        // подключается: ни тесты, ни контейнеры, ни раннеры её не видят.
+        let _shutdown_inhibit = self.config.shutdown_inhibit.then(|| {
+            let drain = self.manager.as_ref().unwrap().shutdown_drain();
+            let shutdown = shutdown.clone();
+            AbortOnDrop(tokio::spawn(async move {
+                match crate::shutdown::SystemLogind::connect().await {
+                    Ok(logind) => crate::shutdown::run(logind, drain, shutdown).await,
+                    Err(error) => tracing::info!(
+                        kind = "shutdown_inhibit_unavailable",
+                        reason = %error,
+                        "sessions are not stopped before shutdown"
+                    ),
+                }
+            }))
+        });
         // Собранные результаты задач живут `[jobs].output_retention`; чистит и носитель без раннеров:
         // задача на самой несущей тоже собирает результаты.
         let _outputs_sweep = AbortOnDrop(tokio::spawn(crate::carrier::stage::sweep_loop(
@@ -1589,6 +1610,14 @@ impl Worker {
         .map_err(|_| WorkerError::Timeout)??;
         let pilot = accepted.capabilities.iter().any(|cap| cap == "pilot_v1");
         let hub_records = data::HubRecords::from_capabilities(&accepted.capabilities);
+        // Последнее рукопожатие решает и тогда, когда к выключению связи с хабом уже нет:
+        // итоги дойдут после загрузки.
+        self.manager.as_ref().unwrap().set_hub_shutdown_stop(
+            accepted
+                .capabilities
+                .iter()
+                .any(|cap| cap == CAPABILITY_SHUTDOWN_STOP_V1),
+        );
         let limits_fable = hub_records.limits_fable;
         let provider_credits = accepted
             .capabilities

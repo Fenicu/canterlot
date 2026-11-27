@@ -583,6 +583,7 @@ impl ProtocolHub {
             hub_url,
             hub_dial,
             runners: Default::default(),
+            shutdown_inhibit: false,
             ca_cert,
             token_file,
             machine_id: Uuid::now_v7(),

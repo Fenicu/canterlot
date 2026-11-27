@@ -189,6 +189,7 @@ impl Fixture {
             legacy_ignored: None,
             hub_dial: None,
             runners: Default::default(),
+            shutdown_inhibit: false,
         };
         let conversation = testkit::seed_conversation(pool, owner, machine.machine_id).await;
         sqlx::query("update conversations set workdir=$2,harness='synthetic' where id=$1")

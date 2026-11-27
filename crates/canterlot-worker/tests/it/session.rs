@@ -76,6 +76,7 @@ async fn fixture(
         legacy_ignored: None,
         hub_dial: None,
         runners: Default::default(),
+        shutdown_inhibit: false,
     };
     (directory, secrets_guard, config, store)
 }

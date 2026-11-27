@@ -49,6 +49,11 @@ pub struct WorkerConfig {
     /// Раннеры, которых этот воркер как носитель ведёт по SSH (`runners_v1`).
     #[serde(default)]
     pub runners: RunnersConfig,
+    /// Брать у systemd-logind задержку выключения и останавливать сессии перед ним
+    /// (`shutdown.rs`). Выключено по умолчанию: тогда воркер к системной шине не
+    /// подключается вовсе.
+    #[serde(default)]
+    pub shutdown_inhibit: bool,
 }
 
 /// `[runners]`: носитель ведёт перечисленные раннеры, если хаб тоже назвал их своими.

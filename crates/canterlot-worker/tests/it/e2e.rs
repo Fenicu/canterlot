@@ -151,6 +151,7 @@ impl Fixture {
             legacy_ignored: None,
             hub_dial: None,
             runners: Default::default(),
+            shutdown_inhibit: false,
         };
         let mut fixture = Self {
             pool: pool.clone(),
