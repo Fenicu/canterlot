@@ -63,6 +63,8 @@ Canterlot — self-hosted хаб для агентов программиров�
 
 ## Быстрый старт
 
+На хосте с Docker одной строкой `curl -fsSL https://github.com/Fenicu/canterlot/releases/latest/download/install.sh | bash` ставятся хаб, база, Caddy, PWA и воркер ([установка одной строкой](docs/deploy/release-archives.md#установка-одной-строкой), появится с выпуском, который её содержит). Без неё — по шагам:
+
 В [выпусках на GitHub](https://github.com/Fenicu/canterlot/releases) лежат собранные хаб, воркер и PWA для x86_64 и glibc 2.41 и новее (Debian 13, Ubuntu 25.04). Понадобятся PostgreSQL 18, Caddy и CLI нужных агентов (`claude`, `codex`, `opencode`) на рабочих машинах.
 
 1. Скачайте архивы выпуска и проверьте `SHA256SUMS`.
