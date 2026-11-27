@@ -1473,8 +1473,11 @@ async fn lost_sj_acks_do_not_duplicate_blocks() {
     )
     .await;
     let identities = fixture.identities();
-    let ack_start = fixture.faults().acks().len();
+    // Сначала включить потерю, потом взять отметку: хаб решает и пишет каждое
+    // подтверждение под одним замком, так что после отметки потеряны все. В обратном
+    // порядке подтверждение стартовых записей под нагрузкой проскакивало между ними.
     fixture.faults().drop_next_sj_acks(usize::MAX);
+    let ack_start = fixture.faults().acks().len();
     let (script, expected) = answer(60, 30);
     let input = fixture.submit(script).await;
     fixture.wait_deltas(3).await;
@@ -1502,7 +1505,12 @@ async fn lost_sj_acks_do_not_duplicate_blocks() {
         .skip(ack_start)
         .filter(|a| a.range.journal_id == journal)
         .collect();
-    assert!(acks.len() > 3 && acks.iter().all(|ack| ack.dropped));
+    // Сколько подтверждений набралось, зависит от того, как воркер склеил записи в пачки:
+    // под нагрузкой пачек меньше. Контракт — потеряны все, а повтор уже проверен выше.
+    assert!(
+        !acks.is_empty() && acks.iter().all(|ack| ack.dropped),
+        "{acks:?}"
+    );
     fixture.faults().drop_next_sj_acks(0);
     fixture.faults().fail_data(Code::Cancelled);
     fixture.assert_same_processes(identities);
