@@ -106,7 +106,7 @@
   let SnippetsSheet = $state<Component<{ open: boolean; projectKey: string; text: string; onclose: () => void; oninsert: (body: string) => void }> | null>(null);
   // Окно «Отправить позже» открывают нечасто: чанк едет только вместе с ним.
   let SendLater = $state<Component<{ open: boolean; now: () => number; blocked?: boolean; panelId: string; onclose: () => void; onpick: (at: number) => void }> | null>(null);
-  // Редактор images открывают редко: чанк едет только когда файл действительно нужно править.
+  // Редактор картинок открывают редко: чанк едет только когда файл действительно нужно править.
   let ImageEditor = $state<Component<{
     file: File;
     ondone: (edited: File) => void;
@@ -119,7 +119,8 @@
   $effect(() => {
     if (later && !SendLater) import('#lib/composer/SendLater.svelte').then((m) => { SendLater = m.default; });
     if (snippetsOpen && !SnippetsSheet) import('#lib/composer/SnippetsSheet.svelte').then((m) => { SnippetsSheet = m.default; });
-    if (editorFile && !ImageEditor) import('#lib/composer/ImageEditor.svelte').then((m) => { ImageEditor = m.default; });
+    // Чанк редактора не загрузился (нет сети, старый кэш после выкатки): картинка уходит как есть, очередь не встаёт.
+    if (editorFile && !ImageEditor) import('#lib/composer/ImageEditor.svelte').then((m) => { ImageEditor = m.default; }, () => finishEditor({ choice: 'original' }));
   });
 
   function openEditor(file: File): Promise<EditChoice> {
