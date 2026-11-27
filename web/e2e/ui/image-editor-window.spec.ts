@@ -36,7 +36,7 @@ async function openEditor(page: Page, image: (typeof IMAGES)[number]): Promise<v
   });
   const dialog = page.locator('dialog.editor');
   await expect(dialog).toBeVisible({ timeout: 15_000 });
-  await expect.poll(() => dialog.locator('canvas').evaluate((node) => (node as HTMLCanvasElement).width)).toBeGreaterThan(0);
+  await expect(dialog.locator('.stage[data-ready]')).toBeVisible({ timeout: 15_000 });
 }
 
 test('редактор — окно с полями по краям, холст внутри и панель инструментов сверху', async ({ page }) => {
@@ -60,6 +60,9 @@ test('редактор — окно с полями по краям, холст 
     expect(box.y).toBeGreaterThanOrEqual(margin);
     expect(box.x + box.width).toBeLessThanOrEqual(viewport.width - margin);
     expect(box.y + box.height).toBeLessThanOrEqual(viewport.height - margin);
+    // Высокий снимок использует всю доступную высоту, широкий на телефоне даёт низкое окно.
+    if (image.name === 'tall') expect(box.height).toBeGreaterThan(viewport.height * 0.7);
+    if (phone && image.name === 'wide') expect(box.height).toBeLessThan(viewport.height * 0.7);
     expect(canvas.x).toBeGreaterThanOrEqual(box.x);
     expect(canvas.y).toBeGreaterThanOrEqual(box.y);
     expect(canvas.x + canvas.width).toBeLessThanOrEqual(box.x + box.width);

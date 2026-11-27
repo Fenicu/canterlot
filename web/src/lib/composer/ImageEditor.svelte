@@ -39,6 +39,8 @@
   let dialog: HTMLDialogElement;
   let stage: HTMLDivElement;
   let canvas: HTMLCanvasElement;
+  let tools: HTMLDivElement;
+  let footer: HTMLElement;
   let doneButton: HTMLSpanElement;
   let loaded: LoadedImage | null = null;
   let image = $state<Size>({ width: 0, height: 0 });
@@ -48,6 +50,7 @@
   let tool = $state<'crop' | 'pencil'>('crop');
   let color = $state<MarkColor>('red');
   let busy = $state(true);
+  let fitted = $state(false);
   let exporting = $state(false);
   let error = $state<string | null>(null);
   const COLOR_LABELS: Record<MarkColor, string> = {
@@ -190,15 +193,39 @@
     }
   }
 
+  /**
+   * Размер сцены считаем от окна и его неизменной обвязки: сама сцена в расчёте не участвует,
+   * иначе её resize породил бы бесконечный цикл. Высота окна не фиксирована — оно сжимается
+   * до вписанной картинки, а предел берём из max-height с учётом панелей и отступов.
+   */
   function refit(): void {
-    if (!stage || !canvas || !image.width) return;
-    const width = stage.clientWidth;
-    const height = stage.clientHeight;
-    if (!width || !height) return;
+    if (!dialog || !stage || !canvas) return;
+    const styles = getComputedStyle(dialog);
+    const gap = parseFloat(styles.rowGap) || 0;
+    const chrome =
+      (parseFloat(styles.borderTopWidth) || 0) +
+      (parseFloat(styles.borderBottomWidth) || 0) +
+      (parseFloat(styles.paddingTop) || 0) +
+      (parseFloat(styles.paddingBottom) || 0) +
+      (tools?.offsetHeight ?? 0) +
+      (footer?.offsetHeight ?? 0) +
+      2 * gap;
+    const width = Math.max(
+      1,
+      dialog.clientWidth - (parseFloat(styles.paddingLeft) || 0) - (parseFloat(styles.paddingRight) || 0)
+    );
+    const limit = parseFloat(styles.maxHeight) || window.innerHeight;
+    const height = Math.max(1, limit - chrome);
+    const box = image.width ? fitImage(image, { width, height }) : { x: 0, y: 0, width, height };
+    const stageWidth = Math.max(1, Math.round(box.width));
+    const stageHeight = Math.max(1, Math.round(box.height));
+    stage.style.width = `${stageWidth}px`;
+    stage.style.height = `${stageHeight}px`;
     dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.round(width * dpr);
-    canvas.height = Math.round(height * dpr);
-    view = fitImage(image, { width, height });
+    canvas.width = Math.round(stageWidth * dpr);
+    canvas.height = Math.round(stageHeight * dpr);
+    view = { x: 0, y: 0, width: stageWidth, height: stageHeight };
+    fitted = image.width > 0;
     draw();
   }
 
@@ -228,12 +255,13 @@
       busy = false;
       void tick().then(refit);
     });
-    const observer = new ResizeObserver(() => refit());
-    observer.observe(stage);
+    window.addEventListener('resize', refit);
+    window.visualViewport?.addEventListener('resize', refit);
     void tick().then(() => doneButton?.focus({ preventScroll: true }));
     return () => {
       disposed = true;
-      observer.disconnect();
+      window.removeEventListener('resize', refit);
+      window.visualViewport?.removeEventListener('resize', refit);
       loaded?.close();
       if (dialog.open) dialog.close();
     };
@@ -421,7 +449,7 @@
     oncancel();
   }}
 >
-  <div class="tools" role="group" aria-label="Инструменты правки">
+  <div class="tools" role="group" aria-label="Инструменты правки" bind:this={tools}>
     <IconButton
       icon="crop"
       label="Обрезать"
@@ -462,7 +490,7 @@
       {/each}
     </div>
   </div>
-  <div class="stage" bind:this={stage}>
+  <div class="stage" data-ready={fitted ? 'true' : undefined} bind:this={stage}>
     <canvas
       bind:this={canvas}
       aria-label="Снимок с рамкой обрезки и рисунками от руки"
@@ -474,7 +502,7 @@
     {#if busy}<p class="status">Загрузка изображения…</p>{/if}
     {#if error}<p class="status">{error}</p>{/if}
   </div>
-  <footer>
+  <footer bind:this={footer}>
     <Button variant="text" onclick={oncancel}>Отмена</Button>
     <Button variant="text" onclick={onoriginal}>Без правок</Button>
     <Button variant="primary" busy={exporting} onclick={() => void done()}>
@@ -489,7 +517,6 @@
     inset: 0;
     width: min(calc(100% - var(--s12)), var(--reading-max));
     max-width: calc(100% - var(--s12));
-    height: calc(100dvh - var(--s15));
     max-height: calc(100dvh - var(--s15));
     margin: auto;
     border: var(--hairline) solid var(--line);
@@ -505,7 +532,6 @@
   }
   .editor::backdrop { background: var(--scrim); }
   :global([data-layout='desktop']) .editor {
-    height: min(calc(100dvh - var(--s15)), calc(var(--reading-max) * .9));
     max-height: min(calc(100dvh - var(--s15)), calc(var(--reading-max) * .9));
     padding: var(--s6);
   }
@@ -520,8 +546,9 @@
   /* Выбранный инструмент выделяется фоном, а не только цветом значка. */
   .tools > :global(button[aria-pressed='true']) { background: var(--selected); color: var(--accent-link); }
   .stage {
-    flex: 1 1 auto;
+    flex: none;
     min-height: 0;
+    margin-inline: auto;
     position: relative;
     overflow: hidden;
     border-radius: var(--radius);
