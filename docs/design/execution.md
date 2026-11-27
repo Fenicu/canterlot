@@ -26,7 +26,7 @@
 
 | Состояние | `outcome` |
 | --- | --- |
-| `stopped` | `user_stop`, `normal_exit`, `machine_rebooted` (§9.4 «прерванным»), `start_cancelled`, `force_stopped` |
+| `stopped` | `user_stop`, `normal_exit`, `machine_rebooted` (§9.4 «прерванным»), `machine_shutdown` (остановка перед выключением машины, [recovery.md](recovery.md) R4), `start_cancelled`, `force_stopped` |
 | `failed` | `start_rejected`, `worktree_not_git`, `worktree_base_unknown`, `worktree_failed`, `start_failed`, `cli_incompatible`, `auth_required`, `crashed`, `protocol_incompatible`, `storage_failure`, `supervisor_died`, `admin_resolved`, `context_exhausted` |
 
 ```mermaid
@@ -430,5 +430,6 @@ stateDiagram-v2
 | отключение хаба (§9.3) | без изменений | без изменений | `unavailable` | сохраняется | удержание | без изменений |
 | смерть сопровождения (§9.5) | `owner_lost`, затем `failed(supervisor_died)` при пустой группе | сброс | без изменений | `orphaned`, при выходе освобождается | пауза `owner_lost`, при выходе к ней добавляется `fatal_error` | при выходе `acceptance_unconfirmed`; ввод без намерения передачи возвращается в `queued` |
 | перезагрузка машины (§9.4) | `stopped(machine_rebooted)` | сброс | `unavailable` → `available` | освобождается | пауза `process_exited` | `acceptance_unconfirmed`, если `reconcile` не доказал приём |
+| выключение машины через logind, `shutdown_inhibit` (R4) | `stopping` → `stopped(machine_shutdown)` до выключения; не успевшее — `stopped(machine_rebooted)` после загрузки | сброс | без изменений до SIGTERM службы | освобождается после подтверждения хаба | пауза `process_exited`, снимается вводом | как при остановке: `acceptance_unconfirmed` для непринятого |
 | restart хаба | без изменений | наблюдение устаревает до сверки | все `unavailable` до handshake | без изменений | удержание до сверки машины | без изменений |
 | restore (§18.1) | старые активные статусы неподтверждённые | сброс | до сверки в новом поколении | по фактам машины | пауза `restore_pending` | классификация R7 |
