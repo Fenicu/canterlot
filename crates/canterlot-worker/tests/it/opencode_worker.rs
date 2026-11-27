@@ -860,8 +860,14 @@ async fn plain_text_turn_yields_a_speed() {
             frame("session.text.started", json!({"ordinal": 0})),
         ],
     });
-    // Честная генерация: между первым кадром текста и его концом 1,5 с. Время блокам ставит хаб
-    // при записи, и под нагрузкой задержка доставки съедает запас над порогом в 250 мс.
+    // Честная генерация: время блокам ставит хаб при записи, поэтому пауза 1,5 с идёт только
+    // после того, как хаб записал начало текста. Пауза от кадра двойника под нагрузкой
+    // съедалась задержкой доставки, и генерация выходила ниже порога в 250 мс.
+    let gate = tempfile::tempdir().unwrap();
+    let release = gate.path().join("text-started");
+    script.steps.push(Step::WaitFile {
+        path: release.clone(),
+    });
     script.steps.push(Step::Stall { ms: 1500 });
     script.steps.push(Step::Emit {
         events: vec![
@@ -890,6 +896,18 @@ async fn plain_text_turn_yields_a_speed() {
     let stack = Stack::start(pool.clone(), script).await;
     let execution = stack.execution().await;
     stack.say("Скажи привет").await;
+    until("text block recorded by the hub", async || {
+        sqlx::query_scalar::<_, i64>(
+            "select count(*) from blocks where execution_id = $1 and kind = 'text'",
+        )
+        .bind(execution)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+            > 0
+    })
+    .await;
+    fs::write(&release, []).unwrap();
     stack.finished_runs(execution, 1).await;
 
     let run: (Option<String>, bool, bool, Uuid) = sqlx::query_as(

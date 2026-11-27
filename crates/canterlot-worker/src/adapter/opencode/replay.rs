@@ -123,6 +123,10 @@ pub enum Step {
     AwaitSubscription {
         count: u32,
     },
+    /// Дождаться файла: тест отпускает сценарий, когда увидел нужное состояние у себя.
+    WaitFile {
+        path: PathBuf,
+    },
     Die {
         code: u8,
         #[serde(default)]
@@ -483,6 +487,12 @@ async fn run_steps(shared: Arc<Shared>) {
             Step::Stall { ms } => tokio::time::sleep(Duration::from_millis(ms)).await,
             Step::AwaitSubscription { count } => {
                 if shared.state.lock().unwrap().subscriptions < count {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    continue;
+                }
+            }
+            Step::WaitFile { path } => {
+                if !path.exists() {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                     continue;
                 }
