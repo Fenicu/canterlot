@@ -380,17 +380,15 @@ pub async fn update(
     Ok(reports)
 }
 
-/// Состояние контейнера из `docker compose ps --format json hub`.
+/// Состояние контейнера из `docker compose ps --all --format {{.State}} hub`: Compose печатает
+/// одно состояние в строке. Пустой вывод означает, что контейнера ещё нет.
+/// `--all` обязателен — без него stopped-контейнер не попадает в вывод.
 fn container_state(text: &str) -> Option<String> {
-    let text = text.trim();
-    if let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(text) {
-        return rows
-            .first()
-            .and_then(|row| row.get("State").or_else(|| row.get("state")))
-            .and_then(|value| value.as_str())
-            .map(str::to_owned);
-    }
-    (!text.is_empty()).then(|| text.split_whitespace().next().unwrap().to_owned())
+    text.lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
 }
 
 /// Последние строки журнала кандидата: упавшая миграция должна называть себя в причине отказа.
@@ -423,7 +421,8 @@ async fn candidate_log_tail(runner: &dyn Runner, layout: &Layout) -> String {
 
 /// Готовность хаба по `canterlot-hub probe` внутри контейнера: код 0, ready и нужная версия.
 /// Число попыток и пауза — из `Host`, в тестах пауза нулевая. Каждая попытка сначала
-/// смотрит состояние контейнера: мёртвый кандидат не ждёт остальных попыток.
+/// смотрит состояние контейнера: окончательно упавший кандидат не ждёт остальных попыток,
+/// а временный `restarting` (у обычного стека с `unless-stopped`) продолжает нормальный опрос.
 pub async fn probe(
     runner: &dyn Runner,
     layout: &Layout,
@@ -441,10 +440,13 @@ pub async fn probe(
             tokio::time::sleep(host.retry_delay).await;
         }
         if let Ok(out) = runner
-            .run(compose(layout, &["ps", "--format", "json", "hub"]))
+            .run(compose(
+                layout,
+                &["ps", "--all", "--format", "{{.State}}", "hub"],
+            ))
             .await
             && let Some(state) = container_state(&stdout(&out))
-            && matches!(state.as_str(), "exited" | "restarting" | "dead")
+            && matches!(state.as_str(), "exited" | "dead")
         {
             return Err(CtlError::NotReady(format!(
                 "candidate hub container is {state}; {}",

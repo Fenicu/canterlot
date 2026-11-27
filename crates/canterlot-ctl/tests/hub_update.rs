@@ -14,7 +14,7 @@ use canterlot_ctl::{
     error::CtlError,
     hub_update::{UpdateReport, probe, update_hub},
     ops::{self, OpDetails, OpKind, OpRecord, OpResult, Traffic},
-    runner::{FakeRunner, Output},
+    runner::{Cmd, FakeRunner, Output},
     web,
 };
 use hub_support::*;
@@ -507,14 +507,19 @@ async fn update_args_version_mismatch_with_from_dir_is_refused() {
     assert!(fx.events().is_empty());
 }
 
+// Compose v5.8.0: `docker compose ps --all --format '{{.State}}' hub` печатает одно
+// состояние в строке (без `--all` остановленный контейнер не показан), а не JSON-массив.
+fn is_ps_state(cmd: &Cmd) -> bool {
+    has(cmd, &["ps", "--all", "--format", "{{.State}}", "hub"])
+}
+
 /// Состояние контейнера и его журнал подменяются раньше проверки готовности хаба.
-fn failing_candidate(container_state: &'static str) -> FakeRunner {
+fn failing_candidate(state: &str) -> FakeRunner {
     let runner = FakeRunner::new();
+    let state = state.to_owned();
     runner.respond(move |cmd| {
-        if has(cmd, &["ps", "--format", "json", "hub"]) {
-            return Some(Output::ok(format!(
-                "[{{\"State\":\"{container_state}\",\"Status\":\"Exited (1)\"}}]\n"
-            )));
+        if is_ps_state(cmd) {
+            return Some(Output::ok(state.clone()));
         }
         if has(cmd, &["logs", "--no-color", "--tail", "20", "hub"]) {
             return Some(Output {
@@ -538,37 +543,58 @@ fn failing_candidate(container_state: &'static str) -> FakeRunner {
 #[tokio::test]
 async fn probe_stops_when_candidate_container_exited() {
     let fx = Fixture::new();
-    fx.runner.respond(move |cmd| {
-        if has(cmd, &["ps", "--format", "json", "hub"]) {
-            return Some(Output::ok("[{\"State\":\"exited\"}]\n"));
-        }
-        if has(cmd, &["logs", "--no-color", "--tail", "20", "hub"]) {
-            return Some(Output::failed(0, "migration 0003 failed: bad sql"));
-        }
-        None
-    });
-    let err = probe(&fx.runner, &fx.layout, &host(), &v(NEW))
+    let runner = failing_candidate("exited\n");
+    let err = probe(&runner, &fx.layout, &host(), &v(NEW))
         .await
         .unwrap_err();
     let text = err.to_string();
     assert!(text.contains("exited"), "{text}");
     assert!(text.contains("migration 0003 failed"), "{text}");
+    assert_eq!(
+        runner.calls().iter().filter(|c| is_ps_state(c)).count(),
+        1,
+        "must stop after one state check"
+    );
     assert!(
-        fx.events().iter().all(|e| !e.starts_with("probe")),
-        "must not exec probe on a dead container: {:?}",
-        fx.events()
+        !runner
+            .calls()
+            .iter()
+            .any(|c| has(c, &["exec", "-T", "hub"]) && has(c, &["probe"])),
+        "must not exec probe on a dead container"
     );
 }
 
 #[tokio::test]
-async fn probe_stops_when_candidate_container_restarting() {
+async fn probe_retries_while_container_restarting() {
     let fx = Fixture::new();
-    let runner = failing_candidate("restarting");
-    // Поддержка журнала из failing_candidate здесь не нужна: важно, что попыток одна.
+    let runner = failing_candidate("restarting\n");
     let err = probe(&runner, &fx.layout, &host(), &v(NEW))
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("restarting"), "{err}");
+    let text = err.to_string();
+    assert!(text.contains("hub probe exited with 1"), "{text}");
+    assert!(!text.contains("container is restarting"), "{text}");
+    assert_eq!(
+        runner.calls().iter().filter(|c| is_ps_state(c)).count(),
+        host().retries as usize,
+        "a transient restart must not cut the retry loop short"
+    );
+}
+
+#[tokio::test]
+async fn probe_retries_when_container_is_not_listed() {
+    let fx = Fixture::new();
+    let runner = failing_candidate("");
+    let err = probe(&runner, &fx.layout, &host(), &v(NEW))
+        .await
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("hub probe exited with 1"), "{text}");
+    assert_eq!(
+        runner.calls().iter().filter(|c| is_ps_state(c)).count(),
+        host().retries as usize,
+        "an empty ps output means no container yet, not a failure verdict"
+    );
 }
 
 #[tokio::test]
@@ -576,7 +602,7 @@ async fn probe_failure_reason_includes_candidate_log_tail() {
     let fx = Fixture::new();
     fx.world().fail.insert("candidate");
     fx.world().hub = Some(NEW.into());
-    let runner = failing_candidate("running");
+    let runner = failing_candidate("running\n");
     let err = probe(&runner, &fx.layout, &host(), &v(NEW))
         .await
         .unwrap_err();
