@@ -380,8 +380,50 @@ pub async fn update(
     Ok(reports)
 }
 
+/// Состояние контейнера из `docker compose ps --format json hub`.
+fn container_state(text: &str) -> Option<String> {
+    let text = text.trim();
+    if let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(text) {
+        return rows
+            .first()
+            .and_then(|row| row.get("State").or_else(|| row.get("state")))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+    }
+    (!text.is_empty()).then(|| text.split_whitespace().next().unwrap().to_owned())
+}
+
+/// Последние строки журнала кандидата: упавшая миграция должна называть себя в причине отказа.
+async fn candidate_log_tail(runner: &dyn Runner, layout: &Layout) -> String {
+    let out = match runner
+        .run(compose(
+            layout,
+            &["logs", "--no-color", "--tail", "20", "hub"],
+        ))
+        .await
+    {
+        Ok(out) => out,
+        Err(err) => return format!("logs unavailable: {err}"),
+    };
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let errors = String::from_utf8_lossy(&out.stderr);
+    if !errors.trim().is_empty() {
+        if !text.trim().is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&errors);
+    }
+    let text = text.trim().to_owned();
+    if text.is_empty() {
+        "no logs from the candidate".into()
+    } else {
+        format!("Candidate logs (last 20 lines):\n{text}")
+    }
+}
+
 /// Готовность хаба по `canterlot-hub probe` внутри контейнера: код 0, ready и нужная версия.
-/// Число попыток и пауза — из `Host`, в тестах пауза нулевая.
+/// Число попыток и пауза — из `Host`, в тестах пауза нулевая. Каждая попытка сначала
+/// смотрит состояние контейнера: мёртвый кандидат не ждёт остальных попыток.
 pub async fn probe(
     runner: &dyn Runner,
     layout: &Layout,
@@ -398,6 +440,17 @@ pub async fn probe(
         if attempt > 0 {
             tokio::time::sleep(host.retry_delay).await;
         }
+        if let Ok(out) = runner
+            .run(compose(layout, &["ps", "--format", "json", "hub"]))
+            .await
+            && let Some(state) = container_state(&stdout(&out))
+            && matches!(state.as_str(), "exited" | "restarting" | "dead")
+        {
+            return Err(CtlError::NotReady(format!(
+                "candidate hub container is {state}; {}",
+                candidate_log_tail(runner, layout).await
+            )));
+        }
         let out = runner.run(hub_exec(layout, &["probe"])).await?;
         match serde_json::from_str::<Probe>(&stdout(&out)) {
             Ok(p) if out.status == 0 && p.ready && p.version == version.as_str() => return Ok(()),
@@ -410,7 +463,10 @@ pub async fn probe(
             Err(_) => last = format!("hub probe exited with {} without a verdict", out.status),
         }
     }
-    Err(CtlError::NotReady(last))
+    Err(CtlError::NotReady(format!(
+        "{last}\n{}",
+        candidate_log_tail(runner, layout).await
+    )))
 }
 
 struct Job<'a> {

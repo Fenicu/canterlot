@@ -178,9 +178,11 @@ fn csp_substitutes_origin_host() {
 }
 
 #[test]
-fn fenced_override_resets_hub_ports() {
+fn fenced_override_resets_hub_ports_and_disables_restart() {
     let text = render_compose_fenced();
-    assert!(text.contains("  hub:\n    ports: !reset []\n"));
+    // Кандидат не должен перезапускаться Docker после упавшей миграции: иначе причина
+    // отказа теряется среди бесконечных перезапусков.
+    assert!(text.contains("  hub:\n    ports: !reset []\n    restart: \"no\"\n"));
 }
 
 #[test]

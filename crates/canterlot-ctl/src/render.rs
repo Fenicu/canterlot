@@ -142,9 +142,10 @@ pub fn render_compose(s: &InstallState, v: &Version) -> String {
     out
 }
 
-/// Добавка к compose на время проверки нового хаба: gRPC не публикуется наружу.
+/// Добавка к compose на время проверки нового хаба: gRPC не публикуется наружу, а упавший
+/// кандидат не перезапускается, чтобы причина отказа осталась в журнале одной попытки.
 pub fn render_compose_fenced() -> String {
-    format!("{HEADER}services:\n  hub:\n    ports: !reset []\n")
+    format!("{HEADER}services:\n  hub:\n    ports: !reset []\n    restart: \"no\"\n")
 }
 
 pub fn render_caddyfile(s: &InstallState, csp: &str) -> String {

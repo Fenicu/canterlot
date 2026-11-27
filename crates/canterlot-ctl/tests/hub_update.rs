@@ -12,8 +12,9 @@ use std::{fs, path::Path};
 use canterlot_ctl::{
     cli::{UpdateArgs, Version},
     error::CtlError,
-    hub_update::{UpdateReport, update_hub},
+    hub_update::{UpdateReport, probe, update_hub},
     ops::{self, OpDetails, OpKind, OpRecord, OpResult, Traffic},
+    runner::{FakeRunner, Output},
     web,
 };
 use hub_support::*;
@@ -504,4 +505,85 @@ async fn update_args_version_mismatch_with_from_dir_is_refused() {
         .unwrap_err();
     assert!(err.to_string().starts_with("version_mismatch"), "{err}");
     assert!(fx.events().is_empty());
+}
+
+/// Состояние контейнера и его журнал подменяются раньше проверки готовности хаба.
+fn failing_candidate(container_state: &'static str) -> FakeRunner {
+    let runner = FakeRunner::new();
+    runner.respond(move |cmd| {
+        if has(cmd, &["ps", "--format", "json", "hub"]) {
+            return Some(Output::ok(format!(
+                "[{{\"State\":\"{container_state}\",\"Status\":\"Exited (1)\"}}]\n"
+            )));
+        }
+        if has(cmd, &["logs", "--no-color", "--tail", "20", "hub"]) {
+            return Some(Output {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: b"migration 0003 failed: relation \"jobs\" already exists\n".to_vec(),
+            });
+        }
+        if has(cmd, &["exec", "-T", "hub"]) && has(cmd, &["probe"]) {
+            return Some(Output {
+                status: 1,
+                stdout: format!("{{\"ready\":false,\"version\":\"{NEW}\"}}\n").into_bytes(),
+                stderr: Vec::new(),
+            });
+        }
+        None
+    });
+    runner
+}
+
+#[tokio::test]
+async fn probe_stops_when_candidate_container_exited() {
+    let fx = Fixture::new();
+    fx.runner.respond(move |cmd| {
+        if has(cmd, &["ps", "--format", "json", "hub"]) {
+            return Some(Output::ok("[{\"State\":\"exited\"}]\n"));
+        }
+        if has(cmd, &["logs", "--no-color", "--tail", "20", "hub"]) {
+            return Some(Output::failed(0, "migration 0003 failed: bad sql"));
+        }
+        None
+    });
+    let err = probe(&fx.runner, &fx.layout, &host(), &v(NEW))
+        .await
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("exited"), "{text}");
+    assert!(text.contains("migration 0003 failed"), "{text}");
+    assert!(
+        fx.events().iter().all(|e| !e.starts_with("probe")),
+        "must not exec probe on a dead container: {:?}",
+        fx.events()
+    );
+}
+
+#[tokio::test]
+async fn probe_stops_when_candidate_container_restarting() {
+    let fx = Fixture::new();
+    let runner = failing_candidate("restarting");
+    // Поддержка журнала из failing_candidate здесь не нужна: важно, что попыток одна.
+    let err = probe(&runner, &fx.layout, &host(), &v(NEW))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("restarting"), "{err}");
+}
+
+#[tokio::test]
+async fn probe_failure_reason_includes_candidate_log_tail() {
+    let fx = Fixture::new();
+    fx.world().fail.insert("candidate");
+    fx.world().hub = Some(NEW.into());
+    let runner = failing_candidate("running");
+    let err = probe(&runner, &fx.layout, &host(), &v(NEW))
+        .await
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("hub probe exited with 1"), "{text}");
+    assert!(
+        text.contains("migration 0003 failed"),
+        "the failed migration must be named: {text}"
+    );
 }

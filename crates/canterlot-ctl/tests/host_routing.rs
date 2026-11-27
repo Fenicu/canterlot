@@ -109,5 +109,8 @@ fn root_required_error_names_the_command() {
     let err = ensure_root_with(&["update".into()], &NoTerminal).unwrap_err();
     assert!(err.to_string().contains("sudo canterlot update"), "{err}");
     let err = CtlError::RootRequired("uninstall".into());
-    assert!(err.to_string().contains("sudo canterlot uninstall"), "{err}");
+    assert!(
+        err.to_string().contains("sudo canterlot uninstall"),
+        "{err}"
+    );
 }

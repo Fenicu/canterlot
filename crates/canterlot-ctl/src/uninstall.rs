@@ -92,9 +92,7 @@ pub async fn uninstall(
                 .await
                 .map(Uninstalled::Hub)
         }
-        crate::hub_update::HostRoute::NeedsRoot => {
-            Err(CtlError::RootRequired("uninstall".into()))
-        }
+        crate::hub_update::HostRoute::NeedsRoot => Err(CtlError::RootRequired("uninstall".into())),
         crate::hub_update::HostRoute::Worker => uninstall_worker(args, layout, runner, host)
             .await
             .map(Uninstalled::Worker),

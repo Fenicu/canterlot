@@ -201,7 +201,9 @@ impl World {
             "df" => ok(format!("Avail\n{}\n", self.free)),
             "chown" => ok(""),
             "id" => ok("1000\n"),
-            _ if cmd.as_user.is_some() => self.worker_output.clone().or_else(|| ok("worker done\n")),
+            _ if cmd.as_user.is_some() => {
+                self.worker_output.clone().or_else(|| ok("worker done\n"))
+            }
             "sh" => self.redirect(cmd),
             "docker" if cmd.args.first().map(String::as_str) == Some("run") => {
                 if has(cmd, &["migrations", "manifest", "--json"]) {

@@ -282,11 +282,8 @@ async fn hub_chain_waits_until_worker_sees_the_new_hub_version() {
     let m = machine(&[OLD]);
     // Сразу после перезапуска хаба воркер не подключён, затем видит старую версию,
     // и только потом — новую. Обычный обновлятор отказался бы на первом шаге.
-    let (runner, statuses) = fake_status_sequence(vec![
-        (OLD, None),
-        (OLD, Some(OLD)),
-        (NEW, Some(NEW)),
-    ]);
+    let (runner, statuses) =
+        fake_status_sequence(vec![(OLD, None), (OLD, Some(OLD)), (NEW, Some(NEW))]);
     let src = release_server(&[NEW]).await;
     let mut args = update_to(NEW);
     args.hub_chain = true;
