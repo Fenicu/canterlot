@@ -21,6 +21,12 @@ use canterlot_ctl::{
 };
 use clap::Parser;
 
+/// Итог печатает внутренний процесс в юните: внешний уже пересылает его stdout,
+/// поэтому повторное сообщение снаружи давало бы строку дважды.
+fn print_finished_here(in_unit: bool, result: &OpResult) -> bool {
+    in_unit && matches!(result, OpResult::Done)
+}
+
 /// Пути воркера — от домашнего каталога того, кто запустил утилиту.
 fn user_layout() -> Layout {
     Layout::new(
@@ -113,17 +119,20 @@ async fn run(cli: Cli) -> Result<bool, CtlError> {
                     Ok(reports.iter().all(|r| r.succeeded()))
                 }
                 HostRoute::Worker => {
+                    let host = WorkerHost::from_env();
                     let result = update_worker(
                         &args,
                         &worker_layout,
                         &runner,
                         &ReleaseSource::default(),
-                        &WorkerHost::from_env(),
+                        &host,
                     )
                     .await?;
                     match result {
                         OpResult::Done => {
-                            println!("worker update finished");
+                            if print_finished_here(host.in_unit, &result) {
+                                println!("worker update finished");
+                            }
                             Ok(true)
                         }
                         other => Err(CtlError::Other(format!("worker update: {other:?}"))),
@@ -143,5 +152,22 @@ async fn run(cli: Cli) -> Result<bool, CtlError> {
             Ok(true)
         }
         Command::HostAgent => Err(CtlError::NotImplemented("host-agent")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finished_is_printed_once_by_the_inner_process() {
+        assert!(print_finished_here(true, &OpResult::Done));
+        assert!(!print_finished_here(false, &OpResult::Done));
+        assert!(!print_finished_here(
+            true,
+            &OpResult::FailedBeforeChange {
+                reason: "test".into()
+            }
+        ));
     }
 }
