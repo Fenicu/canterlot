@@ -35,7 +35,7 @@ use crate::{
     ops::{self, OpKind, OpRecord, OpResult},
     release::{self, ReleaseSource},
     render,
-    runner::{Cmd, Runner},
+    runner::Runner,
     stack::{cmd, run_ok},
     state::{self, WorkerClass},
     tls::pin_of,
@@ -469,36 +469,35 @@ fn identity_present(layout: &Layout) -> bool {
     dir.join("worker.toml").is_file() && dir.join("token").is_file()
 }
 
-/// Без root — через `sudo -n`; не вышло — команда уходит в отчёт для ручного запуска.
-async fn enable_linger(runner: &dyn Runner, host: &WorkerHost, notes: &mut Vec<String>) {
-    let wrapped = |args: &[&str]| -> Cmd {
-        if host.is_root {
-            cmd(args[0], &args[1..])
-        } else {
-            let mut all = vec!["-n"];
-            all.extend_from_slice(args);
-            cmd("sudo", &all)
-        }
-    };
-    let _ = runner
-        .run(wrapped(&["loginctl", "enable-linger", &host.user]))
-        .await;
-    // Код enable-linger не говорит, включено ли lingering на самом деле: уже включённое
-    // состояние и ошибка sudo различаются только чтением самого состояния.
+/// `show-user` своего пользователя доступен без прав: `sudo -n` здесь только мешает.
+async fn linger_is_on(runner: &dyn Runner, user: &str) -> bool {
     let shown = runner
-        .run(wrapped(&[
-            "loginctl",
-            "show-user",
-            &host.user,
-            "-p",
-            "Linger",
-        ]))
+        .run(cmd("loginctl", &["show-user", user, "-p", "Linger"]))
         .await;
-    let on = matches!(&shown, Ok(out) if out.status == 0
+    matches!(&shown, Ok(out) if out.status == 0
         && String::from_utf8_lossy(&out.stdout)
             .lines()
-            .any(|line| line.trim() == "Linger=yes"));
-    if !on {
+            .any(|line| line.trim() == "Linger=yes"))
+}
+
+/// Включение своего пользователя обычно разрешено polkit без sudo; sudo — запасной путь.
+/// Код `enable-linger` сам по себе ничего не говорит о состоянии, поэтому его читаем заново.
+async fn enable_linger(runner: &dyn Runner, host: &WorkerHost, notes: &mut Vec<String>) {
+    if linger_is_on(runner, &host.user).await {
+        return;
+    }
+    let _ = runner
+        .run(cmd("loginctl", &["enable-linger", &host.user]))
+        .await;
+    if !linger_is_on(runner, &host.user).await {
+        let _ = runner
+            .run(cmd(
+                "sudo",
+                &["-n", "loginctl", "enable-linger", &host.user],
+            ))
+            .await;
+    }
+    if !linger_is_on(runner, &host.user).await {
         notes.push(format!(
             "the worker stops when you log out until lingering is on: run `sudo loginctl enable-linger {}`",
             host.user

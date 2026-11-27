@@ -3,7 +3,13 @@
 
 mod support;
 
-use std::os::unix::fs::PermissionsExt;
+use std::{
+    os::unix::fs::PermissionsExt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use canterlot_ctl::{
     cli::{JoinArgs, Version},
@@ -207,13 +213,18 @@ async fn join_writes_identity_and_starts_worker() {
     );
 }
 
+/// Как на настоящем хосте: `sudo -n` без прав требует пароль, а свои `loginctl`
+/// пользователь выполняет напрямую — и чтение состояния, и включение через polkit.
 fn linger_runner(linger: &'static str, enable_ok: bool) -> FakeRunner {
     let runner = connected_runner();
     runner.respond(move |cmd| {
-        if cmd.args.iter().any(|a| a == "show-user") {
+        if cmd.program == "sudo" {
+            return Some(Output::failed(1, "a password is required"));
+        }
+        if cmd.program == "loginctl" && cmd.args.iter().any(|a| a == "show-user") {
             return Some(Output::ok(format!("Linger={linger}\n")));
         }
-        if cmd.args.iter().any(|a| a == "enable-linger") {
+        if cmd.program == "loginctl" && cmd.args.iter().any(|a| a == "enable-linger") {
             return Some(if enable_ok {
                 Output::ok("")
             } else {
@@ -226,16 +237,19 @@ fn linger_runner(linger: &'static str, enable_ok: bool) -> FakeRunner {
 }
 
 async fn join_with(linger: &'static str, enable_ok: bool) -> (String, Vec<String>) {
+    join_with_runner(&linger_runner(linger, enable_ok)).await
+}
+
+async fn join_with_runner(runner: &FakeRunner) -> (String, Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
     let layout = Layout::new(dir.path().into(), Some(home_of(dir.path())));
     let ca = new_ca().unwrap();
     let stub = enroll_stub(&ca, &ca, &["127.0.0.1"], "").await;
-    let runner = linger_runner(linger, enable_ok);
     let src = release_server(&[VERSION]).await;
     let report = join(
         &args(stub.addr.to_string(), pin_of(&ca.cert_der)),
         &layout,
-        &runner,
+        runner,
         &src,
         &host(),
     )
@@ -245,14 +259,9 @@ async fn join_with(linger: &'static str, enable_ok: bool) -> (String, Vec<String
         .calls()
         .iter()
         .map(|c| format!("{} {}", c.program, c.args.join(" ")))
+        .filter(|c| c.contains("loginctl"))
         .collect();
-    (
-        report.to_string(),
-        calls
-            .into_iter()
-            .filter(|c| c.contains("loginctl"))
-            .collect(),
-    )
+    (report.to_string(), calls)
 }
 
 #[tokio::test]
@@ -276,6 +285,61 @@ async fn join_warns_about_linger_only_when_it_stays_off() {
     assert!(text.contains("the worker stops when you log out"), "{text}");
     let (text, _) = join_with("no", false).await;
     assert!(text.contains("the worker stops when you log out"), "{text}");
+}
+
+#[tokio::test]
+async fn join_reads_linger_without_sudo_and_enables_it_for_the_own_user() {
+    let runner = connected_runner();
+    let on = Arc::new(AtomicBool::new(false));
+    let seen = on.clone();
+    runner.respond(move |cmd| {
+        if cmd.program == "sudo" {
+            return Some(Output::failed(1, "a password is required"));
+        }
+        if cmd.program == "loginctl" && cmd.args.iter().any(|a| a == "show-user") {
+            let value = if seen.load(Ordering::SeqCst) {
+                "yes"
+            } else {
+                "no"
+            };
+            return Some(Output::ok(format!("Linger={value}\n")));
+        }
+        if cmd.program == "loginctl" && cmd.args.iter().any(|a| a == "enable-linger") {
+            seen.store(true, Ordering::SeqCst);
+            return Some(Output::ok(""));
+        }
+        None
+    });
+    let (text, calls) = join_with_runner(&runner).await;
+    assert!(
+        !text.contains("the worker stops when you log out"),
+        "{text}"
+    );
+    assert!(
+        calls.iter().any(|c| c == "loginctl enable-linger worker"),
+        "{calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c == "loginctl show-user worker -p Linger"),
+        "{calls:?}"
+    );
+    assert!(!calls.iter().any(|c| c.contains("sudo")), "{calls:?}");
+}
+
+#[tokio::test]
+async fn join_warns_when_neither_plain_nor_sudo_enable_works() {
+    let runner = linger_runner("no", false);
+    let (text, calls) = join_with_runner(&runner).await;
+    assert!(text.contains("the worker stops when you log out"), "{text}");
+    for want in [
+        "loginctl enable-linger worker",
+        "sudo -n loginctl enable-linger worker",
+        "loginctl show-user worker -p Linger",
+    ] {
+        assert!(calls.iter().any(|c| c == want), "{want} not in {calls:?}");
+    }
 }
 
 #[tokio::test]
