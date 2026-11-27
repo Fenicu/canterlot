@@ -155,6 +155,8 @@ struct Input {
     accepted: bool,
     files: Vec<LocalFile>,
     settings: Option<SettingsChange>,
+    /// Ветки делегатов для пробы слияния на конец хода этого ввода (`git_merge_probe_v1`).
+    merge_branches: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -255,6 +257,8 @@ struct Supervisor {
     turn_cut: bool,
     /// Факты git оборванного хода для конечного состояния; сняты, когда группа опустела.
     terminal_git: Option<canterlot_proto::worker::v1::GitFacts>,
+    /// Ветки, о слиянии которых хаб спросил вместе с вводом идущего хода.
+    turn_merge_branches: Vec<String>,
     background_drop_reported: bool,
     /// Потерю списка задач без возможности хаба показываем один раз, а не на каждое обновление.
     todo_drop_reported: bool,
@@ -484,6 +488,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         git_head: None,
         turn_cut: false,
         terminal_git: None,
+        turn_merge_branches: Vec::new(),
         background_drop_reported: false,
         todo_drop_reported: false,
         provider: String::new(),
@@ -2154,6 +2159,12 @@ impl Supervisor {
         let Ok(settings) = input_settings(&command) else {
             return self.send(ack(command.command_id, command.dispatch_attempt, "invalid"));
         };
+        let merge_branches = match &command.kind {
+            Some(canterlot_proto::worker::v1::command::Kind::DeliverInput(input)) => {
+                input.merge_branches.clone()
+            }
+            _ => Vec::new(),
+        };
         let attempt = command.dispatch_attempt;
         let key = (id, attempt);
         let result = if command.execution_id != self.spec.execution_id.to_string()
@@ -2179,6 +2190,7 @@ impl Supervisor {
                     accepted: false,
                     files: Vec::new(),
                     settings: None,
+                    merge_branches: Vec::new(),
                 },
             );
             "duplicate"
@@ -2201,6 +2213,7 @@ impl Supervisor {
                         })
                         .collect(),
                     settings,
+                    merge_branches,
                 },
             );
             self.queue.push_back(key);
@@ -2321,6 +2334,7 @@ impl Supervisor {
                     })
                     .collect(),
                 settings,
+                merge_branches: Vec::new(),
             },
         );
         let transmission = Transmission {
@@ -2457,6 +2471,7 @@ impl Supervisor {
                     accepted: false,
                     files: Vec::new(),
                     settings: None,
+                    merge_branches: Vec::new(),
                 },
             );
             self.record(Body::CancelWon(InputCancelWon {
@@ -2494,6 +2509,7 @@ impl Supervisor {
                         accepted: false,
                         files: Vec::new(),
                         settings: None,
+                        merge_branches: Vec::new(),
                     },
                 );
                 self.record(Body::InputWithdrawn(InputWithdrawn {
@@ -2576,6 +2592,7 @@ impl Supervisor {
                 files: std::mem::take(&mut input.files),
                 settings: input.settings.take(),
             };
+            let merge_branches = std::mem::take(&mut input.merge_branches);
             if let Some(adapter) = self.adapter.as_ref()
                 && let Err(reason) = adapter.validate_transmission(&transmission)
             {
@@ -2605,6 +2622,7 @@ impl Supervisor {
             // Новый ход: выход процесса после него — уже не остановка пользователем.
             self.interrupted = false;
             self.active_turn = Some(key.0);
+            self.turn_merge_branches = merge_branches;
             let Some(adapter) = self.adapter.as_mut() else {
                 break;
             };
@@ -3178,7 +3196,8 @@ impl Supervisor {
             return None;
         }
         let workdir = self.workdir.clone()?;
-        let facts = git_facts::collect(&workdir, self.git_head.as_deref()).await;
+        let branches = std::mem::take(&mut self.turn_merge_branches);
+        let facts = git_facts::collect(&workdir, self.git_head.as_deref(), &branches).await;
         if facts.available {
             self.git_head = Some(facts.head_after.clone());
         }
@@ -4307,6 +4326,7 @@ mod tests {
             git_head: None,
             turn_cut: false,
             terminal_git: None,
+            turn_merge_branches: Vec::new(),
             background_drop_reported: false,
             todo_drop_reported: false,
             provider: "claude_code".into(),
@@ -4348,6 +4368,7 @@ mod tests {
                 accepted: false,
                 files: Vec::new(),
                 settings: None,
+                merge_branches: Vec::new(),
             },
         );
         supervisor.queue.push_back((id, 1));

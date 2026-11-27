@@ -139,6 +139,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "alarms_v1",
     "nudge_v1",
     "path_probe_v1",
+    "git_merge_probe_v1",
     "resource_lease_v1",
     "watchdog_v1",
     CAPABILITY_PROMPT_SUGGESTIONS_V1,

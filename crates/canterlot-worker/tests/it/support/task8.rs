@@ -76,6 +76,7 @@ async fn worker_without_exec_capability_echo_rejects_start() {
             "alarms_v1",
             "nudge_v1",
             "path_probe_v1",
+            "git_merge_probe_v1",
             "resource_lease_v1",
             "watchdog_v1",
             "prompt_suggestions_v1",

@@ -1,9 +1,14 @@
 //! Факты git на конец хода. Тексты коммитов и пути относятся к данным уровня сообщения:
 //! ни в логи, ни в диагностику они не попадают, здесь нет ни одного вызова `tracing`.
 
-use std::{ffi::OsStr, path::Path, process::Stdio, time::Duration};
+use std::{
+    ffi::OsStr,
+    path::Path,
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
-use canterlot_proto::worker::v1::{GitCommit, GitFacts, GitFile};
+use canterlot_proto::worker::v1::{BranchMerge, GitCommit, GitFacts, GitFile};
 use prost::Message;
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
@@ -14,6 +19,10 @@ pub const MAX_SUBJECT_BYTES: usize = 256;
 pub const MAX_PATH_BYTES: usize = 1024;
 pub const MAX_FACTS_BYTES: usize = 32 * 1024;
 const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+/// Веток в пробе слияния за ход: столько хаб и присылает.
+pub const MAX_MERGE_BRANCHES: usize = 10;
+/// Ветки делегатов, которые хаб создаёт сам (`canterlot/<хвост id>`).
+const MERGE_BRANCH_PREFIX: &str = "canterlot/";
 
 /// `HEAD` рабочего каталога; `None` для не-репозитория, ошибки и истёкшего срока.
 pub async fn head(workdir: &Path) -> Option<String> {
@@ -24,22 +33,110 @@ pub async fn head_with(git: &OsStr, workdir: &Path, deadline: Duration) -> Optio
     timeout(deadline, rev_parse(git, workdir)).await.ok()?
 }
 
-pub async fn collect(workdir: &Path, head_before: Option<&str>) -> GitFacts {
-    collect_with(OsStr::new("git"), workdir, head_before, DEADLINE).await
+pub async fn collect(
+    workdir: &Path,
+    head_before: Option<&str>,
+    merge_branches: &[String],
+) -> GitFacts {
+    collect_with(
+        OsStr::new("git"),
+        workdir,
+        head_before,
+        merge_branches,
+        DEADLINE,
+    )
+    .await
 }
 
-/// Единый срок на все команды: по истечении факты недоступны, а не частичны.
+/// Единый срок на все команды: по истечении факты недоступны, а не частичны. Проба слияния
+/// идёт после основных фактов в остатке того же срока и, не уложившись, пропадает одна.
 pub async fn collect_with(
     git: &OsStr,
     workdir: &Path,
     head_before: Option<&str>,
+    merge_branches: &[String],
     deadline: Duration,
 ) -> GitFacts {
-    timeout(deadline, gather(git, workdir, head_before))
+    let started = Instant::now();
+    let mut facts = timeout(deadline, gather(git, workdir, head_before))
         .await
         .ok()
         .flatten()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if facts.available && !merge_branches.is_empty() {
+        let left = deadline.saturating_sub(started.elapsed());
+        if let Ok(merges) = timeout(left, merges(git, workdir, merge_branches)).await {
+            facts.merges = merges;
+        }
+    }
+    facts
+}
+
+/// Только имена, которые хаб даёт веткам делегатов: префикс и безопасные символы, без
+/// ведущего дефиса и точек. Остальное воркер не спрашивает вовсе.
+fn merge_branch_allowed(branch: &str) -> bool {
+    let Some(tail) = branch.strip_prefix(MERGE_BRANCH_PREFIX) else {
+        return false;
+    };
+    (1..=64).contains(&tail.len())
+        && !tail.starts_with('-')
+        && tail
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// `git cherry HEAD <branch>` по каждой ветке: строки `+` — коммиты без равного патча в HEAD.
+/// Ветка, которую прочитать не вышло, в ответ не попадает: «неизвестно» не равно «слита».
+async fn merges(git: &OsStr, workdir: &Path, branches: &[String]) -> Vec<BranchMerge> {
+    let mut out = Vec::new();
+    for branch in branches
+        .iter()
+        .filter(|branch| merge_branch_allowed(branch))
+        .take(MAX_MERGE_BRANCHES)
+    {
+        let name = format!("refs/heads/{branch}");
+        let revision = format!("{name}^{{commit}}");
+        let tip = run(
+            git,
+            workdir,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                &revision,
+            ],
+        )
+        .await
+        .and_then(|out| String::from_utf8(out.bytes).ok())
+        .map(|tip| tip.trim().to_owned())
+        .filter(|tip| !tip.is_empty());
+        let Some(tip) = tip else {
+            out.push(BranchMerge {
+                branch: branch.clone(),
+                missing: true,
+                ..Default::default()
+            });
+            continue;
+        };
+        let Some(cherry) = run(git, workdir, &["cherry", "HEAD", &name]).await else {
+            continue;
+        };
+        if cherry.overflow {
+            continue;
+        }
+        let unmerged = String::from_utf8_lossy(&cherry.bytes)
+            .lines()
+            .filter(|line| line.starts_with('+'))
+            .count();
+        out.push(BranchMerge {
+            branch: branch.clone(),
+            tip,
+            unmerged: u32::try_from(unmerged).unwrap_or(u32::MAX),
+            missing: false,
+        });
+    }
+    out
 }
 
 async fn rev_parse(git: &OsStr, workdir: &Path) -> Option<String> {
@@ -213,4 +310,31 @@ async fn run(git: &OsStr, workdir: &Path, args: &[&str]) -> Option<Output> {
     }
     let status = child.wait().await.ok()?;
     status.success().then_some(Output { bytes, overflow })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_delegate_branch_names_are_probed() {
+        assert!(merge_branch_allowed("canterlot/0a1b2c3d"));
+        assert!(merge_branch_allowed("canterlot/feature_x-2"));
+        for name in [
+            "main",
+            "canterlot/",
+            "canterlot/-p",
+            "canterlot/../x",
+            "canterlot/a/b",
+            "canterlot/a.lock",
+            "canterlot/a b",
+            "--all",
+        ] {
+            assert!(!merge_branch_allowed(name), "{name}");
+        }
+        assert!(!merge_branch_allowed(&format!(
+            "canterlot/{}",
+            "a".repeat(65)
+        )));
+    }
 }

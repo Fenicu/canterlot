@@ -2823,6 +2823,52 @@ async fn run_finished_carries_git_facts_with_the_capability() {
     harness.shutdown().await;
 }
 
+/// Ветки из `DeliverInput.merge_branches` проверяются на конец именно этого хода.
+#[tokio::test]
+async fn run_finished_carries_the_merge_probe_of_its_input() {
+    let mut harness = Harness::start(&[]).await;
+    let root = harness._root.path().to_path_buf();
+    git_in(&root, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("base.txt"), "base").unwrap();
+    git_in(&root, &["add", "base.txt"]);
+    git_in(&root, &["commit", "-q", "-m", "base"]);
+    git_in(&root, &["switch", "-q", "-c", "canterlot/00000001"]);
+    std::fs::write(root.join("work.txt"), "work").unwrap();
+    git_in(&root, &["add", "work.txt"]);
+    git_in(&root, &["commit", "-q", "-m", "delegate work"]);
+    let tip = git_in(&root, &["rev-parse", "HEAD"]);
+    git_in(&root, &["switch", "-q", "main"]);
+    git_in(&root, &["merge", "-q", "--ff-only", "canterlot/00000001"]);
+    harness.attach_and_ship(0).await;
+    harness.start_cli_session_tools(true).await;
+
+    let probed = Uuid::now_v7();
+    let mut command = harness.command(probed, 1, "probe", 1);
+    let Some(Kind::DeliverInput(input)) = command.kind.as_mut() else {
+        unreachable!()
+    };
+    input.merge_branches = vec!["canterlot/00000001".into()];
+    harness.deliver_command(command).await;
+    let bodies = harness
+        .wait_records("probed", |b| run_finished(b, probed))
+        .await;
+    let facts = run_git_facts(&bodies, probed).expect("git facts");
+    assert_eq!(facts.merges.len(), 1);
+    assert_eq!(facts.merges[0].branch, "canterlot/00000001");
+    assert_eq!(facts.merges[0].tip, tip);
+    assert_eq!(facts.merges[0].unmerged, 0);
+    assert!(!facts.merges[0].missing);
+
+    let plain = Uuid::now_v7();
+    harness.deliver(plain, 1, "plain").await;
+    let bodies = harness
+        .wait_records("plain", |b| run_finished(b, plain))
+        .await;
+    let facts = run_git_facts(&bodies, plain).expect("git facts");
+    assert!(facts.merges.is_empty(), "the next turn asked for nothing");
+    harness.shutdown().await;
+}
+
 #[tokio::test]
 async fn run_finished_has_no_git_facts_without_the_capability() {
     let mut harness = Harness::start(&[]).await;

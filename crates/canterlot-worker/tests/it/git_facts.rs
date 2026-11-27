@@ -50,7 +50,7 @@ async fn git_facts_list_commits_and_files() {
     git(dir.path(), &["commit", "-q", "-m", "second change"]);
     let after = git(dir.path(), &["rev-parse", "HEAD"]);
 
-    let facts = git_facts::collect(dir.path(), Some(&before)).await;
+    let facts = git_facts::collect(dir.path(), Some(&before), &[]).await;
 
     assert!(facts.available);
     assert!(!facts.truncated);
@@ -75,4 +75,65 @@ async fn git_facts_list_commits_and_files() {
         .collect();
     files.sort();
     assert_eq!(files, [("a.txt", "A"), ("base.txt", "D")]);
+}
+
+/// Проба слияния веток делегатов в HEAD: обычное слияние и перенос патча считаются слитыми,
+/// незнакомые имена не спрашиваются, отсутствующая ветка так и называется.
+#[tokio::test]
+async fn merge_probe_reads_git_cherry_against_head() {
+    let dir = repo();
+    let path = dir.path();
+    let branch_commit = |branch: &str, file: &str| {
+        git(path, &["switch", "-q", "-c", branch, "main"]);
+        fs::write(path.join(file), file).expect("write");
+        git(path, &["add", "."]);
+        git(path, &["commit", "-q", "-m", file]);
+        let tip = git(path, &["rev-parse", "HEAD"]);
+        git(path, &["switch", "-q", "main"]);
+        tip
+    };
+    let merged = branch_commit("canterlot/00000001", "one.txt");
+    git(
+        path,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge one",
+            "canterlot/00000001",
+        ],
+    );
+    let picked = branch_commit("canterlot/00000002", "two.txt");
+    git(path, &["cherry-pick", picked.as_str()]);
+    let open = branch_commit("canterlot/00000003", "three.txt");
+    let branches: Vec<String> = [
+        "canterlot/00000001",
+        "canterlot/00000002",
+        "canterlot/00000003",
+        "canterlot/00000004",
+        "main",
+        "canterlot/-p",
+        "canterlot/../x",
+    ]
+    .map(String::from)
+    .into();
+
+    let facts = git_facts::collect(path, None, &branches).await;
+
+    assert!(facts.available);
+    let merges: Vec<_> = facts
+        .merges
+        .iter()
+        .map(|m| (m.branch.as_str(), m.tip.as_str(), m.unmerged, m.missing))
+        .collect();
+    assert_eq!(
+        merges,
+        [
+            ("canterlot/00000001", merged.as_str(), 0, false),
+            ("canterlot/00000002", picked.as_str(), 0, false),
+            ("canterlot/00000003", open.as_str(), 1, false),
+            ("canterlot/00000004", "", 0, true),
+        ]
+    );
 }

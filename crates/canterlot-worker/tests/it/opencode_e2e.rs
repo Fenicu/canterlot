@@ -282,6 +282,7 @@ impl Env {
                     block: Some(content_block::Block::Text(TextBlock { text: text.into() })),
                 }],
                 settings,
+                merge_branches: Vec::new(),
             }),
         ))
         .await;
