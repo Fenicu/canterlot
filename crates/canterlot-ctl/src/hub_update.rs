@@ -159,6 +159,55 @@ pub(crate) fn elevate(host: &Host) -> Result<(), CtlError> {
     crate::root::ensure_root(&argv)
 }
 
+/// Куда идёт команда хоста: в стек хаба (только root) или в воркер учётной записи.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostRoute {
+    Hub,
+    Worker,
+    /// Хост хаба, но вызывающий — обычный пользователь без своего воркера.
+    NeedsRoot,
+}
+
+/// Правило маршрутизации без окружения, чтобы проверять его на временных каталогах.
+/// Обычный вызов управляет своим воркером; `sudo` — всем хостом.
+pub fn route_host(
+    layout: &Layout,
+    worker_layout: &Layout,
+    is_root: bool,
+    worker_only: bool,
+    in_unit: bool,
+) -> HostRoute {
+    if worker_only || in_unit {
+        return HostRoute::Worker;
+    }
+    let hub = layout.install_toml().is_file();
+    if hub && is_root {
+        return HostRoute::Hub;
+    }
+    if worker_layout
+        .worker_config_dir()
+        .join("worker.toml")
+        .is_file()
+    {
+        return HostRoute::Worker;
+    }
+    if hub {
+        return HostRoute::NeedsRoot;
+    }
+    HostRoute::Worker
+}
+
+/// То же правило с отметками «вызов от имени воркера» и «внутри временного юнита».
+pub fn host_route(layout: &Layout, worker_layout: &Layout, is_root: bool) -> HostRoute {
+    route_host(
+        layout,
+        worker_layout,
+        is_root,
+        std::env::var_os(WORKER_ONLY_ENV).is_some(),
+        std::env::var(crate::worker::IN_UNIT_ENV).as_deref() == Ok("1"),
+    )
+}
+
 /// Отметка вызова от имени воркера на хосте хаба: такой вызов обслуживает только воркер.
 pub const WORKER_ONLY_ENV: &str = "CANTERLOT_CTL_WORKER_ONLY";
 

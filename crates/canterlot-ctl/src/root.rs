@@ -36,6 +36,14 @@ impl Elevate for SystemElevate {
     }
 }
 
+/// Команда, с которой утилиту запустили: её имя попадает в подсказку про sudo.
+fn command_of(argv: &[String]) -> String {
+    argv.first()
+        .map(String::as_str)
+        .unwrap_or("install")
+        .to_owned()
+}
+
 /// Повысить права до root, перезапустив себя с теми же аргументами.
 pub fn ensure_root(argv: &[String]) -> Result<(), CtlError> {
     ensure_root_with(argv, &SystemElevate)
@@ -47,14 +55,16 @@ pub fn ensure_root_with(argv: &[String], env: &dyn Elevate) -> Result<(), CtlErr
     }
     // Без терминала sudo не сможет спросить пароль: отказываемся до запуска.
     if !env.interactive() {
-        return Err(CtlError::RootRequired);
+        return Err(CtlError::RootRequired(command_of(argv)));
     }
-    let self_exe = env.self_exe().ok_or(CtlError::RootRequired)?;
+    let self_exe = env
+        .self_exe()
+        .ok_or_else(|| CtlError::RootRequired(command_of(argv)))?;
     // sudo сохраняет SUDO_USER: install берёт оттуда имя пользователя воркера.
     let mut sudo_args = vec!["--".to_owned(), self_exe.to_string_lossy().into_owned()];
     sudo_args.extend_from_slice(argv);
     env.exec_sudo(&sudo_args)
-        .map_err(|_| CtlError::RootRequired)
+        .map_err(|_| CtlError::RootRequired(command_of(argv)))
 }
 
 #[cfg(test)]
@@ -124,7 +134,7 @@ mod tests {
         let env = Recording::default();
         assert!(matches!(
             ensure_root_with(&[], &env),
-            Err(CtlError::RootRequired)
+            Err(CtlError::RootRequired(_))
         ));
         let env = Recording {
             interactive: true,
@@ -132,7 +142,7 @@ mod tests {
         };
         assert!(matches!(
             ensure_root_with(&[], &env),
-            Err(CtlError::RootRequired)
+            Err(CtlError::RootRequired(_))
         ));
         assert!(env.calls.borrow().is_empty());
     }

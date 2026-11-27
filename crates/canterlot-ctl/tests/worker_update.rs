@@ -318,6 +318,20 @@ async fn hub_chain_gives_up_with_the_last_check_error() {
 }
 
 #[tokio::test]
+async fn worker_only_on_hub_host_points_to_sudo_update() {
+    let m = machine(&[OLD]);
+    let config = m.layout.install_toml();
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(config, "format = 1\n").unwrap();
+    let (runner, _) = fake_status_sequence(vec![(OLD, Some(OLD))]);
+    let src = release_server(&[NEW]).await;
+    let err = update_worker(&update_to(NEW), &m.layout, &runner, &src, &host())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("sudo canterlot update"), "{err}");
+}
+
+#[tokio::test]
 async fn standalone_update_does_not_wait_for_the_hub() {
     let m = machine(&[OLD]);
     let (runner, statuses) = fake_status_sequence(vec![(OLD, None)]);

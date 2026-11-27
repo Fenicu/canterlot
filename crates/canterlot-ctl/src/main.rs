@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use canterlot_ctl::{
     cli::{Cli, Command, TlsCommand},
     error::CtlError,
-    hub_update::{hub_host, update},
+    hub_update::{HostRoute, host_route, update},
     install::{Host, install},
     join::join,
     layout::Layout,
@@ -90,35 +90,46 @@ async fn run(cli: Cli) -> Result<bool, CtlError> {
         }
         Command::Adopt => Err(CtlError::NotImplemented("adopt")),
         Command::Update(args) => {
-            // Хост хаба: сначала хаб (от root), затем воркер этого хоста от его учётной записи.
-            if hub_host(&layout) {
-                let reports = update(
-                    args,
-                    &layout,
-                    &runner,
-                    &ReleaseSource::default(),
-                    &Host::from_env(),
-                )
-                .await?;
-                for report in &reports {
-                    print!("{report}");
+            // Обычный пользователь обновляет свой воркер, sudo — весь хост хаба.
+            let worker_layout = user_layout();
+            match host_route(
+                &layout,
+                &worker_layout,
+                rustix::process::geteuid().is_root(),
+            ) {
+                HostRoute::Hub => {
+                    // Сначала хаб, затем воркер этого хоста от его учётной записи.
+                    let reports = update(
+                        args,
+                        &layout,
+                        &runner,
+                        &ReleaseSource::default(),
+                        &Host::from_env(),
+                    )
+                    .await?;
+                    for report in &reports {
+                        print!("{report}");
+                    }
+                    Ok(reports.iter().all(|r| r.succeeded()))
                 }
-                return Ok(reports.iter().all(|r| r.succeeded()));
-            }
-            let result = update_worker(
-                &args,
-                &user_layout(),
-                &runner,
-                &ReleaseSource::default(),
-                &WorkerHost::from_env(),
-            )
-            .await?;
-            match result {
-                OpResult::Done => {
-                    println!("worker update finished");
-                    Ok(true)
+                HostRoute::Worker => {
+                    let result = update_worker(
+                        &args,
+                        &worker_layout,
+                        &runner,
+                        &ReleaseSource::default(),
+                        &WorkerHost::from_env(),
+                    )
+                    .await?;
+                    match result {
+                        OpResult::Done => {
+                            println!("worker update finished");
+                            Ok(true)
+                        }
+                        other => Err(CtlError::Other(format!("worker update: {other:?}"))),
+                    }
                 }
-                other => Err(CtlError::Other(format!("worker update: {other:?}"))),
+                HostRoute::NeedsRoot => Err(CtlError::RootRequired("update".into())),
             }
         }
         Command::Uninstall(args) => {

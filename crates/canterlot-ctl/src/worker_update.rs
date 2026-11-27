@@ -193,7 +193,13 @@ pub async fn update_worker(
 }
 
 /// Хаб первым: воркер не обгоняет версию хаба без `--force`.
-fn check_hub_first(status: &WorkerStatus, target: &Version, force: bool) -> Result<(), CtlError> {
+/// На хосте хаба подсказка называет команду с sudo: хаб обновляет только root.
+fn check_hub_first(
+    status: &WorkerStatus,
+    target: &Version,
+    force: bool,
+    on_hub_host: bool,
+) -> Result<(), CtlError> {
     if force {
         return Ok(());
     }
@@ -204,9 +210,16 @@ fn check_hub_first(status: &WorkerStatus, target: &Version, force: bool) -> Resu
         .ok_or(CtlError::HubVersionUnknown)?;
     let hub_key = version_key(hub).ok_or(CtlError::HubVersionUnknown)?;
     if version_key(target.as_str()) > Some(hub_key) {
-        return Err(CtlError::HubOlderThanTarget {
-            hub: hub.to_owned(),
-            target: target.to_string(),
+        return Err(if on_hub_host {
+            CtlError::HubOlderThanTargetOnHubHost {
+                hub: hub.to_owned(),
+                target: target.to_string(),
+            }
+        } else {
+            CtlError::HubOlderThanTarget {
+                hub: hub.to_owned(),
+                target: target.to_string(),
+            }
         });
     }
     Ok(())
@@ -221,6 +234,7 @@ async fn wait_for_hub(
     host: &WorkerHost,
     target: &Version,
     force: bool,
+    on_hub_host: bool,
 ) -> Result<WorkerStatus, CtlError> {
     let mut last = CtlError::HubVersionUnknown;
     for n in 0..host.hub_wait_polls.max(1) {
@@ -228,7 +242,7 @@ async fn wait_for_hub(
             tokio::time::sleep(host.hub_wait_delay).await;
         }
         match worker::worker_status(runner, layout).await {
-            Ok(status) => match check_hub_first(&status, target, force) {
+            Ok(status) => match check_hub_first(&status, target, force, on_hub_host) {
                 Ok(()) => return Ok(status),
                 Err(err) => last = err,
             },
@@ -367,15 +381,16 @@ async fn transaction(
     }
 
     ops::advance(ops_dir, rec, "preflight")?;
+    let on_hub_host = layout.install_toml().is_file();
     let before = if args.hub_chain {
-        wait_for_hub(runner, layout, host, target, args.force).await?
+        wait_for_hub(runner, layout, host, target, args.force, on_hub_host).await?
     } else {
         let before = match worker::worker_status(runner, layout).await {
             Ok(status) => status,
             Err(_) if args.force => WorkerStatus::default(),
             Err(_) => return Err(CtlError::HubVersionUnknown),
         };
-        check_hub_first(&before, target, args.force)?;
+        check_hub_first(&before, target, args.force, on_hub_host)?;
         before
     };
     let in_use = releases_in_use(layout, &before)?;

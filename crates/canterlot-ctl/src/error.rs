@@ -80,8 +80,8 @@ pub enum CtlError {
         "glibc_too_old: {0}; the native worker needs glibc 2.41 or newer (build from source, docs/development.md)"
     )]
     GlibcTooOld(String),
-    #[error("root_required: run install as root (sudo)")]
-    RootRequired,
+    #[error("root_required: run `sudo canterlot {0}` to manage it")]
+    RootRequired(String),
     #[error("user_not_found: {0}")]
     UserNotFound(String),
     #[error("bad_output: {0}")]
@@ -130,6 +130,10 @@ pub enum CtlError {
         "hub_older_than_target: the hub runs {hub}, the worker update targets {target}; update the hub first or pass --force"
     )]
     HubOlderThanTarget { hub: String, target: String },
+    #[error(
+        "hub_older_than_target: the hub runs {hub}, the worker update targets {target}; run `sudo canterlot update` on this hub host first or pass --force"
+    )]
+    HubOlderThanTargetOnHubHost { hub: String, target: String },
     #[error(
         "hub_version_unknown: the worker is not connected to a hub that reports its version; pass --force to update anyway"
     )]

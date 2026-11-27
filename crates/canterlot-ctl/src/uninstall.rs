@@ -76,24 +76,29 @@ pub async fn uninstall(
     runner: &dyn Runner,
     host: &WorkerHost,
 ) -> Result<Uninstalled, CtlError> {
-    if crate::hub_update::hub_host(layout) {
-        let hub_host = Host {
-            sudo_user: None,
-            hostname: host.hostname.clone(),
-            is_root: host.is_root,
-            interactive: host.interactive,
-            self_exe: host.self_exe.clone(),
-            retries: 90,
-            retry_delay: std::time::Duration::from_secs(2),
-        };
-        let mut ask = |question: &str| host.ask(question, "the typed host name");
-        return uninstall_hub(args, layout, runner, &hub_host, &mut ask)
+    match crate::hub_update::host_route(layout, layout, host.is_root) {
+        crate::hub_update::HostRoute::Hub => {
+            let hub_host = Host {
+                sudo_user: None,
+                hostname: host.hostname.clone(),
+                is_root: host.is_root,
+                interactive: host.interactive,
+                self_exe: host.self_exe.clone(),
+                retries: 90,
+                retry_delay: std::time::Duration::from_secs(2),
+            };
+            let mut ask = |question: &str| host.ask(question, "the typed host name");
+            uninstall_hub(args, layout, runner, &hub_host, &mut ask)
+                .await
+                .map(Uninstalled::Hub)
+        }
+        crate::hub_update::HostRoute::NeedsRoot => {
+            Err(CtlError::RootRequired("uninstall".into()))
+        }
+        crate::hub_update::HostRoute::Worker => uninstall_worker(args, layout, runner, host)
             .await
-            .map(Uninstalled::Hub);
+            .map(Uninstalled::Worker),
     }
-    uninstall_worker(args, layout, runner, host)
-        .await
-        .map(Uninstalled::Worker)
 }
 
 /// Удаляет путь, не проходя по ссылкам: ссылка снимается сама, каталог — вместе с
