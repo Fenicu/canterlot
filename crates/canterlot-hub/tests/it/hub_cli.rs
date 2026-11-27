@@ -5,6 +5,7 @@ use std::{fs, process::Command, time::Duration};
 
 use canterlot_hub::{db, installation, machines, testkit::tls::test_pki};
 use sqlx::{ConnectOptions, PgPool};
+use tokio::io::AsyncBufReadExt as _;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -220,15 +221,12 @@ async fn serve_applies_pending_migrations_before_listening_and_logs_version(
     let pki = test_pki();
     fs::write(dir.path().join("cert.pem"), pki.server_cert_pem)?;
     fs::write(dir.path().join("key.pem"), pki.server_key_pem)?;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let addr = listener.local_addr()?;
-    drop(listener);
+    // Порт выбирает сам хаб: освобождённый тестом порт под нагрузкой гейта занимал
+    // соседний тест, подключение к нему проходило до конца миграций (флейк 1.54.2).
     let config = dir.path().join("hub.toml");
     fs::write(
         &config,
-        format!(
-            "database_url_file = 'database-url'\ngrpc_listen = '{addr}'\ntls_cert = 'cert.pem'\ntls_key = 'key.pem'\nmanifest = 'installation.toml'\n"
-        ),
+        "database_url_file = 'database-url'\ngrpc_listen = '127.0.0.1:0'\ntls_cert = 'cert.pem'\ntls_key = 'key.pem'\nmanifest = 'installation.toml'\n",
     )?;
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-hub"))
         .args(["serve", "--config"])
@@ -237,15 +235,27 @@ async fn serve_applies_pending_migrations_before_listening_and_logs_version(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
-    // Полторы сотни миграций под нагрузкой гейта идут дольше 10 с (флейк 1.47.1): ждём
-    // открытого порта, а упавший процесс ловит проверка try_wait раньше потолка.
+    // Готовность — строки журнала, а не порт. `migrations_applied` хаб пишет после миграций,
+    // `http_disabled` — последней перед запуском серверов и уже после обработчика SIGTERM:
+    // сигнал раньше него убил бы процесс, а не завершил штатно. Полторы сотни миграций под
+    // нагрузкой идут дольше 10 с (флейк 1.47.1), потолок только против зависания.
+    let mut stderr = tokio::io::BufReader::new(child.stderr.take().expect("stderr")).lines();
+    let mut logs = String::new();
     tokio::time::timeout(Duration::from_secs(60), async {
-        while tokio::net::TcpStream::connect(addr).await.is_err() {
-            assert!(child.try_wait().unwrap().is_none());
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        loop {
+            let line = stderr
+                .next_line()
+                .await?
+                .ok_or("hub exited before serving")?;
+            logs.push_str(&line);
+            logs.push('\n');
+            if line.contains("http_disabled") {
+                return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(());
+            }
         }
     })
-    .await?;
+    .await??;
+    assert!(logs.contains("migrations_applied"), "{logs}");
     let version: i64 =
         sqlx::query_scalar("select max(version) from _sqlx_migrations where success")
             .fetch_one(&pool)
@@ -253,7 +263,16 @@ async fn serve_applies_pending_migrations_before_listening_and_logs_version(
     Command::new("kill")
         .args(["-TERM", &child.id().unwrap().to_string()])
         .output()?;
+    let rest = tokio::spawn(async move {
+        let mut rest = String::new();
+        while let Ok(Some(line)) = stderr.next_line().await {
+            rest.push_str(&line);
+            rest.push('\n');
+        }
+        rest
+    });
     let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output()).await??;
+    logs.push_str(&rest.await?);
     assert_eq!(
         version,
         db::MIGRATOR
@@ -264,8 +283,6 @@ async fn serve_applies_pending_migrations_before_listening_and_logs_version(
     );
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
-    let logs = String::from_utf8(output.stderr)?;
-    assert!(logs.contains("migrations_applied"));
     assert!(logs.contains(&format!("version={version}")));
     Ok(())
 }
