@@ -1,0 +1,45 @@
+canterlot.example.org {
+    route {
+        request_header -Remote-*
+        request_header -X-Forwarded-*
+        request_header -X-Canterlot-Proxy
+        request_header -X-Canterlot-Client-Ip
+        header Content-Security-Policy "default-src 'self'; connect-src 'self' wss://canterlot.example.org"
+        header X-Content-Type-Options "nosniff"
+        @maint {
+            path /api/*
+            file {
+                root /srv/canterlot-web
+                try_files /maintenance
+            }
+        }
+        handle @maint {
+            header Content-Type "application/json"
+            respond `{"error":"maintenance"}` 503
+        }
+        @api path /api/* /healthz
+        handle @api {
+            encode zstd gzip
+            reverse_proxy hub:8080 {
+                header_up X-Canterlot-Proxy {file./run/secrets/canterlot-proxy}
+                header_up X-Canterlot-Client-Ip {remote_host}
+            }
+        }
+        @share {
+            method POST
+            path /_share
+        }
+        handle @share {
+            redir * /share?error=sw_inactive 303
+        }
+        handle {
+            @fresh path /manifest.webmanifest
+            header @fresh Cache-Control "no-cache"
+            root * /srv/canterlot-web/build
+            try_files {path} /200.html
+            file_server {
+                precompressed zstd br gzip
+            }
+        }
+    }
+}

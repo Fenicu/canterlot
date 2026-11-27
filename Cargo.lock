@@ -493,6 +493,8 @@ dependencies = [
  "chrono",
  "clap",
  "flate2",
+ "getrandom 0.4.3",
+ "rcgen",
  "reqwest",
  "rustix",
  "serde",
@@ -501,10 +503,12 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "toml",
  "url",
  "uuid",
+ "x509-parser",
 ]
 
 [[package]]

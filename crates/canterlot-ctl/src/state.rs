@@ -40,6 +40,17 @@ pub struct InstallState {
     pub grpc_endpoint: Option<String>,
     #[serde(default)]
     pub front_ip: Option<IpAddr>,
+    /// Логин владельца для входа по паролю (`[http].owner_login`).
+    #[serde(default)]
+    pub owner_login: Option<String>,
+    /// Имена и адреса в SAN сертификата gRPC хаба, кроме `localhost` и `127.0.0.1`.
+    #[serde(default)]
+    pub hub_names: Vec<String>,
+    /// Учётная запись и домашний каталог воркера на этом хосте, если он ставился.
+    #[serde(default)]
+    pub worker_user: Option<String>,
+    #[serde(default)]
+    pub worker_home: Option<PathBuf>,
     pub hub_uid: u32,
     pub hub_gid: u32,
     #[serde(default)]
