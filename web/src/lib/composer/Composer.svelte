@@ -36,6 +36,9 @@
   import { filterSlashCatalog, insertSlash, slashQuery, type SlashItem } from '#lib/composer/slash.js';
   import Icon from '#lib/ui/Icon.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
+  import Menu from '#lib/ui/Menu.svelte';
+  import MenuItem from '#lib/ui/MenuItem.svelte';
+  import { dismissable, type DismissReason } from '#lib/ui/dismiss.js';
   import { probe } from '#lib/perf/probe.js';
   import type { Component } from 'svelte';
 
@@ -101,6 +104,9 @@
 
   let node = $state<HTMLTextAreaElement | null>(null);
   let file = $state<HTMLInputElement | null>(null);
+  let galleryFile = $state<HTMLInputElement | null>(null);
+  let attachAnchor = $state<HTMLSpanElement | null>(null);
+  let attachOpen = $state(false);
   let later = $state(false);
   let snippetsOpen = $state(false);
   let SnippetsSheet = $state<Component<{ open: boolean; projectKey: string; text: string; onclose: () => void; oninsert: (body: string) => void }> | null>(null);
@@ -625,9 +631,41 @@
     dictationAnchor = null;
   }
 
+  /** Оба входа отдают файлы в одну очередь вложений и очищаются, чтобы тот же файл можно было выбрать снова. */
+  function pickFrom(input: HTMLInputElement | null): void {
+    if (input?.files?.length) model.attach(input.files);
+    if (input) input.value = '';
+  }
+
   function picked() {
-    if (file?.files?.length) model.attach(file.files);
-    if (file) file.value = '';
+    pickFrom(file);
+  }
+
+  function pickedGallery() {
+    pickFrom(galleryFile);
+  }
+
+  function onAttachClick(): void {
+    if (!touch) {
+      file?.click();
+      return;
+    }
+    attachOpen = !attachOpen;
+  }
+
+  function closeAttachMenu(reason: DismissReason): void {
+    attachOpen = false;
+    if (reason === 'escape') attachAnchor?.querySelector('button')?.focus();
+  }
+
+  function chooseGallery(): void {
+    attachOpen = false;
+    galleryFile?.click();
+  }
+
+  function chooseFiles(): void {
+    attachOpen = false;
+    file?.click();
   }
 
   function pasted(event: ClipboardEvent) {
@@ -740,6 +778,7 @@
       />
     {:else}
       {#if receiving}<p class="dropzone" aria-hidden="true">Отпустите файлы</p>{/if}
+      <input bind:this={galleryFile} class="file" type="file" accept="image/*" multiple tabindex="-1" aria-label="Выбрать фотографии" onchange={pickedGallery} />
       <input bind:this={file} class="file" type="file" multiple tabindex="-1" aria-label="Выбрать файлы" onchange={picked} />
       <AttachmentTray {uploads} conversationId={chat.id} />
       <textarea
@@ -761,7 +800,17 @@
         onkeydown={onKey}
         onpaste={pasted}
       ></textarea>
-      <span class="attach"><IconButton icon="attach" label="Прикрепить файл" onclick={() => file?.click()} /></span>
+      <span class="attach" bind:this={attachAnchor}>
+        <IconButton icon="attach" label="Прикрепить файл" expanded={touch ? attachOpen : undefined} onclick={onAttachClick} />
+        {#if touch && attachOpen}
+          <div class="attach-menu" use:dismissable={{ onclose: closeAttachMenu, keep: (target) => attachAnchor?.contains(target) ?? false }}>
+            <Menu label="Вложение">
+              <MenuItem onclick={chooseGallery}>Галерея</MenuItem>
+              <MenuItem onclick={chooseFiles}>Файлы</MenuItem>
+            </Menu>
+          </div>
+        {/if}
+      </span>
       {#if canDictate}
         <span class="mic"><IconButton icon="mic" label="Диктовка" inert={composerBusy} onclick={startDictation} /></span>
       {/if}
@@ -922,7 +971,9 @@
     max-height: calc(var(--fs-input) * var(--lh-body) * 3 + var(--s5) * 2);
   }
   textarea:focus-visible { outline: none; }
-  .attach { grid-area: attach; display: inline-flex; }
+  .attach { grid-area: attach; display: inline-flex; position: relative; }
+  /* Меню вложений растёт вверх от кнопки: композер прижат к нижнему краю экрана. */
+  .attach-menu { position: absolute; bottom: calc(100% + var(--s2)); left: 0; z-index: 20; }
   .tools { grid-area: clock; display: inline-flex; gap: var(--s2); }
   .mic { grid-area: mic; display: inline-flex; }
   .file { position: absolute; width: var(--s1); height: var(--s1); overflow: hidden; clip-path: inset(50%); }
