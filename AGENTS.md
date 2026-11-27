@@ -10,6 +10,7 @@ canterlot is a self-hosted control plane for AI coding agents (Claude Code, Code
 | `crates/canterlot-worker` | Worker: runs agent CLIs, adapters, supervisor, leases, in-place jobs, the canterlot MCP server |
 | `crates/canterlot-proto` | protobuf types, gRPC and local IPC contracts |
 | `crates/canterlot-journal` | Local command/event journal of the worker |
+| `crates/canterlot-ctl` | Installer utility `canterlot`: command grammar, host layout, installation state, operation records and host lock, release download and verification, command runner |
 | `crates/canterlot-speech` | Dictation service (transcribe.cpp); excluded from `--all-features` runs |
 | `web/` | Static SvelteKit PWA; `testing/fake-hub` is the mock hub, `e2e/` is a Playwright harness for one-off checks and README screenshots |
 | `scripts/` | Checks, gate, release, deploy tooling (`scripts/deploy/`) |
