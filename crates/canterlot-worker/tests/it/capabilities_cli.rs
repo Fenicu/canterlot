@@ -1,4 +1,21 @@
+use canterlot_hub::grpc::{KNOWN_CAPABILITIES, KNOWN_OPTIONAL_CAPABILITIES};
 use canterlot_worker::session::OPTIONAL_CAPABILITIES;
+
+/// Хаб сохраняет у машины только знакомые ему возможности: предложенная воркером, но не
+/// внесённая в список хаба молча пропадает из `machines.capabilities`, и функция не
+/// включается (так 27.11 на проде не включилась проба слияния `git_merge_probe_v1`).
+#[test]
+fn every_offered_capability_is_known_to_the_hub() {
+    let unknown: Vec<&str> = OPTIONAL_CAPABILITIES
+        .iter()
+        .copied()
+        .filter(|c| !KNOWN_OPTIONAL_CAPABILITIES.contains(c) && !KNOWN_CAPABILITIES.contains(c))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "the hub drops these capabilities: {unknown:?}"
+    );
+}
 
 #[test]
 fn capabilities_prints_optional_capabilities_and_production_harnesses() {
