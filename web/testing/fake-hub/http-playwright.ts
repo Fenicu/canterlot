@@ -1369,6 +1369,31 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: [...api.machines.values()] });
   });
 
+  // Экран машин запрашивает ожидающие коды; в фейке их нет, пока сценарий не вызвал выдачу.
+  await page.route('**/api/v1/machines/pending', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    await route.fulfill({ headers: headers(), json: { items: api.pendingMachines } });
+  });
+
+  const joinCode = {
+    machine_id: '00000000-0000-4000-8000-0000000000d1',
+    code: 'ABCD-EFGH-JKLM-NPQR-STUV-WXYZ-23',
+    command: 'curl -fsSL https://example.invalid/install.sh | bash -s -- join --hub hub.example.internal:7443 --pin sha256:0000',
+    expires_at: '2099-01-01T00:00:00.000Z'
+  };
+  await page.route(/\/api\/v1\/machines\/join-codes$/, async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    await route.fulfill({ headers: headers(), json: joinCode });
+  });
+  await page.route(/\/api\/v1\/machines\/[^/]+\/join-code$/, async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    await route.fulfill({ headers: headers(), json: joinCode });
+  });
+  await page.route(/\/api\/v1\/machines\/[^/]+\/pending$/, async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback();
+    await route.fulfill({ headers: headers(), status: 204, body: '' });
+  });
+
   await page.route(/\/api\/v1\/machines\/[^/]+\/remote-work$/, async (route) => {
     if (route.request().method() !== 'PUT') return route.fallback();
     const key = route.request().headers()['idempotency-key'];

@@ -182,6 +182,8 @@ export class FakeHubApi {
 	readonly runs = new Map<string, RunInfo>();
 	readonly usage = new Map<string, components['schemas']['SessionUsageView']>();
 	readonly machines = new Map<string, MachineRecord>();
+	/** Ожидающие машины для экрана «Добавить машину»; по умолчанию пусто. */
+	pendingMachines: components['schemas']['PendingMachineView'][] = [];
 	/** Задачи на месте (`job_run`) по id: строка, как её отдаёт хаб, без вывода. */
 	readonly jobs = new Map<string, components['schemas']['JobView']>();
 	/** Вывод задач: журнал целиком; хвост хаба — его последние байты. */

@@ -240,6 +240,47 @@ export function putMachineRemoteWork(
   );
 }
 
+// Коды привязки: список ожидающих, выдача, перевыпуск и отзыв.
+export function pendingMachines(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_machines_pending"]>>> {
+  return http("GET", "/api/v1/machines/pending", undefined, opts);
+}
+
+export function issueJoinCode(
+  body: Body<operations["post__api_v1_machines_join_codes"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_machines_join_codes"]>>> {
+  return http("POST", "/api/v1/machines/join-codes", body, keyed(key, opts));
+}
+
+export function reissueJoinCode(
+  machineId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_machines__id__join_code"]>>> {
+  return http(
+    "POST",
+    `/api/v1/machines/${id(machineId)}/join-code`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+export function revokePending(
+  machineId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["delete__api_v1_machines__id__pending"]>>> {
+  return http(
+    "DELETE",
+    `/api/v1/machines/${id(machineId)}/pending`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
 // Облачные окна: список с деньгами, «Удалить сейчас», бюджет и карточка запуска.
 export function getCloudWindows(
   opts?: RequestOptions,

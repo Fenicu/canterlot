@@ -6,17 +6,23 @@
   import { browserRuntime } from '#lib/app/browser.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { loadConfig } from '#lib/api/config.js';
-  import { putMachineRemoteWork } from '#lib/api/client.js';
+  import { pendingMachines, putMachineRemoteWork, revokePending } from '#lib/api/client.js';
+  import { errorText } from '#lib/api/errors.js';
+  import { authApi } from '#lib/auth/api.js';
+  import { stepUp, StepUpCancelled } from '#lib/auth/stepup.svelte.js';
+  import StepUpPrompt from '#lib/auth/StepUpPrompt.svelte';
   import { clock } from '#lib/clock.js';
   import { connectionStale } from '#lib/sync/stale.svelte.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import { fmt } from '#lib/format/ru.js';
   import { credentialLine } from '#lib/stores/limits.js';
   import { modelLabel } from '#lib/format/labels.js';
+  import Button from '#lib/ui/Button.svelte';
   import Pill from '#lib/ui/Pill.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
   import { swapOn } from '#lib/ui/swap.js';
   import SecondaryHeader from '../SecondaryHeader.svelte';
+  import AddMachineSheet from './AddMachineSheet.svelte';
   import MetricCard from './MetricCard.svelte';
   import { diskLimits, diskView, generalWarnings, hotspotRows, journalStops, leakedSummary, machineStatus, memoryLowText, unleasedText } from './model.js';
   import { carrierLine, isRunner, remoteWorkText, runnerAvailability } from './runner.js';
@@ -24,13 +30,23 @@
   import JobSheet from './JobSheet.svelte';
   import JobsSection from './JobsSection.svelte';
   import CloudSection from './CloudSection.svelte';
+  import { codeHint, sortPending, type PendingMachine } from './pending.js';
   import '../secondary.css';
 
   let runtime = $state<Runtime | null>(null);
   let selected = $state(''); let error = $state('');
   const now = $derived.by(() => { void ticker.second; return connectionStale.now(); });
   let config = $state({ disk_warn_pct: 85, disk_warn_free_gb: 30, disk_critical_free_gb: 10, metrics_stale_after_secs: 90 });
-  const machines = $derived(runtime ? [...runtime.machines.items.values()] : []);
+  // Ожидающие машины есть и в обычном списке: убираем их оттуда, чтобы не показывать offline.
+  let pending = $state<PendingMachine[]>([]);
+  let pendingError = $state(''); let pendingNotice = $state('');
+  let methods = $state({ password: false, passkey: false });
+  let addOpen = $state(false); let reissue = $state<PendingMachine | null>(null);
+  let lastPendingMinute = -1;
+  const pendingIds = $derived(new Set(pending.map((item) => item.machine_id)));
+  const machines = $derived(runtime ? [...runtime.machines.items.values()].filter((m) => !pendingIds.has(m.id)) : []);
+  const sortedPending = $derived(sortPending(pending));
+  const pendingNow = $derived.by(() => { void ticker.second; return connectionStale.now() + clock.offset; });
   $effect(() => { if (!machines.some(m => m.id === selected)) selected = machines[0]?.id ?? ''; });
   const machine = $derived(machines.find(m => m.id === selected) ?? machines[0]);
   const metrics = $derived(machine?.metrics);
@@ -102,16 +118,69 @@
     try { const [value, cfg] = await Promise.all([browserRuntime(), loadConfig()]); runtime = value; config = cfg.machines; }
     catch { error = 'Не удалось загрузить машины. Повторите при восстановлении связи'; }
   }
-  onMount(() => { void load(); return ticker.retain(); });
+  async function loadPending() {
+    try { pending = (await pendingMachines()).data.items; pendingError = ''; }
+    catch { pendingError = 'Не удалось загрузить ожидающие машины'; }
+  }
+  async function loadMethods() {
+    // Без сведений о способах входа окно подтверждения просто не предложит пароль или ключ.
+    try { methods = await authApi.methods(); } catch { /* подтверждение покажет ошибку хаба */ }
+  }
+  function openAdd() { pendingNotice = ''; addOpen = true; }
+  function openReissue(item: PendingMachine) { pendingNotice = ''; reissue = item; }
+  function closeSheet() { addOpen = false; reissue = null; }
+  function issued() { void loadPending(); }
+  async function revoke(item: PendingMachine) {
+    pendingNotice = '';
+    try {
+      await stepUp.run(() => revokePending(item.machine_id, crypto.randomUUID()));
+      void loadPending();
+    } catch (err) {
+      if (!(err instanceof StepUpCancelled)) pendingNotice = errorText(err, 'Не удалось отозвать машину. Повторите при восстановлении связи');
+    }
+  }
+  onMount(() => {
+    void load(); void loadMethods();
+    return ticker.retain();
+  });
+  // Хаб отдаёт ожидающие машины по запросу: обновляем раз в минуту и после действий владельца.
+  $effect(() => {
+    const minute = Math.floor(ticker.second / 60);
+    if (minute === lastPendingMinute) return;
+    lastPendingMinute = minute;
+    void loadPending();
+  });
   function loadText(value: number | undefined) { return value === undefined ? 'Нет данных' : (value / 100).toLocaleString('ru-RU', { minimumFractionDigits: 2 }); }
 </script>
 <main id="main" tabindex="-1" data-secondary-ready={runtime ? '' : undefined}>
   <SecondaryHeader title="Машины" subtitle="Состояние ресурсов" />
   <div class="secondary-body"><div class="secondary-content">
     {#if error}<p class="error">{error}</p><button type="button" onclick={load}>Повторить</button>
-    {:else if !runtime || runtime.machines.status === 'idle' || runtime.machines.status === 'loading_snapshot'}<p>Загружаю машины…</p>
-    {:else if !machine}<p>Машины ещё не подключены. Подключите воркер к хабу</p>
     {:else}
+      <div class="add-machine"><Button variant="primary" onclick={openAdd}>Добавить машину</Button></div>
+      {#if pendingError}<p class="error" role="alert">{pendingError}</p>{/if}
+      {#if sortedPending.length}
+        <section class="pending" aria-labelledby="pending-title">
+          <h2 id="pending-title">Ожидают подключения</h2>
+          <ul>
+            {#each sortedPending as item (item.machine_id)}
+              {@const hint = codeHint(item, pendingNow)}
+              <li>
+                <span class="name">{item.name}</span>
+                {#if hint}<span class="hint" data-expired={hint === 'Код истёк' ? '' : undefined}>{hint}</span>{/if}
+                <div class="pending-actions">
+                  <button type="button" onclick={() => openReissue(item)}>Новый код</button>
+                  <button type="button" onclick={() => void revoke(item)}>Отозвать</button>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        </section>
+      {/if}
+      {#if pendingNotice}<p class="error" role="alert">{pendingNotice}</p>{/if}
+      {#if !runtime || runtime.machines.status === 'idle' || runtime.machines.status === 'loading_snapshot'}<p>Загружаю машины…</p>
+      {:else if !machine}<p>Машины ещё не подключены. Подключите воркер к хабу</p>
+      {:else}
       {#if machines.length > 1}<Segmented name="machine" label="Машина" options={machines.map(m => ({ value: m.id, label: m.availability === 'degraded' ? `${m.name} · нестабильно` : m.availability === 'unavailable' ? `${m.name} · не в сети` : m.availability === 'offline' && isRunner(m) ? `${m.name} · недоступен` : m.name }))} bind:value={selected} />{/if}
       <CloudSection {runtime} {now} />
       <div class="heading"><h2>{machine.name}</h2>{#key machine.id}
@@ -194,11 +263,25 @@
       {/if}
       <div class="heartbeat"><p>Последний сигнал {heartbeat === null ? 'ещё не получен' : fmt.ago(heartbeat, now)}</p>
       {#if machine.availability_since}<p class="note">Подключение с {fmt.clock(Date.parse(machine.availability_since))} · {fmt.dayLabel(Date.parse(machine.availability_since), now)}</p>{/if}</div>
+      {/if}
     {/if}
   </div></div>
   {#if openJob && runtime}{#key openJob}<JobSheet {runtime} jobId={openJob} onclose={closeJob} />{/key}{/if}
+  {#if addOpen}<AddMachineSheet onclose={closeSheet} onissued={issued} />{/if}
+  {#if reissue}<AddMachineSheet machine={reissue} onclose={closeSheet} onissued={issued} />{/if}
+  <StepUpPrompt password={methods.password} passkey={methods.passkey} />
 </main>
 <style>
+  .add-machine { display: flex; margin-top: var(--s6); }
+  .pending { background: var(--surface); border-radius: var(--radius-card); padding: var(--s5) var(--s6); margin-block: var(--s4); }
+  .pending h2 { margin: var(--s0); font-size: var(--fs-body); font-weight: var(--weight-medium); }
+  .pending ul { list-style: none; margin: var(--s4) 0 0; padding: 0; }
+  .pending li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3) var(--s6); min-height: var(--target); padding-block: var(--s3); }
+  .pending .name { min-width: 0; overflow-wrap: anywhere; }
+  .pending .hint { color: var(--muted); font-size: var(--fs-meta); }
+  .pending .hint[data-expired] { color: var(--warning); }
+  .pending-actions { display: flex; flex-wrap: wrap; gap: var(--s3); margin-inline-start: auto; }
+  .pending-actions button { min-height: var(--target); padding: var(--s0) var(--s3); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-meta); }
   .heading { display: flex; flex-wrap: wrap; gap: var(--s4); justify-content: space-between; align-items: center; margin-top: var(--s8); }
   .heading h2 { margin: 0; font-size: var(--fs-heading); }
   /* Состояние — подпись цветом, а не заливная капсула, которую легко принять за кнопку. */
