@@ -678,6 +678,27 @@ struct WorkerPart {
     machine_id: Uuid,
 }
 
+/// Тождество воркера, пережившее uninstall без `--purge`: конфиг и токен остались,
+/// а юнит и бинари уже удалены, поэтому `classify_worker` видел бы чистого воркера.
+fn kept_machine_id(wl: &Layout) -> Option<Uuid> {
+    let dir = wl.worker_config_dir();
+    if !dir.join("worker.toml").is_file() || !dir.join("token").is_file() {
+        return None;
+    }
+    let text = std::fs::read_to_string(dir.join("worker.toml")).ok()?;
+    let table: toml::Table = toml::from_str(&text).ok()?;
+    table.get("machine_id")?.as_str()?.parse().ok()
+}
+
+/// Машина в сохранённой базе ещё не отозвана: у неё есть действующая учётная запись.
+async fn machine_active(runner: &dyn Runner, layout: &Layout, id: Uuid) -> Result<bool, CtlError> {
+    let sql = format!(
+        "select count(*) from machine_credentials where machine_id = '{id}' and revoked_at is null;\n"
+    );
+    let out = run_ok(runner, "psql machine credentials", psql(layout, "canterlot", &sql)).await?;
+    Ok(stdout(&out) != "0")
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn install_worker(
     runner: &dyn Runner,
@@ -710,30 +731,26 @@ async fn install_worker(
     )?;
     owned.push(home.join(".local/opt/canterlot"));
 
-    // Существующее тождество воркера переживает переустановку: вторую машину не выпускаем.
-    let machine_id = if class == WorkerClass::Installed {
-        let text = std::fs::read_to_string(wl.worker_config_dir().join("worker.toml"))?;
-        let table: toml::Table = toml::from_str(&text)?;
-        table
-            .get("machine_id")
-            .and_then(|v| v.as_str())
-            .and_then(|v| v.parse::<Uuid>().ok())
-            .ok_or_else(|| CtlError::BadOutput("worker.toml machine_id".into()))?
-    } else {
-        let out = run_ok(
-            runner,
-            "canterlot-hub machine add",
-            hub_exec(layout, &["machine", "add", "--name", &host.hostname]),
-        )
-        .await?;
-        let (ids, token): (MachineIds, String) =
-            worker::parse_machine_add(&String::from_utf8_lossy(&out.stdout))?;
-        let agents = worker::detect_agents(runner, Some(user)).await;
-        let hub_url = format!("https://localhost:{}", render::grpc_port(state));
-        let written = worker::write_identity(&wl, &ids, ca_pem, &token, &hub_url, &agents)?;
-        owned.extend(written.created_dirs);
-        owned.extend(written.files);
-        ids.machine_id
+    // Свою машину и токен не меняем, если тождество сохранилось и машина не отозвана:
+    // иначе повторная установка оставляла бы в базе старую строку «unavailable».
+    let machine_id = match kept_machine_id(&wl) {
+        Some(id) if machine_active(runner, layout, id).await? => id,
+        _ => {
+            let out = run_ok(
+                runner,
+                "canterlot-hub machine add",
+                hub_exec(layout, &["machine", "add", "--name", &host.hostname]),
+            )
+            .await?;
+            let (ids, token): (MachineIds, String) =
+                worker::parse_machine_add(&String::from_utf8_lossy(&out.stdout))?;
+            let agents = worker::detect_agents(runner, Some(user)).await;
+            let hub_url = format!("https://localhost:{}", render::grpc_port(state));
+            let written = worker::write_identity(&wl, &ids, ca_pem, &token, &hub_url, &agents)?;
+            owned.extend(written.created_dirs);
+            owned.extend(written.files);
+            ids.machine_id
+        }
     };
     owned.push(wl.worker_config_dir());
 

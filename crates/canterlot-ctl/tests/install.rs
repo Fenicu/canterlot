@@ -462,6 +462,77 @@ async fn install_refuses_bad_csp_before_creating_files() {
     }
 }
 
+/// Тождество воркера после `uninstall` без `--purge`: конфиг и токен есть,
+/// а юнит уже удалён, поэтому `classify_worker` видит чистого воркера.
+fn kept_identity(fx: &Fixture, id: &str) {
+    let config = fx.home.join(".config/canterlot");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("worker.toml"),
+        format!(
+            "machine_id = \"{id}\"\nhub_url = \"https://localhost:7443\"\ninstallation_id = \"{}\"\nrestore_generation = \"{}\"\n",
+            IDS[1], IDS[2]
+        ),
+    )
+    .unwrap();
+    std::fs::write(config.join("token"), "kept-token").unwrap();
+}
+
+fn answer_machine_credentials(fx: &Fixture, active: Arc<AtomicBool>) {
+    fx.runner.respond(move |cmd| {
+        if stdin(cmd).contains("machine_credentials") {
+            return Some(Output::ok(format!(
+                "{}\n",
+                u8::from(active.load(Ordering::SeqCst))
+            )));
+        }
+        None
+    });
+}
+
+#[tokio::test]
+async fn install_reuses_kept_machine_when_it_is_still_active() {
+    let (src, server) = release_server().await;
+    let fx = fixture();
+    kept_identity(&fx, MACHINE);
+    answer_machine_credentials(&fx, Arc::new(AtomicBool::new(true)));
+    install(args(), &fx.layout, &fx.runner, &src, &host())
+        .await
+        .unwrap();
+    let calls = fx.runner.calls();
+    assert!(
+        !calls.iter().any(|c| has(c, &["machine", "add"])),
+        "a second machine was issued: {calls:#?}"
+    );
+    let config = fx.home.join(".config/canterlot");
+    let worker: toml::Table =
+        toml::from_str(&std::fs::read_to_string(config.join("worker.toml")).unwrap()).unwrap();
+    assert_eq!(worker["machine_id"].as_str(), Some(MACHINE));
+    assert_eq!(
+        std::fs::read_to_string(config.join("token")).unwrap(),
+        "kept-token"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn install_registers_a_new_machine_when_the_kept_one_is_revoked() {
+    let (src, server) = release_server().await;
+    let fx = fixture();
+    kept_identity(&fx, MACHINE);
+    answer_machine_credentials(&fx, Arc::new(AtomicBool::new(false)));
+    install(args(), &fx.layout, &fx.runner, &src, &host())
+        .await
+        .unwrap();
+    let calls = fx.runner.calls();
+    assert!(calls.iter().any(|c| has(c, &["machine", "add"])));
+    assert_eq!(
+        std::fs::read_to_string(fx.home.join(".config/canterlot/token")).unwrap(),
+        "test-token-value"
+    );
+    server.abort();
+}
+
 fn retained(fx: &Fixture) {
     std::fs::create_dir_all(fx.layout.pg_data()).unwrap();
     std::fs::create_dir_all(fx.layout.manifest_dir()).unwrap();
