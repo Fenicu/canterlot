@@ -207,6 +207,72 @@ async fn join_writes_identity_and_starts_worker() {
     );
 }
 
+fn linger_runner(linger: &'static str, enable_ok: bool) -> FakeRunner {
+    let runner = connected_runner();
+    runner.respond(move |cmd| {
+        if cmd.args.iter().any(|a| a == "show-user") {
+            return Some(Output::ok(format!("Linger={linger}\n")));
+        }
+        if cmd.args.iter().any(|a| a == "enable-linger") {
+            return Some(if enable_ok {
+                Output::ok("")
+            } else {
+                Output::failed(1, "permission denied")
+            });
+        }
+        None
+    });
+    runner
+}
+
+async fn join_with(linger: &'static str, enable_ok: bool) -> (String, Vec<String>) {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = Layout::new(dir.path().into(), Some(home_of(dir.path())));
+    let ca = new_ca().unwrap();
+    let stub = enroll_stub(&ca, &ca, &["127.0.0.1"], "").await;
+    let runner = linger_runner(linger, enable_ok);
+    let src = release_server(&[VERSION]).await;
+    let report = join(
+        &args(stub.addr.to_string(), pin_of(&ca.cert_der)),
+        &layout,
+        &runner,
+        &src,
+        &host(),
+    )
+    .await
+    .unwrap();
+    let calls: Vec<String> = runner
+        .calls()
+        .iter()
+        .map(|c| format!("{} {}", c.program, c.args.join(" ")))
+        .collect();
+    (
+        report.to_string(),
+        calls
+            .into_iter()
+            .filter(|c| c.contains("loginctl"))
+            .collect(),
+    )
+}
+
+#[tokio::test]
+async fn join_does_not_warn_about_linger_when_it_is_on() {
+    let (text, calls) = join_with("yes", true).await;
+    assert!(
+        !text.contains("the worker stops when you log out"),
+        "{text}"
+    );
+    assert!(calls.iter().any(|c| c.contains("show-user worker -p Linger")), "{calls:?}");
+}
+
+#[tokio::test]
+async fn join_warns_about_linger_only_when_it_stays_off() {
+    let (text, _) = join_with("no", true).await;
+    assert!(text.contains("the worker stops when you log out"), "{text}");
+    let (text, _) = join_with("no", false).await;
+    assert!(text.contains("the worker stops when you log out"), "{text}");
+}
+
 #[tokio::test]
 async fn join_from_dir_uses_no_network() {
     let dir = tempfile::tempdir().unwrap();

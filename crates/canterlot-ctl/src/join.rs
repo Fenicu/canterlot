@@ -35,8 +35,8 @@ use crate::{
     ops::{self, OpKind, OpRecord, OpResult},
     release::{self, ReleaseSource},
     render,
-    runner::Runner,
-    stack::run_ok,
+    runner::{Cmd, Runner},
+    stack::{cmd, run_ok},
     state::{self, WorkerClass},
     tls::pin_of,
     worker::{self, MachineIds, WorkerHost},
@@ -471,16 +471,34 @@ fn identity_present(layout: &Layout) -> bool {
 
 /// Без root — через `sudo -n`; не вышло — команда уходит в отчёт для ручного запуска.
 async fn enable_linger(runner: &dyn Runner, host: &WorkerHost, notes: &mut Vec<String>) {
-    let linger = ["loginctl", "enable-linger", host.user.as_str()];
-    let cmd = if host.is_root {
-        crate::stack::cmd(linger[0], &linger[1..])
-    } else {
-        let mut all = vec!["-n"];
-        all.extend_from_slice(&linger);
-        crate::stack::cmd("sudo", &all)
+    let wrapped = |args: &[&str]| -> Cmd {
+        if host.is_root {
+            cmd(args[0], &args[1..])
+        } else {
+            let mut all = vec!["-n"];
+            all.extend_from_slice(args);
+            cmd("sudo", &all)
+        }
     };
-    let ok = matches!(runner.run(cmd).await, Ok(out) if out.status == 0);
-    if !ok {
+    let _ = runner
+        .run(wrapped(&["loginctl", "enable-linger", &host.user]))
+        .await;
+    // Код enable-linger не говорит, включено ли lingering на самом деле: уже включённое
+    // состояние и ошибка sudo различаются только чтением самого состояния.
+    let shown = runner
+        .run(wrapped(&[
+            "loginctl",
+            "show-user",
+            &host.user,
+            "-p",
+            "Linger",
+        ]))
+        .await;
+    let on = matches!(&shown, Ok(out) if out.status == 0
+        && String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|line| line.trim() == "Linger=yes"));
+    if !on {
         notes.push(format!(
             "the worker stops when you log out until lingering is on: run `sudo loginctl enable-linger {}`",
             host.user
