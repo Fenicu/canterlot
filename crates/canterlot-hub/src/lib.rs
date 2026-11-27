@@ -25,6 +25,7 @@ pub mod delivery;
 pub mod dictation;
 pub mod dispatcher;
 pub mod drafts;
+pub mod enroll;
 pub mod events;
 pub mod executions;
 #[cfg(feature = "fault-injection")]

@@ -122,6 +122,9 @@ error_codes! {
     MachineNotFound => "machine_not_found", 404, Browser, Never, "Машина не найдена";
     MachineUnavailable => "machine_unavailable", 409, Delivery, AfterCondition, "Машина недоступна";
     MachineIsRunner => "machine_is_runner", 409, Browser, Never, "Машина — раннер: сессии на ней не запускаются";
+    MachineNotPending => "machine_not_pending", 409, Browser, Never, "Машина уже подключена: код привязки больше не нужен";
+    CaUnavailable => "ca_unavailable", 409, Browser, Never, "В настройках хаба не задан корневой сертификат tls_ca";
+    EnrollEndpointMissing => "enroll_endpoint_missing", 409, Browser, Never, "В настройках хаба не задан адрес для новых машин [enroll] grpc_endpoint";
     SystemConversation => "system_conversation", 409, Browser, Never, "Служебный разговор: сообщения и запуски в нём запрещены";
     MachineOffline => "machine_offline", 409, Delivery, AfterCondition, "Машина не на связи";
     NotOpen => "not_open", 409, Browser, Never, "Запрос секрета уже закрыт";

@@ -1,0 +1,37 @@
+// Привязка новой машины по одноразовому коду. Служба живёт на порту gRPC хаба и не требует
+// токена машины: у машины его ещё нет. Номера удалённых полей объявляются reserved и никогда
+// не используются повторно.
+syntax = "proto3";
+
+package canterlot.enroll.v1;
+
+service WorkerEnroll {
+  // Без учётных данных: воркер сверяет хеш DER с `--pin` до отправки кода.
+  rpc GetCa(GetCaRequest) returns (GetCaResponse);
+  // Обмен кода на личность машины. Ошибки — статус gRPC с кодом в сообщении:
+  // `join_code_invalid` (неизвестный, использованный, истёкший или отозванный код неразличимы),
+  // `rate_limited`, `ca_unavailable`.
+  rpc Join(JoinRequest) returns (JoinResponse);
+}
+
+message GetCaRequest {}
+
+message GetCaResponse {
+  bytes ca_der = 1;
+}
+
+message JoinRequest {
+  string code = 1;
+  string hostname = 2;
+  string worker_version = 3;
+}
+
+message JoinResponse {
+  string machine_id = 1;
+  string installation_id = 2;
+  string restore_generation = 3;
+  string token = 4;
+  bytes ca_der = 5;
+  // Адрес gRPC из `[enroll] grpc_endpoint`; пусто, если не задан: воркер оставляет свой `--hub`.
+  string grpc_endpoint = 6;
+}

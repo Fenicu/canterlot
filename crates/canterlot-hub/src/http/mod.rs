@@ -38,6 +38,7 @@ pub mod conversations;
 pub mod crunch;
 pub mod dictation;
 pub mod drafts;
+pub mod enroll;
 pub mod error;
 pub mod extract;
 pub mod groups;
@@ -125,6 +126,8 @@ pub struct AppDeps {
     /// Горизонт ожидания лимита для маршрута.
     pub routing_queue_horizon: Duration,
     pub machines: MachinesConfig,
+    /// Коды привязки машин: CA, адрес gRPC и ссылка на `install.sh`.
+    pub enroll: crate::enroll::EnrollSettings,
     pub attachments: AttachmentsConfig,
     pub blobs: Arc<dyn BlobStore>,
     pub manifest: PathBuf,
@@ -160,6 +163,7 @@ pub struct AppState {
     pub spawn_queue: crate::config::SpawnQueueConfig,
     pub routing_queue_horizon: Duration,
     pub machines: Arc<MachinesConfig>,
+    pub enroll: Arc<crate::enroll::EnrollSettings>,
     pub attachments: Arc<AttachmentsConfig>,
     pub blobs: Arc<dyn BlobStore>,
     /// Тела загрузок вложений одновременно в обработке: не больше `max_concurrent_uploads`.
@@ -209,6 +213,7 @@ impl AppState {
             spawn_queue: deps.spawn_queue,
             routing_queue_horizon: deps.routing_queue_horizon,
             machines: Arc::new(deps.machines),
+            enroll: Arc::new(deps.enroll),
             upload_slots: Arc::new(tokio::sync::Semaphore::new(
                 deps.attachments.max_concurrent_uploads.max(1),
             )),
@@ -278,6 +283,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(hibernate::routes())
         .merge(dictation::routes())
         .merge(machines::routes())
+        .merge(enroll::routes())
         .merge(jobs::routes())
         .merge(cloud::routes())
         .merge(updates::routes())

@@ -39,6 +39,8 @@ mod contract_coverage;
 mod credential_pushes;
 #[path = "it/credentials.rs"]
 mod credentials;
+#[path = "it/enroll.rs"]
+mod enroll;
 #[path = "it/goals.rs"]
 mod goals;
 #[path = "it/http_core.rs"]

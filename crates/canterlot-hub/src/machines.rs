@@ -59,7 +59,7 @@ pub async fn verify(pool: &PgPool, token: &str) -> Result<Option<Uuid>, sqlx::Er
     Ok(found)
 }
 
-fn new_token() -> Result<String, sqlx::Error> {
+pub(crate) fn new_token() -> Result<String, sqlx::Error> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes)
         .map_err(|_| sqlx::Error::Io(std::io::Error::other("random_source_failed")))?;
@@ -246,7 +246,10 @@ async fn rotate_token_in_tx(
     Ok(Some(token))
 }
 
-async fn notify_revoke(conn: &mut sqlx::PgConnection, machine_id: Uuid) -> Result<(), sqlx::Error> {
+pub(crate) async fn notify_revoke(
+    conn: &mut sqlx::PgConnection,
+    machine_id: Uuid,
+) -> Result<(), sqlx::Error> {
     sqlx::query("select pg_notify('canterlot_revoke', $1)")
         .bind(machine_id.to_string())
         .execute(conn)

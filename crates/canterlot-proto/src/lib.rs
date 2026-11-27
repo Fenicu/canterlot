@@ -10,6 +10,12 @@ pub mod worker {
     }
 }
 
+pub mod enroll {
+    pub mod v1 {
+        tonic::include_proto!("canterlot.enroll.v1");
+    }
+}
+
 /// `outcome` факта CJ: управляющая служба заново подтвердила то же живое сопровождение.
 pub const OWNER_RECLAIMED: &str = "owner_reclaimed";
 

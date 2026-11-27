@@ -94,5 +94,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         .compile_protos(&["proto/canterlot/worker/v1/worker.proto"], &["proto"])?;
+    tonic_prost_build::configure()
+        // Код и токен не должны попасть в журнал через `{:?}`: Debug пишется вручную.
+        .skip_debug([
+            ".canterlot.enroll.v1.JoinRequest",
+            ".canterlot.enroll.v1.JoinResponse",
+        ])
+        .build_server(true)
+        .build_client(true)
+        .compile_protos(&["proto/canterlot/enroll/v1/enroll.proto"], &["proto"])?;
     Ok(())
 }

@@ -686,3 +686,27 @@ impl fmt::Debug for crate::worker::v1::SecretRemoveFailed {
             .finish()
     }
 }
+
+/// Код привязки одноразовый, но живёт 15 минут: в `Debug` только его длина.
+impl fmt::Debug for crate::enroll::v1::JoinRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JoinRequest")
+            .field("code_bytes", &self.code.len())
+            .field("hostname", &self.hostname)
+            .field("worker_version", &self.worker_version)
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::enroll::v1::JoinResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JoinResponse")
+            .field("machine_id", &self.machine_id)
+            .field("installation_id", &self.installation_id)
+            .field("restore_generation", &self.restore_generation)
+            .field("token_bytes", &self.token.len())
+            .field("ca_der_bytes", &self.ca_der.len())
+            .field("grpc_endpoint", &self.grpc_endpoint)
+            .finish()
+    }
+}

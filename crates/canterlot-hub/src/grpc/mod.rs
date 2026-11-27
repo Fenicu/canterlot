@@ -1,6 +1,7 @@
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 
 use canterlot_proto::{
+    enroll::v1::worker_enroll_server::WorkerEnrollServer,
     limits::MAX_MESSAGE_BYTES,
     worker::v1::{
         worker_control_server::WorkerControlServer, worker_data_server::WorkerDataServer, *,
@@ -39,6 +40,7 @@ mod attachments;
 mod auth;
 mod control;
 mod data;
+mod enroll;
 mod media;
 mod revocation;
 mod runners;
@@ -158,6 +160,9 @@ pub struct HubGrpc {
     blobs: Option<Arc<dyn crate::attachments::BlobStore>>,
     /// Общий предел медиа одной машины; `0` выключает проверку.
     pub media_quota_bytes: u64,
+    /// Коды привязки: CA и адрес для `WorkerEnroll`.
+    pub enroll: Arc<crate::enroll::EnrollSettings>,
+    join_limiter: Arc<crate::enroll::JoinLimiter>,
     fetch_slots: attachments::FetchSlots,
     media_slots: media::UploadSlots,
     agent_slots: agent::AgentSlots,
@@ -414,6 +419,8 @@ impl HubGrpc {
             blobs: None,
             media_quota_bytes: crate::config::AttachmentsConfig::default()
                 .max_media_bytes_per_machine,
+            enroll: Default::default(),
+            join_limiter: Default::default(),
             fetch_slots: Default::default(),
             media_slots: Default::default(),
             agent_slots: Default::default(),
@@ -421,6 +428,11 @@ impl HubGrpc {
             faults: Default::default(),
             shutdown: CancellationToken::new(),
         }
+    }
+
+    pub fn with_enroll(mut self, settings: crate::enroll::EnrollSettings) -> Self {
+        self.enroll = Arc::new(settings);
+        self
     }
 
     pub fn with_cloud(mut self, cloud: Option<Arc<crate::cloud::service::CloudService>>) -> Self {
@@ -553,11 +565,14 @@ impl HubGrpc {
             let _ = tx.rollback().await;
             return Ok(Err(rejection(RejectReason::IdentityInUse)));
         };
-        match sqlx::query("update machines set cj_journal_id = $2 where id = $1")
-            .bind(machine_id)
-            .bind(journal_id)
-            .execute(&mut *tx)
-            .await
+        // Первое принятое рукопожатие завершает привязку по коду.
+        match sqlx::query(
+            "update machines set cj_journal_id = $2, pending_enrollment = false where id = $1",
+        )
+        .bind(machine_id)
+        .bind(journal_id)
+        .execute(&mut *tx)
+        .await
         {
             Ok(_) => {}
             Err(_) => {
@@ -665,6 +680,13 @@ impl HubGrpc {
 }
 
 fn router(state: HubGrpc, cert: &str, key: &str) -> Result<Router, tonic::transport::Error> {
+    // Служба привязки без проверки токена машины: её удостоверяет код (см. grpc/enroll.rs).
+    let enroll = enroll::EnrollService {
+        pool: state.pool.clone(),
+        installation: state.installation,
+        settings: state.enroll.clone(),
+        limiter: state.join_limiter.clone(),
+    };
     Ok(Server::builder()
         .tls_config(ServerTlsConfig::new().identity(Identity::from_pem(cert, key)))?
         .http2_keepalive_interval(Some(state.timers.http2_keepalive_interval))
@@ -678,7 +700,9 @@ fn router(state: HubGrpc, cert: &str, key: &str) -> Result<Router, tonic::transp
             WorkerDataServer::new(state)
                 .max_decoding_message_size(MAX_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_MESSAGE_BYTES),
-        ))
+        )
+        // Без токена тело читает кто угодно: запрос обмена крошечный, предел маленький.
+        .add_service(WorkerEnrollServer::new(enroll).max_decoding_message_size(16 * 1024)))
 }
 
 pub async fn serve(

@@ -628,6 +628,33 @@ token=dGhpcy1pcy1hLXRlc3QtdG9rZW4...
   ```
   Немедленно закрывает соединение воркера с ошибкой `Unauthenticated` и блокирует приём любых команд и фактов.
 
+### 5.4. Код привязки
+
+Вместо переноса `machine_id`, `installation_id`, `restore_generation` и токена руками хаб
+выдаёт одноразовый код. Нужны `tls_ca` и, для PWA, `[enroll] grpc_endpoint` в `hub.toml`
+([configuration.md](../configuration.md)). Выполните на хабе:
+```bash
+sudo -u canterlot canterlot-hub machine join-code \
+    --config /etc/canterlot/hub.toml \
+    --name workstation
+```
+
+`--endpoint hub.example.internal:7443` перекрывает `[enroll] grpc_endpoint`. Команда печатает
+четыре строки:
+```text
+machine_id=019a1b10-0000-7000-8000-000000000001
+code=0ABC-DEFG-HJKM-NPQR-STVW-XYZ1-23
+expires_at=2026-01-01T12:15:00Z
+command=curl -fsSL https://github.com/Fenicu/canterlot/releases/latest/download/install.sh | bash -s -- join --hub hub.example.internal:7443 --pin sha256:<hex>
+```
+
+`command` выполняется на новой машине, код вводится, когда его спросят; в саму команду код не
+входит. Машина появляется на хабе сразу и «ожидает подключения»: код годится один раз и
+15 минут, а машина перестаёт ждать на первом принятом рукопожатии воркера. Если ответ обмена
+потерялся, «Новый код» в PWA (`POST /api/v1/machines/{id}/join-code`) выдаёт новый код той же
+машины, а прежний код и токен перестают действовать. «Отозвать» удаляет ожидающую машину.
+`machine add` работает как раньше.
+
 ---
 
 ## 6. Воркер на рабочей VM владельца

@@ -16,6 +16,11 @@ pub struct HubConfig {
     pub grpc_listen: SocketAddr,
     pub tls_cert: PathBuf,
     pub tls_key: PathBuf,
+    /// Корневой сертификат CA (PEM), которым подписан `tls_cert`. Нужен кодам привязки:
+    /// `WorkerEnroll.GetCa` отдаёт его, а команда для новой машины несёт его отпечаток.
+    /// Без ключа хаб работает как раньше, а обмен кода отвечает `ca_unavailable`.
+    #[serde(default)]
+    pub tls_ca: Option<PathBuf>,
     pub manifest: PathBuf,
     #[serde(default)]
     pub timers: HubTimers,
@@ -41,6 +46,9 @@ pub struct HubConfig {
     pub jobs: JobsConfig,
     #[serde(default)]
     pub sessions: SessionsConfig,
+    /// `[enroll]`: привязка новых машин по коду.
+    #[serde(default)]
+    pub enroll: EnrollConfig,
     #[serde(default)]
     pub orchestrator: OrchestratorConfig,
     #[serde(default)]
@@ -275,6 +283,16 @@ impl HubConfig {
                     error
                 })?;
         }
+        if let Some(ca) = &mut config.tls_ca
+            && ca.is_relative()
+        {
+            *ca = base.join(&*ca);
+        }
+        config.enroll.validate().map_err(|category| ConfigError {
+            path: path.to_owned(),
+            category,
+            location: None,
+        })?;
         if config
             .pricing
             .values()
@@ -312,6 +330,42 @@ impl HubConfig {
             gotify.resolve(path, origins)?;
         }
         Ok(config)
+    }
+}
+
+/// `[enroll]` в `hub.toml`: что хаб печатает в команде для новой машины.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EnrollConfig {
+    /// Адрес gRPC хаба, по которому его видят воркеры (`host:port`). Без него код выдаёт
+    /// только `canterlot-hub machine join-code --endpoint …`.
+    pub grpc_endpoint: Option<String>,
+    /// Откуда новая машина берёт `install.sh`.
+    pub install_url: String,
+}
+
+impl Default for EnrollConfig {
+    fn default() -> Self {
+        Self {
+            grpc_endpoint: None,
+            install_url: crate::enroll::DEFAULT_INSTALL_URL.to_owned(),
+        }
+    }
+}
+
+impl EnrollConfig {
+    /// Оба значения попадают в команду, которую владелец вставит в оболочку: проверяются здесь,
+    /// а не при первой выдаче кода.
+    fn validate(&self) -> Result<(), &'static str> {
+        if let Some(endpoint) = &self.grpc_endpoint
+            && !crate::enroll::valid_endpoint(endpoint)
+        {
+            return Err("invalid [enroll].grpc_endpoint");
+        }
+        if !crate::enroll::valid_install_url(&self.install_url) {
+            return Err("invalid [enroll].install_url");
+        }
+        Ok(())
     }
 }
 

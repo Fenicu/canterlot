@@ -2880,3 +2880,54 @@ fn runner_messages_keep_their_wire_shape_and_hide_the_token() {
     );
     assert_roundtrip(observation);
 }
+
+#[test]
+fn enroll_messages_keep_field_numbers() {
+    use canterlot_proto::enroll::v1::{GetCaResponse, JoinRequest, JoinResponse};
+    // Поле 1 `bytes` (тег 0x0a): сертификат CA в DER.
+    let ca = [0x0a, 2, 0x30, 0x00];
+    assert_eq!(
+        GetCaResponse::decode(ca.as_slice()).unwrap().ca_der,
+        [0x30, 0x00]
+    );
+    let request = JoinRequest {
+        code: "c".into(),
+        hostname: "h".into(),
+        worker_version: "v".into(),
+    };
+    assert_eq!(
+        request.encode_to_vec(),
+        [0x0a, 1, b'c', 0x12, 1, b'h', 0x1a, 1, b'v']
+    );
+    let response = JoinResponse {
+        machine_id: "m".into(),
+        installation_id: "i".into(),
+        restore_generation: "r".into(),
+        token: "t".into(),
+        ca_der: vec![0x30],
+        grpc_endpoint: "e".into(),
+    };
+    assert_eq!(
+        response.encode_to_vec(),
+        [
+            0x0a, 1, b'm', 0x12, 1, b'i', 0x1a, 1, b'r', 0x22, 1, b't', 0x2a, 1, 0x30, 0x32, 1,
+            b'e'
+        ]
+    );
+}
+
+#[test]
+fn enroll_debug_redacts_code_and_token() {
+    use canterlot_proto::enroll::v1::{JoinRequest, JoinResponse};
+    let request = JoinRequest {
+        code: "SECRETCODE".into(),
+        hostname: "workstation".into(),
+        worker_version: "1.0.0".into(),
+    };
+    let response = JoinResponse {
+        token: "SECRETTOKEN".into(),
+        ..JoinResponse::default()
+    };
+    assert!(!format!("{request:?}").contains("SECRETCODE"));
+    assert!(!format!("{response:?}").contains("SECRETTOKEN"));
+}

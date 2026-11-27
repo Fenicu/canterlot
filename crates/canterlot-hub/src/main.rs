@@ -5,7 +5,7 @@ use std::{fs, io::Write, path::PathBuf, process::ExitCode};
 use canterlot_hub::{
     background::{Background, BackgroundDeps},
     config::HubConfig,
-    db, dispatcher, grpc, http, ingest, installation, machines, presets,
+    db, dispatcher, enroll, grpc, http, ingest, installation, machines, presets,
     session::Registry,
 };
 use clap::{Parser, Subcommand};
@@ -149,6 +149,16 @@ enum MachineCommand {
         #[arg(long)]
         machine_id: Uuid,
     },
+    /// Завести машину «ожидает подключения» и выдать одноразовый код привязки на 15 минут.
+    JoinCode {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[arg(long)]
+        name: String,
+        /// Адрес gRPC хаба для новой машины (`host:port`); по умолчанию `[enroll] grpc_endpoint`.
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -241,7 +251,8 @@ async fn run(args: Args) -> Result<(), String> {
             | MachineCommand::SetCarrier { config, .. }
             | MachineCommand::Set { config, .. }
             | MachineCommand::Revoke { config, .. }
-            | MachineCommand::RotateToken { config, .. } => config,
+            | MachineCommand::RotateToken { config, .. }
+            | MachineCommand::JoinCode { config, .. } => config,
         },
         Command::Auth { command } => match command {
             AuthCommand::RecoveryLink { config, .. }
@@ -482,6 +493,34 @@ async fn run(args: Args) -> Result<(), String> {
                         return Err("machine_not_found".into());
                     }
                 }
+                MachineCommand::JoinCode { name, endpoint, .. } => {
+                    let settings = enroll::EnrollSettings::from_config(&config)?;
+                    let ca = settings.ca_der.as_deref().ok_or("ca_unavailable")?;
+                    let endpoint = endpoint
+                        .or(settings.grpc_endpoint.clone())
+                        .ok_or("enroll_endpoint_missing")?;
+                    let issued = enroll::issue(
+                        &pool,
+                        installation.owner_id,
+                        &name,
+                        &endpoint,
+                        &settings.install_url,
+                        ca,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                    writeln!(
+                        std::io::stdout().lock(),
+                        "machine_id={}\ncode={}\nexpires_at={}\ncommand={}",
+                        issued.machine_id,
+                        issued.code,
+                        issued
+                            .expires_at
+                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        issued.command
+                    )
+                    .map_err(|_| "output_error".to_owned())?;
+                }
             }
         }
     }
@@ -497,6 +536,13 @@ async fn serve(
     let cert =
         fs::read_to_string(&config.tls_cert).map_err(|_| "tls_cert_file_error".to_owned())?;
     let key = fs::read_to_string(&config.tls_key).map_err(|_| "tls_key_file_error".to_owned())?;
+    let enroll_settings = enroll::EnrollSettings::from_config(&config).map_err(str::to_owned)?;
+    if enroll_settings.ca_der.is_none() {
+        tracing::info!(
+            kind = "enroll_ca_missing",
+            "no tls_ca configured: join codes are unavailable"
+        );
+    }
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|_| "signal_error".to_owned())?;
     let HubConfig {
@@ -620,7 +666,8 @@ async fn serve(
             .with_orchestrator(&orchestrator)
             .with_activity(&activity)
             .with_dispatcher(dispatcher.clone())
-            .with_cloud(cloud.clone());
+            .with_cloud(cloud.clone())
+            .with_enroll(enroll_settings.clone());
     state.ingest = std::sync::Arc::new(
         ingest::Ingest::new(pool.clone())
             .with_dispatcher(dispatcher.clone())
@@ -699,6 +746,7 @@ async fn serve(
             spawn_queue: orchestrator.spawn_queue.clone(),
             routing_queue_horizon: orchestrator.routing.queue_horizon,
             machines,
+            enroll: enroll_settings,
             attachments,
             blobs,
             manifest,
