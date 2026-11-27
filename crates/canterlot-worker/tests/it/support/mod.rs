@@ -659,6 +659,15 @@ impl ProtocolHub {
         let sender = self.data_downstream.lock().unwrap().clone().unwrap();
         sender.send(Ok(message)).await.unwrap();
     }
+
+    /// Отправка в поток данных, который воркер вправе уже закрыть: `false`, если закрыл.
+    #[allow(dead_code)]
+    pub async fn try_send_data(&self, message: DataDown) -> bool {
+        let Some(sender) = self.data_downstream.lock().unwrap().clone() else {
+            return false;
+        };
+        sender.send(Ok(message)).await.is_ok()
+    }
 }
 
 impl Drop for ProtocolHub {

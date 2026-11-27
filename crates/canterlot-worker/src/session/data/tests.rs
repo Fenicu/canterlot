@@ -723,7 +723,7 @@ async fn another_journal_progress_and_duplicate_acks_do_not_postpone_the_head() 
     sender
         .send(SjRelay {
             journal_id: other,
-            records: (1..=6).map(|seq| record(seq, 0)).collect(),
+            records: (1..=12).map(|seq| record(seq, 0)).collect(),
         })
         .await
         .unwrap();
@@ -757,32 +757,44 @@ async fn another_journal_progress_and_duplicate_acks_do_not_postpone_the_head() 
             batches += 1;
         }
     }
-    let started = Instant::now();
-    for seq in 1..=6 {
-        hub.send_data(DataDown {
+    // Другой журнал идёт вперёд дольше двух сроков головы (12 шагов по 50 мс против 2 × 100 мс),
+    // и голова всё равно истекает посреди его подтверждений. Отложи их голову, воркер дождался
+    // бы конца шагов. Проверка по порядку, а не по часам: потолок в 280 мс под нагрузкой
+    // не держался, а поток, закрытый воркером раньше конца цикла, ронял отправку.
+    let mut progressed = 0;
+    for seq in 1..=12 {
+        if task.is_finished() {
+            break;
+        }
+        let other_ack = DataDown {
             msg: Some(data_down::Msg::SjAck(JournalRangeAck {
                 journal_id: other.to_string(),
                 up_to_seq: seq,
             })),
-        })
-        .await;
-        hub.send_data(DataDown {
+        };
+        let duplicate = DataDown {
             msg: Some(data_down::Msg::SjAck(JournalRangeAck {
                 journal_id: first.to_string(),
                 up_to_seq: 0,
             })),
-        })
-        .await;
-        sleep(Duration::from_millis(25)).await;
+        };
+        if !hub.try_send_data(other_ack).await || !hub.try_send_data(duplicate).await {
+            break;
+        }
+        progressed = seq;
+        sleep(Duration::from_millis(50)).await;
     }
+    assert!(
+        progressed < 12,
+        "the head waited for another journal's progress"
+    );
     assert!(matches!(
-        timeout(Duration::from_millis(130), task)
+        timeout(Duration::from_secs(10), task)
             .await
             .unwrap()
             .unwrap(),
         Err(WorkerError::Timeout)
     ));
-    assert!(started.elapsed() < Duration::from_millis(280));
     drop(sender);
     thread.close().await.unwrap();
 }

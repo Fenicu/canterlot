@@ -562,6 +562,11 @@ mod real {
         let _guard = process_guard::ProcessGuard::new(directory.path());
         let (store, execution, _) = seeded(&pool, &hub, &mut config, store).await;
         config.hub_url = proxy.url.clone();
+        // Тест о потоке данных: срок сердцебиения и подтверждений CJ хаба в 200 и 300 мс под
+        // нагрузкой гейта перезапускал и управляющий поток (два hello вместо одного).
+        // Потерянные подтверждения SJ отбрасывает прокси, их сроку запас не мешает.
+        config.timers.heartbeat_ack = Duration::from_secs(5);
+        config.timers.range_ack = Duration::from_secs(1);
         let ack_file = config
             .data_dir
             .join("executions")

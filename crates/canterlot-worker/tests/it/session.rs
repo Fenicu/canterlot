@@ -894,13 +894,18 @@ async fn live_without_backoff(state: &mut watch::Receiver<SessionState>) {
 #[tokio::test]
 async fn steadily_acking_backlog_does_not_restart_and_batches_have_256_records_at_most() {
     use canterlot_proto::worker::v1::control_up;
+    // Девять подтверждений по 400 мс идут 3,6 с — много дольше двух сроков range_ack (2 с):
+    // срок от отправки каждого диапазона перезапустил бы сессию. Шагу между подтверждениями
+    // запас 0,6 с до первого срока и ещё секунда до второго: при 180 мс против 120 + 120 мс
+    // под нагрузкой гейта подтверждение опаздывало и сессия падала по Timeout. Сердцебиение
+    // здесь не проверяется, его срок только против зависания.
     let (mut hub, store) = ProtocolHub::start(Behavior {
-        range_ack_delay: Duration::from_millis(180),
+        range_ack_delay: Duration::from_millis(400),
         ..Default::default()
     })
     .await;
-    hub.config.timers.range_ack = Duration::from_millis(120);
-    hub.config.timers.heartbeat_ack = Duration::from_millis(300);
+    hub.config.timers.range_ack = Duration::from_secs(1);
+    hub.config.timers.heartbeat_ack = Duration::from_secs(5);
     let store = seed_backlog(store, &hub.config.data_dir, 2304, 0);
     let (stop, mut state, join) = start(hub.config.clone(), store);
     live_without_backoff(&mut state).await;
