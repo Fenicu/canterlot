@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import Button from '#lib/ui/Button.svelte';
+  import IconButton from '#lib/ui/IconButton.svelte';
   import { loadImage, type LoadedImage } from '#lib/composer/imageEdit/decode.js';
   import {
     MARK_COLORS,
@@ -420,13 +421,47 @@
     oncancel();
   }}
 >
-  <header>
-    <Button variant="text" onclick={oncancel}>Отмена</Button>
-    <Button variant="text" onclick={onoriginal}>Без правок</Button>
-    <Button variant="primary" busy={exporting} onclick={() => void done()}>
-      <span bind:this={doneButton} tabindex="-1">Готово</span>
-    </Button>
-  </header>
+  <div class="tools" role="group" aria-label="Инструменты правки">
+    <IconButton
+      icon="crop"
+      label="Обрезать"
+      title="Обрезать"
+      pressed={tool === 'crop'}
+      active={tool === 'crop'}
+      onclick={() => setTool('crop')}
+    />
+    <IconButton
+      icon="edit"
+      label="Карандаш"
+      title="Карандаш"
+      pressed={tool === 'pencil'}
+      active={tool === 'pencil'}
+      onclick={() => setTool('pencil')}
+    />
+    <IconButton
+      icon="undo"
+      label="Отменить действие"
+      title="Отменить действие"
+      inert={edit.history.length === 0}
+      onclick={undoLast}
+    />
+    <div class="palette" role="group" aria-label="Цвет карандаша">
+      {#each MARK_COLORS as name (name)}
+        <button
+          type="button"
+          class={name}
+          class:active={color === name}
+          aria-label={COLOR_LABELS[name]}
+          title={COLOR_LABELS[name]}
+          aria-pressed={color === name}
+          onclick={() => {
+            color = name;
+            setTool('pencil');
+          }}
+        ></button>
+      {/each}
+    </div>
+  </div>
   <div class="stage" bind:this={stage}>
     <canvas
       bind:this={canvas}
@@ -439,57 +474,51 @@
     {#if busy}<p class="status">Загрузка изображения…</p>{/if}
     {#if error}<p class="status">{error}</p>{/if}
   </div>
-  <div class="tools" role="group" aria-label="Инструменты правки">
-    <button type="button" class:active={tool === 'crop'} aria-pressed={tool === 'crop'} onclick={() => setTool('crop')}>Обрезать</button>
-    <button type="button" class:active={tool === 'pencil'} aria-pressed={tool === 'pencil'} onclick={() => setTool('pencil')}>Карандаш</button>
-    <button type="button" onclick={undoLast}>Отменить</button>
-  </div>
-  <div class="palette" role="group" aria-label="Цвет карандаша">
-    {#each MARK_COLORS as name (name)}
-      <button
-        type="button"
-        class={name}
-        class:active={color === name}
-        aria-label={COLOR_LABELS[name]}
-        title={COLOR_LABELS[name]}
-        aria-pressed={color === name}
-        onclick={() => {
-          color = name;
-          setTool('pencil');
-        }}
-      ></button>
-    {/each}
-  </div>
+  <footer>
+    <Button variant="text" onclick={oncancel}>Отмена</Button>
+    <Button variant="text" onclick={onoriginal}>Без правок</Button>
+    <Button variant="primary" busy={exporting} onclick={() => void done()}>
+      <span bind:this={doneButton} tabindex="-1">Готово</span>
+    </Button>
+  </footer>
 </dialog>
 
 <style>
   .editor {
     position: fixed;
     inset: 0;
-    width: 100%;
-    height: 100%;
-    max-width: none;
-    max-height: none;
-    margin: 0;
-    border: 0;
-    border-radius: 0;
+    width: min(calc(100% - var(--s12)), var(--reading-max));
+    max-width: calc(100% - var(--s12));
+    height: calc(100dvh - var(--s15));
+    max-height: calc(100dvh - var(--s15));
+    margin: auto;
+    border: var(--hairline) solid var(--line);
+    border-radius: var(--radius-card);
     display: flex;
     flex-direction: column;
-    background: var(--bg);
+    background: var(--popover);
+    box-shadow: var(--shadow);
     color: var(--text);
-    padding: var(--s4) var(--s4) calc(var(--s4) + env(safe-area-inset-bottom));
+    padding: var(--s4) var(--s4) max(var(--s4), env(safe-area-inset-bottom));
     gap: var(--s4);
+    overflow: hidden;
   }
   .editor::backdrop { background: var(--scrim); }
-  header {
-    flex: none;
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    align-items: center;
+  :global([data-layout='desktop']) .editor {
+    height: min(calc(100dvh - var(--s15)), calc(var(--reading-max) * .9));
+    max-height: min(calc(100dvh - var(--s15)), calc(var(--reading-max) * .9));
+    padding: var(--s6);
   }
-  header :global(button:nth-child(1)) { justify-self: start; }
-  header :global(button:nth-child(2)) { justify-self: center; }
-  header :global(button:nth-child(3)) { justify-self: end; }
+  .tools {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: var(--s2);
+  }
+  /* Выбранный инструмент выделяется фоном, а не только цветом значка. */
+  .tools > :global(button[aria-pressed='true']) { background: var(--selected); color: var(--accent-link); }
   .stage {
     flex: 1 1 auto;
     min-height: 0;
@@ -512,32 +541,12 @@
     background: var(--scrim);
     color: var(--text);
   }
-  .tools {
-    flex: none;
-    display: flex;
-    justify-content: center;
-    gap: var(--s6);
-  }
-  .tools button {
-    min-height: var(--target);
-    white-space: nowrap;
-    padding: var(--s2) var(--s6);
-    border: var(--s0);
-    border-radius: var(--radius-pill);
-    background: var(--raised);
-    color: var(--text);
-  }
-  .tools button.active,
-  .tools button.active:hover,
-  .tools button.active:active {
-    background: var(--accent);
-    color: var(--accent-ink);
-  }
   .palette {
-    flex: none;
     display: flex;
-    justify-content: center;
-    gap: var(--s6);
+    align-items: center;
+    gap: var(--s2);
+    flex-shrink: 0;
+    margin-inline-start: var(--s2);
   }
   .palette button {
     width: var(--target);
@@ -557,5 +566,11 @@
   .yellow { --swatch: var(--mark-yellow); }
   .green { --swatch: var(--mark-green); }
   .blue { --swatch: var(--mark-blue); }
-  :global([data-layout='desktop']) .editor { padding: var(--s6); }
+  footer {
+    flex: none;
+    display: flex;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: var(--s2);
+  }
 </style>
