@@ -15,6 +15,10 @@ export const icons = {
   down: 'm6 9 6 6 6-6', up: 'm6 15 6-6 6 6', sliders: 'M4 7h9m4 0h3M13 4v6M4 17h3m4 0h9M11 14v6',
   folder: 'M3 6h6l2 3h10v10H3Z', download: 'M12 4v12m-5-5 5 5 5-5M5 20h14', archive: 'M3 5h18v4H3ZM5 9v10h14V9M10 13h4',
   edit: 'M4 20h4L20 8l-4-4L4 16Zm10-14 4 4',
+  // Геометрия `crop` из Lucide (ISC).
+  crop: 'M6 2v14a2 2 0 0 0 2 2h14M18 22V8a2 2 0 0 0-2-2H2',
+  // Геометрия `undo-2` из Lucide (ISC).
+  undo: 'M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11',
   retry: 'M4 12a8 8 0 1 0 2.5-5.8M4 4v5h5',
   clock: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 4v5l3 2',
   // Геометрия `bell` и `bell-off` из Lucide (ISC).

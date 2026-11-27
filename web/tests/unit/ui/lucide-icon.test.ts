@@ -52,7 +52,9 @@ describe('lucide-icon converter', () => {
 describe('registry geometry comes from the pinned Lucide files', () => {
   for (const [file, key] of [
     ['brain', 'brain'],
+    ['crop', 'crop'],
     ['hammer', 'hammer'],
+    ['undo-2', 'undo'],
     ['wifi', 'wifi'],
     ['wifi-off', 'wifiOff']
   ] as const) {
