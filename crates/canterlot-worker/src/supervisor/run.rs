@@ -875,16 +875,13 @@ impl Supervisor {
     fn next_wake(&self) -> Option<Instant> {
         let mut wake: Option<Instant> = None;
         let mut consider = |at: Instant| wake = Some(wake.map_or(at, |current| current.min(at)));
-        match &self.lifecycle {
-            Lifecycle::Stopping(state) => {
-                if self.terminate.is_none() && self.closing.is_none() {
-                    consider(state.next_round);
-                }
-                if let Some(at) = state.escalate_at.filter(|_| !state.force) {
-                    consider(at);
-                }
+        if let Lifecycle::Stopping(state) = &self.lifecycle {
+            if self.terminate.is_none() && self.closing.is_none() {
+                consider(state.next_round);
             }
-            _ => {}
+            if let Some(at) = state.escalate_at.filter(|_| !state.force) {
+                consider(at);
+            }
         }
         if !self.queue.is_empty() && self.faults.gate_held(&self.exec_dir) {
             consider(Instant::now() + Duration::from_millis(25));
