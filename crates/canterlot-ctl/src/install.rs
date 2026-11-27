@@ -843,7 +843,21 @@ pub async fn install(
         }
         HostClass::NativeInstall => return Err(CtlError::NativeInstallFound),
         other => {
-            let version = release::resolve(src, args.version.as_ref()).await?;
+            let version = match &args.from_dir {
+                Some(dir) => {
+                    let found = release::dir_version(dir)?;
+                    if let Some(want) = &args.version
+                        && want != &found
+                    {
+                        return Err(CtlError::Other(format!(
+                            "version_mismatch: --version {want} but {} holds {found}",
+                            dir.display()
+                        )));
+                    }
+                    found
+                }
+                None => release::resolve(src, args.version.as_ref()).await?,
+            };
             let mut rec = OpRecord::new(OpKind::Install, Some(version));
             if other == HostClass::Retained {
                 // База от прежней установки: ожидаемое тождество фиксируется до первого шага.
@@ -906,8 +920,23 @@ pub async fn install(
     if worker_user.is_some() {
         wanted.push(assets.worker.as_str());
     }
-    fsx::ensure_dir(&layout.root, &layout.staging(), 0o700)?;
-    let staged = release::fetch(src, &version, &wanted, &layout.staging()).await?;
+    let (staged, fetched) = match &args.from_dir {
+        Some(dir) => (release::from_dir(dir, &wanted)?, false),
+        None => {
+            fsx::ensure_dir(&layout.root, &layout.staging(), 0o700)?;
+            (
+                release::fetch(src, &version, &wanted, &layout.staging()).await?,
+                true,
+            )
+        }
+    };
+    if staged.version != version {
+        return Err(CtlError::Other(format!(
+            "version_mismatch: {} holds {}, the operation targets {version}",
+            staged.dir.display(),
+            staged.version
+        )));
+    }
     let result = run(
         layout,
         runner,
@@ -921,8 +950,10 @@ pub async fn install(
         warnings,
     )
     .await;
-    // Каталог загрузки создан этим запуском; удаляем его по точному пути.
-    let _ = std::fs::remove_dir_all(&staged.dir);
+    if fetched {
+        // Каталог загрузки создан этим запуском; удаляем его по точному пути.
+        let _ = std::fs::remove_dir_all(&staged.dir);
+    }
     result
 }
 

@@ -81,26 +81,42 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-async fn release_server() -> (ReleaseSource, tokio::task::JoinHandle<()>) {
-    let state = Arc::new(Assets::default());
-    let files: Vec<(String, Vec<u8>)> = vec![
+fn release_files(version: &str) -> Vec<(String, Vec<u8>)> {
+    vec![
         (
-            format!("canterlot-hub-{VERSION}-x86_64-linux-gnu.tar.gz"),
+            format!("canterlot-hub-{version}-x86_64-linux-gnu.tar.gz"),
             tar_gz(&[("canterlot-hub", b"hub")]),
         ),
         (
-            format!("canterlot-worker-{VERSION}-x86_64-linux-gnu.tar.gz"),
+            format!("canterlot-worker-{version}-x86_64-linux-gnu.tar.gz"),
             tar_gz(&[("canterlot-worker", b"worker")]),
         ),
         (
-            format!("canterlot-web-{VERSION}.tar.gz"),
+            format!("canterlot-web-{version}.tar.gz"),
             tar_gz(&[("200.html", b"<html></html>")]),
         ),
         (
-            format!("canterlot-csp-{VERSION}.txt"),
+            format!("canterlot-csp-{version}.txt"),
             b"default-src 'self'; connect-src 'self' wss://chat.example.com\n".to_vec(),
         ),
-    ];
+    ]
+}
+
+/// Каталог выпуска в форме `--from-dir`: те же архивы и контрольные суммы, что раздаёт сервер.
+fn release_dir(dir: &Path, version: &str) {
+    let files = release_files(version);
+    let mut sums = String::new();
+    for (name, body) in &files {
+        let _ = writeln!(sums, "{}  {name}", hex(&Sha256::digest(body)));
+        std::fs::write(dir.join(name), body).unwrap();
+    }
+    std::fs::write(dir.join("SHA256SUMS"), sums).unwrap();
+    std::fs::write(dir.join("RELEASE"), format!("version={version}\n")).unwrap();
+}
+
+async fn release_server() -> (ReleaseSource, tokio::task::JoinHandle<()>) {
+    let state = Arc::new(Assets::default());
+    let files = release_files(VERSION);
     let mut sums = String::new();
     for (name, body) in &files {
         let _ = writeln!(sums, "{}  {name}", hex(&Sha256::digest(body)));
@@ -352,6 +368,60 @@ async fn install_fresh_runs_expected_commands() {
     let json = serde_json::to_value(&report).unwrap();
     assert_eq!(json["hub_version"], VERSION);
     server.abort();
+}
+
+/// Адрес, с которого нельзя скачать ничего: `--from-dir` не должен трогать сеть.
+fn offline_source() -> ReleaseSource {
+    ReleaseSource {
+        api_base: "http://127.0.0.1:9/".parse().unwrap(),
+        download_base: "http://127.0.0.1:9/".parse().unwrap(),
+        repo: "Fenicu/canterlot".into(),
+    }
+}
+
+#[tokio::test]
+async fn install_from_dir_uses_no_network() {
+    let release = tempfile::tempdir().unwrap();
+    release_dir(release.path(), VERSION);
+    let fx = fixture();
+    let mut args = args();
+    args.from_dir = Some(release.path().to_path_buf());
+    install(args, &fx.layout, &fx.runner, &offline_source(), &host())
+        .await
+        .unwrap();
+    assert!(fx.layout.hub_current().join("bin/canterlot-hub").is_file());
+    assert!(fx.layout.web_parent().join("build/200.html").is_file());
+    assert!(
+        fx.layout
+            .worker_current()
+            .join("bin/canterlot-worker")
+            .is_file()
+    );
+    let rec = ops::latest(&fx.layout.ops_dir()).unwrap().unwrap();
+    assert_eq!(rec.target.unwrap().as_str(), VERSION);
+    assert_eq!(rec.result, Some(OpResult::Done));
+    // Каталог выпуска принадлежит пользователю: установка его не удаляет.
+    assert!(release.path().join("SHA256SUMS").is_file());
+}
+
+#[tokio::test]
+async fn install_from_dir_with_bad_checksum_is_refused() {
+    let release = tempfile::tempdir().unwrap();
+    release_dir(release.path(), VERSION);
+    let hub = release
+        .path()
+        .join(format!("canterlot-hub-{VERSION}-x86_64-linux-gnu.tar.gz"));
+    std::fs::write(&hub, b"tampered").unwrap();
+    let fx = fixture();
+    let mut args = args();
+    args.from_dir = Some(release.path().to_path_buf());
+    match install(args, &fx.layout, &fx.runner, &offline_source(), &host()).await {
+        Err(CtlError::ChecksumMismatch(name)) => {
+            assert_eq!(name, hub.file_name().unwrap().to_str().unwrap());
+        }
+        other => panic!("expected checksum_mismatch, got {other:?}"),
+    }
+    assert!(!fx.layout.hub_current().exists());
 }
 
 fn retained(fx: &Fixture) {

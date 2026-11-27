@@ -6,7 +6,7 @@ use std::{
     collections::BTreeMap,
     fmt::Write as _,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -110,6 +110,14 @@ pub fn release_files(version: &str) -> Vec<(String, Vec<u8>)> {
     let mut all = files;
     all.push(("SHA256SUMS".into(), sums.into_bytes()));
     all
+}
+
+/// Каталог выпуска в форме `--from-dir`: архивы и `SHA256SUMS` из того же набора.
+pub fn release_dir(dir: &Path, version: &str) {
+    for (name, body) in release_files(version) {
+        std::fs::write(dir.join(name), body).unwrap();
+    }
+    std::fs::write(dir.join("RELEASE"), format!("version={version}\n")).unwrap();
 }
 
 pub async fn release_server(versions: &[&str]) -> ReleaseSource {

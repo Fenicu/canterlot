@@ -513,9 +513,24 @@ pub async fn join(
     if class == WorkerClass::Installed && !args.replace {
         return Err(CtlError::AlreadyJoined);
     }
-    let version = match &args.version {
-        Some(v) => v.clone(),
-        None => Version::parse(env!("CARGO_PKG_VERSION"))?,
+    // `--from-dir` задаёт версию каталогом; `--version` с ним несовместим в CLI.
+    let version = match &args.from_dir {
+        Some(dir) => {
+            let found = release::dir_version(dir)?;
+            if let Some(want) = &args.version
+                && want != &found
+            {
+                return Err(CtlError::Other(format!(
+                    "version_mismatch: --version {want} but {} holds {found}",
+                    dir.display()
+                )));
+            }
+            found
+        }
+        None => match &args.version {
+            Some(v) => v.clone(),
+            None => Version::parse(env!("CARGO_PKG_VERSION"))?,
+        },
     };
     let mut rec = ops::begin(
         &ops_dir,
@@ -581,21 +596,30 @@ async fn run(
 
     ops::advance(ops_dir, rec, "release")?;
     let assets = release::asset_names(version);
-    let staging = layout.worker_staging();
-    crate::fsx::ensure_dir(home, &staging, 0o700)?;
-    let staged = release::fetch(
-        src,
-        version,
-        &[assets.worker.as_str(), "SHA256SUMS"],
-        &staging,
-    )
-    .await?;
+    let names = [assets.worker.as_str(), "SHA256SUMS"];
+    let (staged, fetched) = match &args.from_dir {
+        Some(dir) => (release::from_dir(dir, &names)?, false),
+        None => {
+            let staging = layout.worker_staging();
+            crate::fsx::ensure_dir(home, &staging, 0o700)?;
+            (release::fetch(src, version, &names, &staging).await?, true)
+        }
+    };
+    if staged.version != *version {
+        return Err(CtlError::Other(format!(
+            "version_mismatch: {} holds {}, the operation targets {version}",
+            staged.dir.display(),
+            staged.version
+        )));
+    }
     let archive = staged
         .files
         .get(&assets.worker)
         .ok_or_else(|| CtlError::AssetMissing(assets.worker.clone()))?;
     let installed = worker::install_release(layout, archive, version);
-    let _ = std::fs::remove_dir_all(&staged.dir);
+    if fetched {
+        let _ = std::fs::remove_dir_all(&staged.dir);
+    }
     installed?;
     crate::fsx::replace_symlink(
         &Path::new("releases").join(version.as_str()),

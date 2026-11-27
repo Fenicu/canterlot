@@ -10,11 +10,12 @@ use canterlot_ctl::{
     error::CtlError,
     join::join,
     layout::Layout,
+    release::ReleaseSource,
     render::render_worker_unit,
     runner::{FakeRunner, Output},
     tls::{new_ca, pin_of},
 };
-use support::{MACHINE, TOKEN, enroll_stub, home_of, host, release_server};
+use support::{MACHINE, TOKEN, enroll_stub, home_of, host, release_dir, release_server};
 
 const VERSION: &str = "1.2.3";
 
@@ -25,6 +26,16 @@ fn args(hub: String, pin: String) -> JoinArgs {
         code: Some("good-code".into()),
         replace: false,
         version: Some(Version::parse(VERSION).unwrap()),
+        from_dir: None,
+    }
+}
+
+/// Адрес, с которого нельзя скачать ничего: `--from-dir` не должен трогать сеть.
+fn offline_source() -> ReleaseSource {
+    ReleaseSource {
+        api_base: "http://127.0.0.1:9/".parse().unwrap(),
+        download_base: "http://127.0.0.1:9/".parse().unwrap(),
+        repo: "Fenicu/canterlot".into(),
     }
 }
 
@@ -194,6 +205,57 @@ async fn join_writes_identity_and_starts_worker() {
         calls.iter().any(|c| c.contains("status --json --config")),
         "{calls:?}"
     );
+}
+
+#[tokio::test]
+async fn join_from_dir_uses_no_network() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = home_of(dir.path());
+    let layout = Layout::new(dir.path().into(), Some(home.clone()));
+    let ca = new_ca().unwrap();
+    let stub = enroll_stub(&ca, &ca, &["127.0.0.1"], "").await;
+    let runner = connected_runner();
+    let release = tempfile::tempdir().unwrap();
+    release_dir(release.path(), VERSION);
+    let mut args = args(stub.addr.to_string(), pin_of(&ca.cert_der));
+    args.version = None;
+    args.from_dir = Some(release.path().to_path_buf());
+    let report = join(&args, &layout, &runner, &offline_source(), &host())
+        .await
+        .unwrap();
+    assert!(stub.joined());
+    assert_eq!(report.version.as_str(), VERSION);
+    assert_eq!(
+        std::fs::read_to_string(home.join(".local/opt/canterlot/current/bin/canterlot-worker"))
+            .unwrap(),
+        format!("worker {VERSION}")
+    );
+    assert!(release.path().join("SHA256SUMS").is_file());
+}
+
+#[tokio::test]
+async fn join_from_dir_with_bad_checksum_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = Layout::new(dir.path().into(), Some(home_of(dir.path())));
+    let ca = new_ca().unwrap();
+    let stub = enroll_stub(&ca, &ca, &["127.0.0.1"], "").await;
+    let runner = connected_runner();
+    let release = tempfile::tempdir().unwrap();
+    release_dir(release.path(), VERSION);
+    let worker = release.path().join(format!(
+        "canterlot-worker-{VERSION}-x86_64-linux-gnu.tar.gz"
+    ));
+    std::fs::write(&worker, b"tampered").unwrap();
+    let mut args = args(stub.addr.to_string(), pin_of(&ca.cert_der));
+    args.version = None;
+    args.from_dir = Some(release.path().to_path_buf());
+    match join(&args, &layout, &runner, &offline_source(), &host()).await {
+        Err(CtlError::ChecksumMismatch(name)) => {
+            assert_eq!(name, worker.file_name().unwrap().to_str().unwrap());
+        }
+        other => panic!("expected checksum_mismatch, got {other:?}"),
+    }
+    assert!(!layout.worker_current().exists());
 }
 
 #[tokio::test]

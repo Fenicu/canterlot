@@ -121,6 +121,9 @@ pub struct InstallArgs {
     pub yes: bool,
     #[arg(long)]
     pub version: Option<Version>,
+    /// Каталог уже скачанного выпуска: сеть не используется, версия берётся из каталога.
+    #[arg(long, conflicts_with = "version")]
+    pub from_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args, Clone, PartialEq)]
@@ -135,6 +138,9 @@ pub struct JoinArgs {
     pub replace: bool,
     #[arg(long)]
     pub version: Option<Version>,
+    /// Каталог уже скачанного выпуска: сеть не используется, версия берётся из каталога.
+    #[arg(long, conflicts_with = "version")]
+    pub from_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Default)]
@@ -193,6 +199,7 @@ mod tests {
                 code: Some("-".into()),
                 replace: false,
                 version: None,
+                from_dir: None,
             })
         );
 
@@ -235,6 +242,62 @@ mod tests {
             Command::Tls(TlsCommand::AddName {
                 name: "hub.example.internal".into()
             })
+        );
+    }
+
+    #[test]
+    fn install_and_join_accept_from_dir_and_conflict_with_version() {
+        let install =
+            Cli::try_parse_from(["canterlot", "install", "--from-dir", "/srv/releases"]).unwrap();
+        match install.command() {
+            Command::Install(args) => {
+                assert_eq!(args.from_dir, Some(PathBuf::from("/srv/releases")));
+            }
+            other => panic!("expected install, got {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "canterlot",
+                "install",
+                "--from-dir",
+                "/srv/releases",
+                "--version",
+                "1.2.3",
+            ])
+            .is_err()
+        );
+
+        let join = Cli::try_parse_from([
+            "canterlot",
+            "join",
+            "--hub",
+            "hub.example.internal:7443",
+            "--pin",
+            "sha256:ab",
+            "--from-dir",
+            "/srv/releases",
+        ])
+        .unwrap();
+        match join.command() {
+            Command::Join(args) => {
+                assert_eq!(args.from_dir, Some(PathBuf::from("/srv/releases")));
+            }
+            other => panic!("expected join, got {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "canterlot",
+                "join",
+                "--hub",
+                "hub.example.internal:7443",
+                "--pin",
+                "sha256:ab",
+                "--from-dir",
+                "/srv/releases",
+                "--version",
+                "1.2.3",
+            ])
+            .is_err()
         );
     }
 
