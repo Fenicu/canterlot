@@ -1843,10 +1843,15 @@ async fn exit_of_a_lost_session_survives_an_ack_the_supervisor_never_saved() {
     let last = fixture.sj().1;
     let journal_text = journal.to_string();
     fixture.faults().drop_next_sj_acks(0);
+    // Воркер узнаёт о фиксации подтверждением или ответом на hello: под нагрузкой поток данных
+    // успевал истечь, пока подтверждения терялись, и после переподключения хаб сообщал курсор
+    // в ответе, а повторять диапазон было уже нечего. Ждём любого из двух путей.
     until("the worker heard the ack of the last record", async || {
-        fixture.faults().acks().iter().any(|ack| {
-            !ack.dropped && ack.range.journal_id == journal_text && ack.range.up_to_seq == last
-        })
+        fixture
+            .faults()
+            .grants()
+            .iter()
+            .any(|grant| grant.journal_id == journal_text && grant.up_to_seq >= last)
     })
     .await;
     assert!(fixture.guard.signal(identities.0, Signal::KILL));
