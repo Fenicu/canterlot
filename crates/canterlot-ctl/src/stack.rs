@@ -46,11 +46,13 @@ pub fn hub_exec(layout: &Layout, args: &[&str]) -> Cmd {
 }
 
 /// Текст команды хаба в контейнере для печати владельцу. Путь compose показывается
-/// как на хосте: корень установки в тестах подменён, в работе это `/`.
+/// как на хосте: корень установки в тестах подменён, в работе это `/`. Каталог compose
+/// доступен только root, поэтому обе подсказки печатаются с `sudo`.
 pub fn hub_hint(layout: &Layout, args: &[&str]) -> String {
     let file = layout.compose_dir().join("compose.yaml");
     let host_file = Path::new("/").join(file.strip_prefix(&layout.root).unwrap_or(&file));
     let mut parts = vec![
+        "sudo".to_owned(),
         "docker".to_owned(),
         "compose".into(),
         "-f".into(),

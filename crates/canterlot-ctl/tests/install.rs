@@ -362,6 +362,13 @@ async fn install_fresh_runs_expected_commands() {
     assert!(text.contains("https://192.0.2.10"));
     assert!(text.contains("/recover#test"));
     assert!(text.contains("passkeys"), "self-signed caveats: {text}");
+    assert_eq!(
+        report.add_machine,
+        "sudo docker compose -f /etc/canterlot/compose/compose.yaml exec hub \
+         /opt/canterlot/hub/current/bin/canterlot-hub machine join-code \
+         --config /etc/canterlot/hub/hub.toml --name <machine name>",
+        "{text}"
+    );
     let rec = ops::latest(&fx.layout.ops_dir()).unwrap().unwrap();
     assert_eq!(rec.result, Some(OpResult::Done));
     assert_eq!(rec.db_identity.unwrap().installation_id.to_string(), IDS[1]);

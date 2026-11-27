@@ -56,7 +56,7 @@ curl -fsSL https://github.com/Fenicu/canterlot/releases/latest/download/install.
 
 ### Добавить машину
 
-Другую машину добавляет код привязки: его выдаёт хаб командой `canterlot-hub machine join-code --name <имя>`. Хаб печатает строку
+Другую машину добавляет код привязки: на хосте хаба его выдаёт команда из подсказки установщика — `sudo docker compose -f /etc/canterlot/compose/compose.yaml exec hub /opt/canterlot/hub/current/bin/canterlot-hub machine join-code --config /etc/canterlot/hub/hub.toml --name <имя>`. Каталог compose доступен только root, поэтому команда начинается с `sudo`. Хаб печатает строку
 
 ```bash
 curl -fsSL <адрес выпуска>/install.sh | bash -s -- join --hub <адрес gRPC> --pin sha256:<отпечаток УЦ>
