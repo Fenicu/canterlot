@@ -15,13 +15,18 @@ workspace = true
 
 [dependencies]
 async-trait = "0.1.92"
+canterlot-proto = { path = "../canterlot-proto" }
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.7", features = ["derive"] }
 flate2 = "1.1.11"
 getrandom = "0.4.3"
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+pem = "4.0.0"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem", "crypto", "x509-parser"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
 rustix = { version = "1.1.6", features = ["fs", "process"] }
+# Только ring: тот же провайдер, что у tonic с tls-ring во всём рабочем пространстве.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
@@ -29,7 +34,10 @@ tar = "0.4.44"
 thiserror = "2.0.21"
 time = "0.3.55"
 tokio = { version = "1.54.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = { version = "0.26.6", default-features = false }
+tonic = { version = "0.14.6", features = ["tls-ring"] }
 toml = "1.1.8"
+tower = { version = "0.5.3", features = ["util"] }
 url = "2.5.8"
 uuid = { version = "1.29.0", features = ["v7", "serde"] }
 x509-parser = "0.18.1"
@@ -37,5 +45,6 @@ x509-parser = "0.18.1"
 [dev-dependencies]
 axum = "0.8.9"
 tempfile = "3.27.0"
+tokio-stream = { version = "0.1.19", features = ["net"] }
 x509-parser = { version = "0.18.1", features = ["verify"] }
 tokio = { version = "1.54.1", features = ["net", "test-util"] }

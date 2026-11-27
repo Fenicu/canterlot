@@ -7,12 +7,25 @@ use canterlot_ctl::{
     cli::{Cli, Command},
     error::CtlError,
     install::{Host, install},
+    join::join,
     layout::Layout,
+    ops::OpResult,
     release::ReleaseSource,
     runner::SystemRunner,
     status::status,
+    uninstall::uninstall,
+    worker::WorkerHost,
+    worker_update::update_worker,
 };
 use clap::Parser;
+
+/// Пути воркера — от домашнего каталога того, кто запустил утилиту.
+fn user_layout() -> Layout {
+    Layout::new(
+        PathBuf::from("/"),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+}
 
 fn main() {
     let cli = Cli::parse();
@@ -56,10 +69,44 @@ async fn run(cli: Cli) -> Result<(), CtlError> {
             }
             Ok(())
         }
-        Command::Join(_) => Err(CtlError::NotImplemented("join")),
+        Command::Join(args) => {
+            let report = join(
+                &args,
+                &user_layout(),
+                &runner,
+                &ReleaseSource::default(),
+                &WorkerHost::from_env(),
+            )
+            .await?;
+            print!("{report}");
+            Ok(())
+        }
         Command::Adopt => Err(CtlError::NotImplemented("adopt")),
-        Command::Update(_) => Err(CtlError::NotImplemented("update")),
-        Command::Uninstall(_) => Err(CtlError::NotImplemented("uninstall")),
+        Command::Update(args) => {
+            if rustix::process::geteuid().is_root() {
+                return Err(CtlError::NotImplemented("update on the hub host"));
+            }
+            let result = update_worker(
+                &args,
+                &user_layout(),
+                &runner,
+                &ReleaseSource::default(),
+                &WorkerHost::from_env(),
+            )
+            .await?;
+            match result {
+                OpResult::Done => {
+                    println!("worker update finished");
+                    Ok(())
+                }
+                other => Err(CtlError::Other(format!("worker update: {other:?}"))),
+            }
+        }
+        Command::Uninstall(args) => {
+            let report = uninstall(&args, &user_layout(), &runner, &WorkerHost::from_env()).await?;
+            print!("{report}");
+            Ok(())
+        }
         Command::Tls(_) => Err(CtlError::NotImplemented("tls add-name")),
         Command::HostAgent => Err(CtlError::NotImplemented("host-agent")),
     }

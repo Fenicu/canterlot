@@ -88,6 +88,44 @@ pub enum CtlError {
     BadOutput(String),
     #[error("cancelled")]
     Cancelled,
+    #[error(
+        "already_joined: this account already runs a canterlot worker; pass --replace to join again with a new code"
+    )]
+    AlreadyJoined,
+    #[error("bad_hub_address: {0} (expected host:port)")]
+    BadHubAddress(String),
+    #[error("hub_unreachable: {0}")]
+    HubUnreachable(String),
+    #[error(
+        "pin_mismatch: the hub presented CA {got}, the command expects {want}; the code was not sent"
+    )]
+    PinMismatch { want: String, got: String },
+    #[error(
+        "san_mismatch: the hub certificate does not name {host}; on the hub host run `canterlot tls add-name {host}` or join with an address the certificate names; the code was not sent"
+    )]
+    SanMismatch { host: String },
+    #[error("tls_untrusted: {0}; the code was not sent")]
+    TlsUntrusted(String),
+    #[error("join_refused: {0}")]
+    JoinRefused(String),
+    #[error(
+        "hub_older_than_target: the hub runs {hub}, the worker update targets {target}; update the hub first or pass --force"
+    )]
+    HubOlderThanTarget { hub: String, target: String },
+    #[error(
+        "hub_version_unknown: the worker is not connected to a hub that reports its version; pass --force to update anyway"
+    )]
+    HubVersionUnknown,
+    #[error("downgrade_refused: installed {current}, requested {target}")]
+    DowngradeRefused { current: String, target: String },
+    #[error("supervisor_binary_missing: {0}")]
+    SupervisorBinaryMissing(String),
+    #[error(
+        "sessions_alive: {0} live session(s) run on this worker; stop them first or pass --force"
+    )]
+    SessionsAlive(usize),
+    #[error("confirmation_mismatch: the typed name does not match this host ({0})")]
+    ConfirmationMismatch(String),
     #[error("{0}")]
     Other(String),
 }

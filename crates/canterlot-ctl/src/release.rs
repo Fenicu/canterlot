@@ -185,7 +185,10 @@ fn version_in_dir(dir: &Path, assets: &[&str]) -> Result<Version, CtlError> {
         return Version::parse(&parsed.version);
     }
     for name in assets {
-        if let Some(rest) = name.strip_prefix("canterlot-hub-")
+        // Машине воркера нужен только его архив: версия читается и из его имени.
+        if let Some(rest) = name
+            .strip_prefix("canterlot-hub-")
+            .or_else(|| name.strip_prefix("canterlot-worker-"))
             && let Some(version) = rest.split("-x86_64").next()
         {
             return Version::parse(version);

@@ -123,6 +123,38 @@ impl Layout {
     pub fn worker_ops_dir(&self) -> PathBuf {
         self.home().join(".local/state/canterlot-ctl/ops")
     }
+
+    /// Всё, что ставит утилита у воркера: релизы, ссылки и копии самой утилиты.
+    pub fn worker_opt(&self) -> PathBuf {
+        self.home().join(".local/opt/canterlot")
+    }
+
+    pub fn worker_releases(&self) -> PathBuf {
+        self.worker_opt().join("releases")
+    }
+
+    pub fn worker_previous(&self) -> PathBuf {
+        self.worker_opt().join("previous")
+    }
+
+    pub fn worker_ctl(&self, v: &Version) -> PathBuf {
+        self.worker_opt()
+            .join("ctl")
+            .join(v.as_str())
+            .join("canterlot")
+    }
+
+    pub fn worker_ctl_link(&self) -> PathBuf {
+        self.home().join(".local/bin/canterlot")
+    }
+
+    pub fn worker_data_dir(&self) -> PathBuf {
+        self.home().join(".local/state/canterlot-worker")
+    }
+
+    pub fn worker_staging(&self) -> PathBuf {
+        self.home().join(".local/state/canterlot-ctl/staging")
+    }
 }
 
 #[cfg(test)]
