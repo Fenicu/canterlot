@@ -144,6 +144,28 @@ fn opt(value: &Option<String>) -> &str {
     value.as_deref().unwrap_or("-")
 }
 
+fn kind(kind: OpKind) -> &'static str {
+    match kind {
+        OpKind::Install => "install",
+        OpKind::Adopt => "adopt",
+        OpKind::Update => "update",
+        OpKind::Uninstall => "uninstall",
+        OpKind::TlsAddName => "tls add name",
+    }
+}
+
+fn outcome(result: &Option<OpResult>) -> String {
+    match result {
+        None => "in progress".into(),
+        Some(OpResult::Done) => "done".into(),
+        Some(OpResult::FailedBeforeChange { reason }) => {
+            format!("failed before change: {reason}")
+        }
+        Some(OpResult::RolledBack { reason }) => format!("rolled back: {reason}"),
+        Some(OpResult::NeedsOwner { .. }) => "needs owner".into(),
+    }
+}
+
 impl fmt::Display for StatusReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if !self.installed && self.hub_version.is_none() && self.worker_version.is_none() {
@@ -171,8 +193,8 @@ impl fmt::Display for StatusReport {
             if let Some(op) = op {
                 writeln!(
                     f,
-                    "{label}: {:?} {} {} (phase {})",
-                    op.kind,
+                    "{label}: {} {} {} (phase {})",
+                    kind(op.kind),
                     opt(&op.target),
                     op.id,
                     op.phase
@@ -182,11 +204,11 @@ impl fmt::Display for StatusReport {
         if let Some(op) = &self.last {
             writeln!(
                 f,
-                "last: {:?} {} {}: {:?}",
-                op.kind,
+                "last: {} {} {}: {}",
+                kind(op.kind),
                 opt(&op.target),
                 op.id,
-                op.result
+                outcome(&op.result)
             )?;
         }
         Ok(())
@@ -204,6 +226,61 @@ mod tests {
         let array = "[{\"Service\":\"hub\",\"State\":\"running\"}]";
         assert_eq!(parse_services(array).unwrap()[0].state, "running");
         assert!(parse_services("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn status_prints_results_in_plain_words() {
+        let summary = |result| OpSummary {
+            id: "00000000-0000-7000-8000-000000000009".into(),
+            kind: OpKind::Update,
+            target: Some("1.2.3".into()),
+            phase: "candidate".into(),
+            result,
+        };
+        let report = StatusReport {
+            installed: true,
+            components: Components::default(),
+            tls: None,
+            origin: None,
+            grpc_endpoint: None,
+            hub_version: None,
+            web_version: None,
+            worker_version: None,
+            services: Vec::new(),
+            services_error: None,
+            running: Some(summary(None)),
+            last: Some(summary(Some(OpResult::RolledBack {
+                reason: "probe failed".into(),
+            }))),
+            worker_running: None,
+        };
+        let text = report.to_string();
+        assert!(text.contains("running: update"), "{text}");
+        assert!(text.contains("last: update"), "{text}");
+        assert!(text.contains("rolled back: probe failed"), "{text}");
+        assert!(!text.contains("RolledBack"), "{text}");
+        assert!(!text.contains("Some("), "{text}");
+
+        for (result, words) in [
+            (Some(OpResult::Done), "done"),
+            (
+                Some(OpResult::FailedBeforeChange {
+                    reason: "bad csp".into(),
+                }),
+                "failed before change: bad csp",
+            ),
+            (Some(OpResult::NeedsOwner { steps: vec![] }), "needs owner"),
+        ] {
+            let text = StatusReport {
+                last: Some(summary(result)),
+                ..report.clone()
+            }
+            .to_string();
+            assert!(text.contains(words), "{text}");
+        }
+        // --json печатает ту же структуру, без человеческого форматирования.
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["last"]["result"]["RolledBack"]["reason"], "probe failed");
     }
 
     #[tokio::test]
