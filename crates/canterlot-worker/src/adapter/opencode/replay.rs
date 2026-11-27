@@ -437,6 +437,33 @@ fn broadcast(state: &mut State, bytes: &[u8]) {
         .retain(|subscriber| subscriber.send(bytes.to_vec()).is_ok());
 }
 
+/// Мгновенные шаги (события, кадры, обрыв потока) выполняются под тем же замком, что и
+/// сдвиг позиции. Иначе запрос, вызванный только что отданным событием, под нагрузкой
+/// заставал позицию на этом событии: ожидаемый шаг не совпадал, и ответ уходил чужой.
+/// Запрос сам догоняет такие шаги перед сверкой: в записи они шли раньше него.
+fn run_instant(state: &mut State, pid: u32) {
+    loop {
+        match state.steps.get(state.pos) {
+            Some(Step::Emit { events }) => {
+                let frames: Vec<Vec<u8>> = events
+                    .iter()
+                    .map(|event| frame(&substitute(event, &state.table, pid)))
+                    .collect();
+                for bytes in frames {
+                    broadcast(state, &bytes);
+                }
+            }
+            Some(Step::Frame { raw }) => {
+                let bytes = raw.clone().into_bytes();
+                broadcast(state, &bytes);
+            }
+            Some(Step::DropSse) => state.subscribers.clear(),
+            _ => return,
+        }
+        state.pos += 1;
+    }
+}
+
 async fn run_steps(shared: Arc<Shared>) {
     loop {
         let step = {
@@ -449,18 +476,11 @@ async fn run_steps(shared: Arc<Shared>) {
                 shared.wake.notified().await;
                 continue;
             }
-            Step::Emit { events } => {
-                let mut state = shared.state.lock().unwrap();
-                for event in events {
-                    let event = substitute(&event, &state.table, shared.pid);
-                    broadcast(&mut state, &frame(&event));
-                }
-            }
-            Step::Frame { raw } => {
-                broadcast(&mut shared.state.lock().unwrap(), raw.as_bytes());
+            Step::Emit { .. } | Step::Frame { .. } | Step::DropSse => {
+                run_instant(&mut shared.state.lock().unwrap(), shared.pid);
+                continue;
             }
             Step::Stall { ms } => tokio::time::sleep(Duration::from_millis(ms)).await,
-            Step::DropSse => shared.state.lock().unwrap().subscribers.clear(),
             Step::AwaitSubscription { count } => {
                 if shared.state.lock().unwrap().subscriptions < count {
                     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -670,6 +690,7 @@ fn plan_reply(shared: &Shared, request: &Request) -> (Reply, Vec<u8>, bool) {
         return (reply, bytes, false);
     }
     let mut state = shared.state.lock().unwrap();
+    run_instant(&mut state, shared.pid);
     let table = state.table.clone();
     let matched = match state.steps.get(state.pos) {
         Some(Step::Expect {
