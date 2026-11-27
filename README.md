@@ -3,7 +3,7 @@
 <p align="center">
 
 [![GitHub](https://img.shields.io/badge/GitHub-Fenicu%2Fcanterlot-brightgreen?logo=github)](https://github.com/Fenicu/canterlot)
-![версия](https://img.shields.io/badge/%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F-1.54.1-00f4ee)
+![версия](https://img.shields.io/badge/%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F-1.54.2-00f4ee)
 [![история](https://img.shields.io/badge/%D0%B8%D1%81%D1%82%D0%BE%D1%80%D0%B8%D1%8F-CHANGES.rst-6c757d)](CHANGES.rst)
 [![лицензия](https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-MIT-blue)](LICENSE)
 ![агенты](https://img.shields.io/badge/%D0%B0%D0%B3%D0%B5%D0%BD%D1%82%D1%8B-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20OpenCode-1f5457)
@@ -88,6 +88,6 @@ Canterlot — self-hosted хаб для агентов программиров�
 
 ## Версия и лицензия
 
-Текущая версия — 1.54.1. История изменений — [CHANGES.rst](CHANGES.rst).
+Текущая версия — 1.54.2. История изменений — [CHANGES.rst](CHANGES.rst).
 
 Canterlot распространяется по лицензии MIT, текст — [LICENSE](LICENSE). Сторонние зависимости и их лицензии — [docs/licenses/THIRD_PARTY.md](docs/licenses/THIRD_PARTY.md).
