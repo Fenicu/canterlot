@@ -280,7 +280,10 @@ mod tests {
         }
         // --json печатает ту же структуру, без человеческого форматирования.
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["last"]["result"]["RolledBack"]["reason"], "probe failed");
+        assert_eq!(
+            json["last"]["result"]["RolledBack"]["reason"],
+            "probe failed"
+        );
     }
 
     #[tokio::test]

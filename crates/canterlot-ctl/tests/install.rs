@@ -1,5 +1,7 @@
 //! Установка на FakeRunner: проверяется последовательность команд и файлы во временном
 //! корне. Ни Docker, ни systemd, ни сеть не трогаются; релиз раздаёт локальный сервер.
+// Ошибки утилиты несут запись операции, как и в самой библиотеке.
+#![allow(clippy::result_large_err)]
 
 use std::{
     collections::BTreeMap,
@@ -432,9 +434,7 @@ async fn install_from_dir_with_bad_checksum_is_refused() {
 async fn install_refuses_bad_csp_before_creating_files() {
     let release = tempfile::tempdir().unwrap();
     release_dir(release.path(), VERSION);
-    let csp = release
-        .path()
-        .join(format!("canterlot-csp-{VERSION}.txt"));
+    let csp = release.path().join(format!("canterlot-csp-{VERSION}.txt"));
     let bad = b"default-src 'self'; connect-src 'self' wss://hub.example.internal\n".to_vec();
     std::fs::write(&csp, &bad).unwrap();
     // Контрольные суммы пересчитаны: отказ должен быть именно из-за CSP.
@@ -462,7 +462,11 @@ async fn install_refuses_bad_csp_before_creating_files() {
         fx.layout.root.join("opt/canterlot"),
         fx.layout.ctl_link(),
     ] {
-        assert!(!path.exists(), "created before the CSP check: {}", path.display());
+        assert!(
+            !path.exists(),
+            "created before the CSP check: {}",
+            path.display()
+        );
     }
 }
 
@@ -585,9 +589,15 @@ async fn failed_install_keeps_created_paths_for_a_retry() {
 
     let mut retry_args = args();
     retry_args.from_dir = Some(good.path().to_path_buf());
-    install(retry_args, &fx.layout, &fx.runner, &offline_source(), &host())
-        .await
-        .unwrap();
+    install(
+        retry_args,
+        &fx.layout,
+        &fx.runner,
+        &offline_source(),
+        &host(),
+    )
+    .await
+    .unwrap();
     let created = relative_created(&fx);
     for want in [
         "etc/canterlot",
@@ -596,7 +606,9 @@ async fn failed_install_keeps_created_paths_for_a_retry() {
         "opt/canterlot",
     ] {
         assert!(
-            created.iter().any(|p| p == Path::new(want) || p.starts_with(want)),
+            created
+                .iter()
+                .any(|p| p == Path::new(want) || p.starts_with(want)),
             "{want} missing from {created:#?}"
         );
     }
@@ -604,9 +616,15 @@ async fn failed_install_keeps_created_paths_for_a_retry() {
     let clean = fixture();
     let mut clean_args = args();
     clean_args.from_dir = Some(good.path().to_path_buf());
-    install(clean_args, &clean.layout, &clean.runner, &offline_source(), &host())
-        .await
-        .unwrap();
+    install(
+        clean_args,
+        &clean.layout,
+        &clean.runner,
+        &offline_source(),
+        &host(),
+    )
+    .await
+    .unwrap();
     assert_eq!(created, relative_created(&clean), "different created_paths");
 }
 
@@ -624,18 +642,17 @@ async fn purge_cleans_a_fresh_install_completely() {
         purge: true,
         ..UninstallArgs::default()
     };
-    let report = uninstall_hub(
-        &purge,
-        &fx.layout,
-        &fx.runner,
-        &host(),
-        &mut |_| Ok("workstation".to_owned()),
-    )
+    let report = uninstall_hub(&purge, &fx.layout, &fx.runner, &host(), &mut |_| {
+        Ok("workstation".to_owned())
+    })
     .await
     .unwrap();
     assert!(report.succeeded(), "{report}");
     let text = report.to_string();
-    assert!(!text.contains("`canterlot uninstall --purge` deletes it"), "{text}");
+    assert!(
+        !text.contains("`canterlot uninstall --purge` deletes it"),
+        "{text}"
+    );
     for path in [
         fx.layout.root.join("etc/canterlot"),
         fx.layout.root.join("var/lib/canterlot"),

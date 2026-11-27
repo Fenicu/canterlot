@@ -262,7 +262,12 @@ async fn join_does_not_warn_about_linger_when_it_is_on() {
         !text.contains("the worker stops when you log out"),
         "{text}"
     );
-    assert!(calls.iter().any(|c| c.contains("show-user worker -p Linger")), "{calls:?}");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("show-user worker -p Linger")),
+        "{calls:?}"
+    );
 }
 
 #[tokio::test]

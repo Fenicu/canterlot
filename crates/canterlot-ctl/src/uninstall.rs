@@ -412,7 +412,10 @@ pub async fn uninstall_hub(
                     out.status,
                     String::from_utf8_lossy(&out.stderr)
                 ));
-                Some(format!("worker uninstall as {user} exited with {}", out.status))
+                Some(format!(
+                    "worker uninstall as {user} exited with {}",
+                    out.status
+                ))
             }
             Err(err) => {
                 report.worker = Some(format!(
@@ -429,7 +432,9 @@ pub async fn uninstall_hub(
                 OpResult::NeedsOwner {
                     steps: vec![
                         reason,
-                        format!("Run `canterlot uninstall` as {user}, then repeat the hub uninstall."),
+                        format!(
+                            "Run `canterlot uninstall` as {user}, then repeat the hub uninstall."
+                        ),
                     ],
                 },
             )?;

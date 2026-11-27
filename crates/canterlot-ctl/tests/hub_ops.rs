@@ -207,7 +207,11 @@ async fn purge_skips_adopted_dirs() {
         "{report:?}"
     );
     assert!(!report.succeeded());
-    assert!(!report.to_string().contains("`canterlot uninstall --purge` deletes it"));
+    assert!(
+        !report
+            .to_string()
+            .contains("`canterlot uninstall --purge` deletes it")
+    );
     assert!(!l.hub_data().exists());
     assert!(!l.backups().exists());
 }
@@ -407,7 +411,10 @@ async fn uninstall_hub_reports_worker_failure_and_is_not_successful() {
     .unwrap();
     assert!(!report.succeeded(), "{report}");
     assert!(report.to_string().contains("worker uninstall exploded"));
-    assert!(fx.layout.ctl_link().exists(), "the utility is needed for a retry");
+    assert!(
+        fx.layout.ctl_link().exists(),
+        "the utility is needed for a retry"
+    );
     assert!(
         InstallState::load(&fx.layout)
             .unwrap()

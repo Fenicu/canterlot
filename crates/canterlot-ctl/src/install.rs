@@ -715,7 +715,12 @@ async fn machine_active(runner: &dyn Runner, layout: &Layout, id: Uuid) -> Resul
     let sql = format!(
         "select count(*) from machine_credentials where machine_id = '{id}' and revoked_at is null;\n"
     );
-    let out = run_ok(runner, "psql machine credentials", psql(layout, "canterlot", &sql)).await?;
+    let out = run_ok(
+        runner,
+        "psql machine credentials",
+        psql(layout, "canterlot", &sql),
+    )
+    .await?;
     Ok(stdout(&out) != "0")
 }
 
