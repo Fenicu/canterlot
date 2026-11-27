@@ -8,6 +8,7 @@ pub mod cli;
 pub mod db;
 pub mod error;
 pub mod fsx;
+pub mod hub_update;
 pub mod identity;
 pub mod install;
 pub mod join;
