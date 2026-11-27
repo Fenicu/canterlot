@@ -3931,3 +3931,189 @@ async fn redelivered_cancel_after_restart_cancels_once() {
     env.stop().await;
     assert_eq!(env.stored_commands().await, 0, "nothing stays in the inbox");
 }
+
+/// Поддельный logind для стока выключения: сигнал из канала, отпущенная задержка — в канал.
+/// К системной шине тест не подключается.
+struct FakeLogind {
+    signals: mpsc::UnboundedReceiver<bool>,
+    released: mpsc::UnboundedSender<()>,
+    delay: Duration,
+}
+
+struct ReleaseOnDrop(mpsc::UnboundedSender<()>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
+#[async_trait::async_trait]
+impl canterlot_worker::shutdown::Logind for FakeLogind {
+    async fn inhibit(
+        &mut self,
+    ) -> Result<canterlot_worker::shutdown::InhibitLock, canterlot_worker::shutdown::LogindError>
+    {
+        Ok(canterlot_worker::shutdown::InhibitLock::new(ReleaseOnDrop(
+            self.released.clone(),
+        )))
+    }
+
+    async fn delay(&mut self) -> Result<Duration, canterlot_worker::shutdown::LogindError> {
+        Ok(self.delay)
+    }
+
+    async fn next_signal(&mut self) -> Option<bool> {
+        self.signals.recv().await
+    }
+}
+
+/// Сток выключения над менеджером теста: сигнал `true` уже отправлен.
+fn shutdown_signalled(
+    env: &Env,
+    delay: Duration,
+) -> (
+    mpsc::UnboundedSender<bool>,
+    mpsc::UnboundedReceiver<()>,
+    tokio::sync::watch::Sender<bool>,
+) {
+    let (signals, signal_rx) = mpsc::unbounded_channel();
+    let (released_tx, released) = mpsc::unbounded_channel();
+    let (stop, stop_rx) = tokio::sync::watch::channel(false);
+    env.manager().set_hub_shutdown_stop(true);
+    tokio::spawn(canterlot_worker::shutdown::run(
+        FakeLogind {
+            signals: signal_rx,
+            released: released_tx,
+            delay,
+        },
+        env.manager().shutdown_drain(),
+        stop_rx,
+    ));
+    signals.send(true).unwrap();
+    (signals, released, stop)
+}
+
+fn stopped_for_shutdown(bodies: &[Body]) -> bool {
+    bodies.iter().any(|b| {
+        matches!(b, Body::ExecutionState(f) if f.state == "stopped" && f.outcome == "machine_shutdown")
+    })
+}
+
+/// Выключение машины: живое исполнение останавливается с итогом `machine_shutdown`, а
+/// когда хаб подтвердил итог и каталог убран, сток сходится.
+#[tokio::test]
+async fn machine_shutdown_stops_a_live_execution_and_settles() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let stopping = env.manager().machine_shutdown(Duration::from_secs(3)).await;
+    assert_eq!(stopping, vec![env.execution]);
+    env.wait("stopped(machine_shutdown)", stopped_for_shutdown)
+        .await;
+    env.wait("closed", |b| {
+        b.iter().any(|x| matches!(x, Body::JournalClosed(_)))
+    })
+    .await;
+    timeout(WAIT, env.manager().wait_shutdown_settled(&stopping))
+        .await
+        .expect("settled once the hub confirmed the exit");
+    env.assert_released("machine_shutdown").await;
+}
+
+/// Старт во время выключения не запускает процесс: команда ждёт в хранилище и идёт
+/// дальше, когда выключение отменено.
+#[tokio::test]
+async fn a_start_during_shutdown_waits_until_the_shutdown_is_cancelled() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    assert!(
+        env.manager()
+            .machine_shutdown(Duration::from_secs(3))
+            .await
+            .is_empty()
+    );
+    env.start(1).await;
+    // Принятый старт заводит запись исполнения ещё до ответа `handle`; придержанный — нет.
+    assert!(env.manager().observations().is_empty(), "start held");
+    assert_eq!(env.stored_commands().await, 1, "the start stays stored");
+    env.manager().release_held_starts().await.unwrap();
+    env.wait_running().await;
+    env.stop().await;
+}
+
+/// Придержанный старт переживает выключение: после загрузки его запускает обычная сверка
+/// хранилища, это и есть пробуждение сессии.
+#[tokio::test]
+async fn a_held_start_runs_after_the_worker_comes_back() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.manager().machine_shutdown(Duration::from_secs(3)).await;
+    env.start(1).await;
+    // Принятый старт заводит запись исполнения ещё до ответа `handle`; придержанный — нет.
+    assert!(env.manager().observations().is_empty(), "start held");
+    env.close_manager().await;
+    env.reopen();
+    env.hub_session();
+    env.manager().startup_verify().await.unwrap();
+    env.wait_running().await;
+    env.stop().await;
+}
+
+/// Хаб не подтверждает итог: задержка выключения всё равно отпускается в срок, хотя
+/// исполнение так и не убрано.
+#[tokio::test]
+async fn the_shutdown_delay_is_released_on_time_when_the_hub_never_acks() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    env.auto_ack = false;
+    let (_signals, mut released, _stop) = shutdown_signalled(&env, Duration::from_secs(2));
+    let released = timeout(WAIT, async {
+        loop {
+            tokio::select! {
+                released = released.recv() => return released,
+                _ = env.pump(Duration::from_millis(50)) => {}
+            }
+        }
+    })
+    .await
+    .expect("the delay is released by the deadline");
+    assert_eq!(released, Some(()));
+    // Под нагрузкой итог может дойти и после срока; подтверждения от хаба всё равно нет.
+    env.wait("stopped(machine_shutdown)", stopped_for_shutdown)
+        .await;
+    assert_ne!(
+        env.ownership(env.execution).await.unwrap().phase,
+        OwnershipPhase::Released as i32,
+        "nothing was confirmed, yet the delay went"
+    );
+    env.auto_ack = true;
+    env.wait("closed", |b| {
+        b.iter().any(|x| matches!(x, Body::JournalClosed(_)))
+    })
+    .await;
+}
+
+/// Сопровождение не отвечает (остановлено SIGSTOP): задержка всё равно отпускается в срок.
+#[tokio::test]
+async fn the_shutdown_delay_is_released_on_time_when_a_supervisor_never_answers() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    let supervisor = (record.supervisor_pid, record.supervisor_start_ticks);
+    assert!(env.guard.signal(supervisor, rustix::process::Signal::STOP));
+    let (_signals, mut released, _stop) = shutdown_signalled(&env, Duration::from_secs(2));
+    let released = timeout(WAIT, released.recv())
+        .await
+        .expect("the delay is released by the deadline");
+    assert_eq!(released, Some(()));
+    assert!(env.guard.signal(supervisor, rustix::process::Signal::CONT));
+    // Остановка уже лежит в сокете, срок вышел: сопровождение добивает группу сразу.
+    env.wait("stopped(machine_shutdown)", stopped_for_shutdown)
+        .await;
+}

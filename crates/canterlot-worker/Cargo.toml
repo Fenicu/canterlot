@@ -48,6 +48,8 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter"] }
 url = "2.5.8"
 uuid = { version = "1.29.0", features = ["v5", "v7", "serde"] }
+# Задержка выключения у systemd-logind (`shutdown.rs`); только клиент, свой рантайм не нужен.
+zbus = { version = "6.3.0", default-features = false, features = ["proxy", "tokio"] }
 
 [dev-dependencies]
 canterlot-hub = { path = "../canterlot-hub", features = ["testkit"] }

@@ -8,8 +8,8 @@ use std::{
 
 use canterlot_proto::{
     limits::{
-        IPC_CAP_COMPACT, IPC_CAP_GOALS, IPC_CAP_GUARDED_INTERRUPT, IPC_CAP_STEER,
-        IPC_PROTOCOL_VERSION,
+        IPC_CAP_COMPACT, IPC_CAP_GOALS, IPC_CAP_GUARDED_INTERRUPT, IPC_CAP_SHUTDOWN_STOP,
+        IPC_CAP_STEER, IPC_PROTOCOL_VERSION,
     },
     worker::{
         ipc::{
@@ -84,6 +84,11 @@ pub(crate) enum Msg {
     AgentCallDone {
         call_id: Uuid,
         result: crate::adapter::AgentCallResult,
+    },
+    /// Машина выключается: остановить сопровождение со сроком. Ответ — ушла ли остановка.
+    MachineShutdown {
+        deadline: Duration,
+        reply: tokio::sync::oneshot::Sender<bool>,
     },
 }
 
@@ -2336,6 +2341,23 @@ impl Actor {
 
     async fn on_msg(&mut self, message: Msg) -> Result<(), ExecError> {
         match message {
+            Msg::MachineShutdown { deadline, reply } => {
+                let live = self.link.is_some() && !self.finished;
+                let sent = live
+                    && self.ipc_caps.contains(IPC_CAP_SHUTDOWN_STOP)
+                    && self
+                        .send(down::Msg::Stop(StopRequest {
+                            machine_shutdown: true,
+                            deadline_ms: u32::try_from(deadline.as_millis()).unwrap_or(u32::MAX),
+                            ..Default::default()
+                        }))
+                        .await;
+                if live && !sent {
+                    tracing::info!(execution_id = %self.id, kind = "machine_shutdown_skipped", "supervisor cannot stop for shutdown; left to systemd");
+                }
+                let _ = reply.send(sent);
+                Ok(())
+            }
             Msg::Command(command) => self.on_command(command).await,
             Msg::SjAck(up_to) => self.on_ack(up_to).await,
             Msg::Replay(committed) => {

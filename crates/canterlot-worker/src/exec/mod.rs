@@ -346,6 +346,13 @@ pub(crate) struct Shared {
     pub strip_caps: Mutex<bool>,
     /// Сколько раз актор исполнения уже поднимали заново после ошибки.
     pub actor_restarts: Mutex<HashMap<Uuid, u32>>,
+    /// Машина выключается: новые старты ждут следующей загрузки (или отмены выключения).
+    pub machine_shutdown: AtomicBool,
+    /// Старты, пришедшие во время выключения. Команды остаются в хранилище
+    /// неподтверждёнными, поэтому после загрузки их запускает обычная сверка.
+    pub held_starts: Mutex<Vec<Command>>,
+    /// Хаб последнего рукопожатия принимает `stopped(machine_shutdown)`.
+    pub hub_shutdown_stop: AtomicBool,
     #[cfg(feature = "fault-injection")]
     pub fail_actor: Mutex<usize>,
     #[cfg(feature = "fault-injection")]
@@ -619,13 +626,131 @@ pub struct ExecutionManager {
     shutdown: watch::Sender<bool>,
 }
 
+/// Менеджер над тем же общим состоянием для стока выключения. Свой канал остановки у него
+/// пустой: его `Drop` не останавливает акторов настоящего менеджера.
+struct ShutdownDrain {
+    shared: Arc<Shared>,
+}
+
+impl ShutdownDrain {
+    fn manager(&self) -> ExecutionManager {
+        ExecutionManager {
+            shared: self.shared.clone(),
+            shutdown: watch::channel(false).0,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::shutdown::Drain for ShutdownDrain {
+    fn hub_accepts(&self) -> bool {
+        self.shared.hub_shutdown_stop.load(Ordering::SeqCst)
+    }
+
+    async fn begin(&self, deadline: Duration) -> Vec<Uuid> {
+        self.manager().machine_shutdown(deadline).await
+    }
+
+    async fn settled(&self, stopping: &[Uuid]) {
+        self.manager().wait_shutdown_settled(stopping).await
+    }
+
+    async fn cancelled(&self) {
+        if let Err(error) = self.manager().release_held_starts().await {
+            tracing::warn!(kind = "held_start_failed", reason = %error, "held start was not routed");
+        }
+    }
+}
+
 impl Drop for ExecutionManager {
     fn drop(&mut self) {
         let _ = self.shutdown.send(true);
     }
 }
 
+/// Ожидание ответа актора на остановку перед выключением: всё вместе, не по очереди.
+const SHUTDOWN_REPLY: Duration = Duration::from_millis(250);
+/// Опрос итогов во время выключения: секунды на всё, событие на каждый итог не нужно.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(50);
+
 impl ExecutionManager {
+    /// Машина выключается: живым исполнениям уходит остановка со сроком `deadline`,
+    /// новые старты придерживаются. Возвращает исполнения, которым остановка ушла;
+    /// сопровождение без `shutdown_stop_v1` или без связи остаётся как есть.
+    pub async fn machine_shutdown(&self, deadline: Duration) -> Vec<Uuid> {
+        // Без замка маршрутизации: старт, уже миновавший проверку, всё равно что начатый
+        // до сигнала, а замок может держать долгий запуск.
+        self.shared.machine_shutdown.store(true, Ordering::SeqCst);
+        let actors: Vec<_> = self
+            .shared
+            .actors
+            .lock()
+            .expect("actors lock")
+            .iter()
+            .map(|(id, sender)| (*id, sender.clone()))
+            .collect();
+        let mut replies = Vec::new();
+        for (id, sender) in actors {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            if sender
+                .send(Msg::MachineShutdown { deadline, reply })
+                .is_ok()
+            {
+                replies.push((id, answer));
+            }
+        }
+        let until = tokio::time::Instant::now() + SHUTDOWN_REPLY;
+        let mut stopping = Vec::new();
+        for (id, answer) in replies {
+            if matches!(tokio::time::timeout_at(until, answer).await, Ok(Ok(true))) {
+                stopping.push(id);
+            }
+        }
+        stopping.sort();
+        stopping
+    }
+
+    /// Хаб подтвердил итоги этих исполнений и каталоги убраны.
+    pub async fn wait_shutdown_settled(&self, stopping: &[Uuid]) {
+        loop {
+            let settled = {
+                let infos = self.shared.infos.lock().expect("infos lock");
+                stopping
+                    .iter()
+                    .all(|id| infos.get(id).is_none_or(|info| info.retired))
+            };
+            if settled {
+                return;
+            }
+            tokio::time::sleep(SHUTDOWN_POLL).await;
+        }
+    }
+
+    /// Выключение отменено: придержанные старты идут обычным путём.
+    pub async fn release_held_starts(&self) -> Result<(), ExecError> {
+        let _route = self.shared.route_lock.lock().await;
+        self.shared.machine_shutdown.store(false, Ordering::SeqCst);
+        let held = std::mem::take(&mut *self.shared.held_starts.lock().expect("held starts lock"));
+        for command in held {
+            self.route(command).await?;
+        }
+        Ok(())
+    }
+
+    /// Возможность `shutdown_stop_v1` из ответа хаба на рукопожатие.
+    pub fn set_hub_shutdown_stop(&self, accepted: bool) {
+        self.shared
+            .hub_shutdown_stop
+            .store(accepted, Ordering::SeqCst);
+    }
+
+    /// Сток выключения для [`crate::shutdown::run`]: живёт отдельно от менеджера.
+    pub fn shutdown_drain(&self) -> Arc<dyn crate::shutdown::Drain> {
+        Arc::new(ShutdownDrain {
+            shared: self.shared.clone(),
+        })
+    }
+
     /// Общее состояние исполнений: уборке файлов секретов нужны живые
     /// разговоры и журнал управляющей службы.
     pub(crate) fn shared(&self) -> Arc<Shared> {
@@ -769,6 +894,9 @@ impl ExecutionManager {
                 #[cfg(feature = "fault-injection")]
                 strip_caps: Mutex::new(false),
                 actor_restarts: Mutex::default(),
+                machine_shutdown: AtomicBool::new(false),
+                held_starts: Mutex::default(),
+                hub_shutdown_stop: AtomicBool::new(false),
                 #[cfg(feature = "fault-injection")]
                 fail_actor: Mutex::new(0),
                 #[cfg(feature = "fault-injection")]
@@ -1328,6 +1456,21 @@ impl ExecutionManager {
             return Ok(());
         };
         if let Kind::StartExecution(start) = kind {
+            if self.shared.machine_shutdown.load(Ordering::SeqCst) {
+                tracing::info!(
+                    execution_id = %command.execution_id,
+                    kind = "start_held",
+                    "machine is shutting down; start waits for the next boot"
+                );
+                let mut held = self.shared.held_starts.lock().expect("held starts lock");
+                if !held
+                    .iter()
+                    .any(|known| known.command_id == command.command_id)
+                {
+                    held.push(command);
+                }
+                return Ok(());
+            }
             let start = start.clone();
             return self.start(command, start).await;
         }
