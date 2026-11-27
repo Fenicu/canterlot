@@ -339,5 +339,20 @@ if ((!all)); then
     fi
 fi
 
+# --- однострочная установка ---
+# Тест install.sh поднимает локальный HTTP-сервер и ничего не ставит на хост.
+want_install=$unknown
+((all)) && want_install=1
+while IFS= read -r path; do
+    case "$path" in scripts/install.sh | scripts/test-install-sh.sh) want_install=1 ;; esac
+done <<<"$changed"
+if ((want_install)); then
+    stage "install.sh"
+    bash scripts/test-install-sh.sh
+    stage_done "install.sh"
+else
+    printf 'install.sh: skipped (no changes)\n'
+fi
+
 bash scripts/list-quarantine.sh
 printf '\nготово за %ds\n' $((SECONDS - started))
