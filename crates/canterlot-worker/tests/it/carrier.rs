@@ -713,16 +713,19 @@ async fn fatal_word_resets_local_state(word: &str) {
     let fixture = Fixture::start(Options::default()).await;
     fixture.wait_hellos(1).await;
     let pid = fixture.worker_pid().unwrap();
+    // Слово и метку кладём до смерти воркера, как настоящий воркер пишет слово перед выходом.
+    // Положенные после смерти они опаздывали: под нагрузкой носитель успевал перезапустить
+    // воркер без сброса, и метка не исчезала никогда. Живой воркер файл не трогает, а носитель
+    // читает слово, только когда воркер мёртв.
+    let sentinel = fixture.root.join("state/sentinel");
+    fs::write(&sentinel, "old").unwrap();
+    fs::write(fixture.root.join("state/fatal"), word).unwrap();
+    let before = fixture.hellos();
     Command::new("kill")
         .args(["-KILL", &pid.to_string()])
         .status()
         .unwrap();
     until("the first worker to die", || !pid_alive(pid)).await;
-    // Подкладываем слово воркера и метку в состоянии: после сброса метки быть не должно.
-    let sentinel = fixture.root.join("state/sentinel");
-    fs::write(&sentinel, "old").unwrap();
-    fs::write(fixture.root.join("state/fatal"), word).unwrap();
-    let before = fixture.hellos();
     until("the state reset and a new worker", || {
         !sentinel.exists() && fixture.hellos() > before
     })
