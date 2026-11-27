@@ -145,6 +145,7 @@ async fn uninstall_worker_purge_does_not_follow_symlinks() {
     let args = UninstallArgs {
         purge: true,
         force: false,
+        ..UninstallArgs::default()
     };
 
     let mut wrong = host();

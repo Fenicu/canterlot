@@ -71,6 +71,15 @@ impl fmt::Display for Uninstalled {
     }
 }
 
+impl Uninstalled {
+    pub fn succeeded(&self) -> bool {
+        match self {
+            Self::Hub(report) => report.succeeded(),
+            Self::Worker(_) => true,
+        }
+    }
+}
+
 /// Хост хаба (`install.toml` есть, и это не вызов от имени воркера) — половина хаба: она
 /// сама повышает права и затем удаляет воркер этого хоста; иначе — воркер этой учётной записи.
 pub async fn uninstall(
@@ -153,7 +162,7 @@ pub async fn uninstall_worker(
         return Err(CtlError::SessionsAlive(live));
     }
     // Подтверждение до первого изменения: отказ ничего не трогает.
-    if args.purge {
+    if args.purge && !args.purge_confirmed {
         let typed = host.ask(
             &format!(
                 "This deletes the worker identity and data. Type the host name ({}) to confirm",
@@ -254,6 +263,16 @@ pub struct HubUninstallReport {
     pub manual: Vec<PathBuf>,
     /// Вывод удаления воркера этого хоста (от имени его учётной записи).
     pub worker: Option<String>,
+    /// Был ли запрошен `--purge`: при запросе остатки означают неуспех.
+    pub purge: bool,
+    /// Удаление воркера прошло успешно.
+    pub ok: bool,
+}
+
+impl HubUninstallReport {
+    pub fn succeeded(&self) -> bool {
+        self.ok && (!self.purge || self.manual.is_empty())
+    }
 }
 
 impl fmt::Display for HubUninstallReport {
@@ -350,8 +369,65 @@ pub async fn uninstall_hub(
         crate::remove::remove_tree(&layout.root, &unit)?;
     }
 
+    let mut report = HubUninstallReport {
+        purge: args.purge,
+        ..HubUninstallReport::default()
+    };
+    // Воркер удаляется этой же утилитой, пока она ещё установлена: после удаления
+    // /opt/canterlot путь /usr/local/bin/canterlot уже не существует.
+    if state.components.worker
+        && let Some(user) = state.worker_user.clone()
+    {
+        ops::advance(&ops_dir, &mut rec, "worker")?;
+        // Живые сессии уже проверены по базе хаба (она видит и этот воркер), отсюда --force.
+        let mut child = vec!["uninstall", "--force"];
+        if args.purge {
+            child.extend(["--purge", "--purge-confirmed"]);
+        }
+        let failed = match crate::hub_update::run_as_worker(runner, layout, &state, &user, &child)
+            .await
+        {
+            Ok(out) if out.status == 0 => {
+                let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                if !out.stderr.is_empty() {
+                    text.push_str(&String::from_utf8_lossy(&out.stderr));
+                }
+                report.worker = Some(text);
+                state.components.worker = false;
+                None
+            }
+            Ok(out) => {
+                report.worker = Some(format!(
+                    "Worker uninstall as {user} exited with {}.\n{}Run `canterlot uninstall` as {user} to finish.\n",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+                Some(format!("worker uninstall as {user} exited with {}", out.status))
+            }
+            Err(err) => {
+                report.worker = Some(format!(
+                    "Worker uninstall as {user} failed: {err}; run `canterlot uninstall` as {user} to finish.\n"
+                ));
+                Some(format!("worker uninstall as {user} failed: {err}"))
+            }
+        };
+        if let Some(reason) = failed {
+            report.ok = false;
+            ops::finish(
+                &ops_dir,
+                &mut rec,
+                OpResult::NeedsOwner {
+                    steps: vec![
+                        reason,
+                        format!("Run `canterlot uninstall` as {user}, then repeat the hub uninstall."),
+                    ],
+                },
+            )?;
+            return Ok(report);
+        }
+    }
+
     ops::advance(&ops_dir, &mut rec, "remove")?;
-    let mut report = HubUninstallReport::default();
     // Стабильная ссылка на утилиту ведёт в /opt/canterlot/ctl: без него она мертва.
     let link = layout.ctl_link();
     if let Ok(target) = std::fs::read_link(&link)
@@ -378,41 +454,14 @@ pub async fn uninstall_hub(
         let (removed, manual) = purge(layout, &state);
         report.removed.extend(removed);
         report.manual.extend(manual);
-    }
-    if state.components.worker
-        && let Some(user) = state.worker_user.clone()
-    {
-        ops::advance(&ops_dir, &mut rec, "worker")?;
-        // Живые сессии уже проверены по базе хаба (она видит и этот воркер), отсюда --force.
-        let mut child = vec!["uninstall", "--force"];
-        if args.purge {
-            child.push("--purge");
-        }
-        match crate::hub_update::run_as_worker(runner, layout, &state, &user, &child).await {
-            Ok(out) if out.status == 0 => {
-                report.worker = Some(String::from_utf8_lossy(&out.stdout).into_owned());
-                state.components.worker = false;
-                state.save(layout)?;
+    } else {
+        for kept in [
+            layout.root.join("etc/canterlot"),
+            layout.root.join("var/lib/canterlot"),
+        ] {
+            if kept.exists() {
+                report.kept.push(kept);
             }
-            Ok(out) => {
-                report.worker = Some(format!(
-                    "Worker uninstall as {user} exited with {}; run `canterlot uninstall` as {user}.\n",
-                    out.status
-                ))
-            }
-            Err(err) => {
-                report.worker = Some(format!(
-                    "Worker uninstall as {user} failed: {err}; run `canterlot uninstall` as {user}.\n"
-                ))
-            }
-        }
-    }
-    for kept in [
-        layout.root.join("etc/canterlot"),
-        layout.root.join("var/lib/canterlot"),
-    ] {
-        if kept.exists() {
-            report.kept.push(kept);
         }
     }
     ops::finish(&ops_dir, &mut rec, OpResult::Done)?;

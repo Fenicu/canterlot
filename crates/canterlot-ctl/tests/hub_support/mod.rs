@@ -537,6 +537,12 @@ impl Fixture {
         ] {
             fs::create_dir_all(dir).unwrap();
         }
+        // Рабочая ссылка на утилиту: команда воркеру уходит именно через неё.
+        let ctl = layout.ctl_release(&old);
+        fs::create_dir_all(&ctl).unwrap();
+        fs::write(ctl.join("canterlot"), "ctl").unwrap();
+        fs::create_dir_all(layout.ctl_link().parent().unwrap()).unwrap();
+        symlink(ctl.join("canterlot"), layout.ctl_link()).unwrap();
         let ca = tls::new_ca().unwrap();
         tls::save_ca(&layout, &ca).unwrap();
         let (cert, key) = tls::issue_hub_cert(&ca, &tls::hub_names(&state.hub_names)).unwrap();

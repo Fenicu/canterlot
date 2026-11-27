@@ -143,8 +143,9 @@ async fn run(cli: Cli) -> Result<bool, CtlError> {
         }
         Command::Uninstall(args) => {
             let report = uninstall(&args, &user_layout(), &runner, &WorkerHost::from_env()).await?;
+            let ok = report.succeeded();
             print!("{report}");
-            Ok(true)
+            Ok(ok)
         }
         Command::Tls(TlsCommand::AddName { name }) => {
             add_name(&name, &layout, &runner, &Host::from_env()).await?;

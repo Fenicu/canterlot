@@ -162,6 +162,9 @@ pub struct UninstallArgs {
     pub purge: bool,
     #[arg(long)]
     pub force: bool,
+    /// Подтверждение уже дал вызвавший uninstall хоста: воркеру спрашивать не нужно.
+    #[arg(long, hide = true)]
+    pub purge_confirmed: bool,
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Default)]

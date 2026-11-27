@@ -5,13 +5,22 @@
 
 mod hub_support;
 
-use std::{fs, os::unix::fs::symlink, path::Path};
+use std::{
+    fs,
+    os::unix::fs::symlink,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
 
+use async_trait::async_trait;
 use canterlot_ctl::{
     cli::UninstallArgs,
     error::CtlError,
     ops::{self, OpKind, OpResult},
-    runner::Cmd,
+    runner::{Cmd, FakeRunner, Output, Runner},
     state::InstallState,
     tls,
     uninstall::uninstall_hub,
@@ -78,6 +87,7 @@ async fn uninstall_refuses_live_sessions() {
     let forced = UninstallArgs {
         purge: false,
         force: true,
+        ..UninstallArgs::default()
     };
     uninstall_hub(&forced, &fx.layout, &fx.runner, &host(), &mut typed(""))
         .await
@@ -89,6 +99,7 @@ fn purge() -> UninstallArgs {
     UninstallArgs {
         purge: true,
         force: false,
+        ..UninstallArgs::default()
     }
 }
 
@@ -280,19 +291,57 @@ fn env<'a>(c: &'a Cmd, key: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
+/// Смотрит на команду воркера в момент её получения: утилита ещё должна существовать.
+struct WorkerProbe {
+    inner: FakeRunner,
+    seen: Arc<AtomicBool>,
+    existed: Arc<AtomicBool>,
+    fail: Option<String>,
+}
+
+#[async_trait]
+impl Runner for WorkerProbe {
+    async fn run(&self, cmd: Cmd) -> Result<Output, CtlError> {
+        if cmd.as_user.as_deref() == Some("worker")
+            && cmd.args.first().map(String::as_str) == Some("uninstall")
+        {
+            self.seen.store(true, Ordering::SeqCst);
+            self.existed
+                .store(Path::new(&cmd.program).exists(), Ordering::SeqCst);
+            if let Some(stderr) = &self.fail {
+                return Ok(Output::failed(7, stderr.clone()));
+            }
+        }
+        self.inner.run(cmd).await
+    }
+}
+
 #[tokio::test]
 async fn uninstall_hub_then_removes_this_hosts_worker_as_its_account() {
     let fx = Fixture::new();
     worker_on_host(&fx);
+    let seen = Arc::new(AtomicBool::new(false));
+    let existed = Arc::new(AtomicBool::new(false));
+    let probe = WorkerProbe {
+        inner: fx.runner.clone(),
+        seen: seen.clone(),
+        existed: existed.clone(),
+        fail: None,
+    };
     uninstall_hub(
         &UninstallArgs::default(),
         &fx.layout,
-        &fx.runner,
+        &probe,
         &host(),
         &mut typed(""),
     )
     .await
     .unwrap();
+    assert!(seen.load(Ordering::SeqCst), "worker command never ran");
+    assert!(
+        existed.load(Ordering::SeqCst),
+        "the utility was removed before the worker command"
+    );
     let calls = worker_calls(&fx);
     assert_eq!(calls.len(), 1, "{calls:#?}");
     let c = &calls[0];
@@ -315,6 +364,59 @@ async fn uninstall_hub_then_removes_this_hosts_worker_as_its_account() {
             .unwrap()
             .components
             .worker
+    );
+}
+
+#[tokio::test]
+async fn uninstall_hub_reports_worker_failure_and_is_not_successful() {
+    let fx = Fixture::new();
+    worker_on_host(&fx);
+    let probe = WorkerProbe {
+        inner: fx.runner.clone(),
+        seen: Arc::new(AtomicBool::new(false)),
+        existed: Arc::new(AtomicBool::new(false)),
+        fail: Some("worker uninstall exploded".into()),
+    };
+    let report = uninstall_hub(
+        &UninstallArgs::default(),
+        &fx.layout,
+        &probe,
+        &host(),
+        &mut typed(""),
+    )
+    .await
+    .unwrap();
+    assert!(!report.succeeded(), "{report}");
+    assert!(report.to_string().contains("worker uninstall exploded"));
+    assert!(fx.layout.ctl_link().exists(), "the utility is needed for a retry");
+    assert!(
+        InstallState::load(&fx.layout)
+            .unwrap()
+            .unwrap()
+            .components
+            .worker
+    );
+}
+
+#[tokio::test]
+async fn hub_purge_asks_once_and_passes_confirmation_to_worker() {
+    let fx = Fixture::new();
+    worker_on_host(&fx);
+    let asks = Arc::new(AtomicUsize::new(0));
+    let count = asks.clone();
+    let mut ask = move |_: &str| {
+        count.fetch_add(1, Ordering::SeqCst);
+        Ok("workstation".to_owned())
+    };
+    uninstall_hub(&purge(), &fx.layout, &fx.runner, &host(), &mut ask)
+        .await
+        .unwrap();
+    assert_eq!(asks.load(Ordering::SeqCst), 1);
+    let calls = worker_calls(&fx);
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].args.iter().any(|a| a == "--purge-confirmed"),
+        "{calls:#?}"
     );
 }
 
