@@ -63,6 +63,8 @@ mod outbox;
 mod plan_board;
 #[path = "it/poison_records.rs"]
 mod poison_records;
+#[path = "it/probe.rs"]
+mod probe;
 #[path = "it/queue_controls.rs"]
 mod queue_controls;
 #[path = "it/receipts.rs"]

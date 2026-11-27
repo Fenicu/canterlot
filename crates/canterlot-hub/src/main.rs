@@ -50,6 +50,8 @@ enum Command {
         #[command(subcommand)]
         command: MigrationsCommand,
     },
+    /// Закрытая проверка готовности: один JSON-отчёт и код выхода.
+    Probe(ConfigArgs),
     /// Общая память агентов.
     Memory {
         #[command(subcommand)]
@@ -199,7 +201,12 @@ enum AuthCommand {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run(Args::parse()).await {
+    let args = Args::parse();
+    // Проба не открывает базу: иначе она не смогла бы проверить готовность самой базы.
+    if let Command::Probe(config) = &args.command {
+        return ExitCode::from(canterlot_hub::probe::run(&config.config).await);
+    }
+    match run(args).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => {
             eprintln!("{code}");
@@ -227,6 +234,7 @@ async fn run(args: Args) -> Result<(), String> {
             )
             .map_err(|_| "output_error".to_owned());
         }
+        Command::Probe(_) => unreachable!("handled in main before run"),
         Command::Init(config) | Command::Serve(config) => config,
         Command::Machine { command } => match command {
             MachineCommand::Add { config, .. }
@@ -325,6 +333,7 @@ async fn run(args: Args) -> Result<(), String> {
                 .map_err(|_| "presets_seed_error".to_owned())?;
             serve(pool.clone(), config, installation).await?;
         }
+        Command::Probe(_) => unreachable!("handled in main before run"),
         Command::Openapi | Command::Migrations { .. } => {
             unreachable!("handled before the config is loaded")
         }
