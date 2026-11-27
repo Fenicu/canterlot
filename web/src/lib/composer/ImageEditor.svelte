@@ -35,7 +35,7 @@
     oncancel: () => void;
   } = $props();
 
-  let root: HTMLDivElement;
+  let dialog: HTMLDialogElement;
   let stage: HTMLDivElement;
   let canvas: HTMLCanvasElement;
   let doneButton: HTMLSpanElement;
@@ -202,7 +202,9 @@
   }
 
   onMount(() => {
-    const styles = getComputedStyle(root);
+    const styles = getComputedStyle(dialog);
+    // Диалог в верхнем слое: превращённый предок не ограничивает его размер.
+    dialog.showModal();
     for (const name of MARK_COLORS) paint[name] = styles.getPropertyValue(`--mark-${name}`).trim();
     frame = styles.getPropertyValue('--mark-frame').trim();
     outline = styles.getPropertyValue('--mark-outline').trim();
@@ -232,6 +234,7 @@
       disposed = true;
       observer.disconnect();
       loaded?.close();
+      if (dialog.open) dialog.close();
     };
   });
 
@@ -408,7 +411,15 @@
 
 <svelte:window onkeydown={keydown} />
 
-<div class="editor" role="dialog" aria-modal="true" aria-label="Правка изображения" bind:this={root}>
+<dialog
+  class="editor"
+  aria-label="Правка изображения"
+  bind:this={dialog}
+  oncancel={(event) => {
+    event.preventDefault();
+    oncancel();
+  }}
+>
   <header>
     <Button variant="text" onclick={oncancel}>Отмена</Button>
     <Button variant="text" onclick={onoriginal}>Без правок</Button>
@@ -449,13 +460,19 @@
       ></button>
     {/each}
   </div>
-</div>
+</dialog>
 
 <style>
   .editor {
     position: fixed;
     inset: 0;
-    z-index: 100;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
     display: flex;
     flex-direction: column;
     background: var(--bg);
@@ -463,6 +480,7 @@
     padding: var(--s4) var(--s4) calc(var(--s4) + env(safe-area-inset-bottom));
     gap: var(--s4);
   }
+  .editor::backdrop { background: var(--scrim); }
   header {
     flex: none;
     display: grid;
@@ -509,7 +527,9 @@
     background: var(--raised);
     color: var(--text);
   }
-  .tools button.active {
+  .tools button.active,
+  .tools button.active:hover,
+  .tools button.active:active {
     background: var(--accent);
     color: var(--accent-ink);
   }
@@ -524,13 +544,18 @@
     height: var(--target);
     border: var(--s2) solid var(--transparent);
     border-radius: var(--radius-round);
+    background: var(--swatch);
+  }
+  .palette button:hover,
+  .palette button:active {
+    background: var(--swatch);
   }
   .palette button.active {
     border-color: var(--text);
   }
-  .red { background: var(--mark-red); }
-  .yellow { background: var(--mark-yellow); }
-  .green { background: var(--mark-green); }
-  .blue { background: var(--mark-blue); }
+  .red { --swatch: var(--mark-red); }
+  .yellow { --swatch: var(--mark-yellow); }
+  .green { --swatch: var(--mark-green); }
+  .blue { --swatch: var(--mark-blue); }
   :global([data-layout='desktop']) .editor { padding: var(--s6); }
 </style>

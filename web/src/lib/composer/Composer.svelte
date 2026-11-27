@@ -15,6 +15,8 @@
   import { ComposerModel, EMPTY_DRAFT_REASON, type Limits } from '#lib/composer/model.svelte.js';
   import { composerPlaceholder, sendActionLabel } from '#lib/composer/copy.js';
   import { takeAttachmentNotice } from '#lib/composer/attachmentNotice.js';
+  import { imageSize } from '#lib/composer/imageEdit/decode.js';
+  import type { EditChoice } from '#lib/composer/imageEdit/queue.js';
   import { getEnterPref } from '#lib/composer/prefs.js';
   import { insertDictated, type DraftAnchor } from '#lib/dictation/insertion.js';
   import { insertSnippet } from '#lib/snippets/insert.js';
@@ -89,7 +91,9 @@
             size: response.data.size
           };
         },
-        online: () => navigator.onLine
+        online: () => navigator.onLine,
+        decodeImage: imageSize,
+        editImage: (file) => openEditor(file)
       })
   );
 
@@ -102,11 +106,35 @@
   let SnippetsSheet = $state<Component<{ open: boolean; projectKey: string; text: string; onclose: () => void; oninsert: (body: string) => void }> | null>(null);
   // Окно «Отправить позже» открывают нечасто: чанк едет только вместе с ним.
   let SendLater = $state<Component<{ open: boolean; now: () => number; blocked?: boolean; panelId: string; onclose: () => void; onpick: (at: number) => void }> | null>(null);
+  // Редактор images открывают редко: чанк едет только когда файл действительно нужно править.
+  let ImageEditor = $state<Component<{
+    file: File;
+    ondone: (edited: File) => void;
+    onoriginal: () => void;
+    oncancel: () => void;
+  }> | null>(null);
+  let editorFile = $state<File | null>(null);
+  let resolveEditor: ((choice: EditChoice) => void) | null = null;
 
   $effect(() => {
     if (later && !SendLater) import('#lib/composer/SendLater.svelte').then((m) => { SendLater = m.default; });
     if (snippetsOpen && !SnippetsSheet) import('#lib/composer/SnippetsSheet.svelte').then((m) => { SnippetsSheet = m.default; });
+    if (editorFile && !ImageEditor) import('#lib/composer/ImageEditor.svelte').then((m) => { ImageEditor = m.default; });
   });
+
+  function openEditor(file: File): Promise<EditChoice> {
+    return new Promise((resolve) => {
+      resolveEditor = resolve;
+      editorFile = file;
+    });
+  }
+
+  function finishEditor(choice: EditChoice): void {
+    editorFile = null;
+    const resolve = resolveEditor;
+    resolveEditor = null;
+    resolve?.(choice);
+  }
   const projectKey = $derived((chat.detail?.workdir as string | undefined) ?? '');
 
   function pickSnippet(body: string): void {
@@ -835,6 +863,15 @@
     onclose={() => (slashDismissed = true)}
   />
 </section>
+
+{#if ImageEditor && editorFile}
+  <ImageEditor
+    file={editorFile}
+    ondone={(edited) => finishEditor({ choice: 'edited', file: edited })}
+    onoriginal={() => finishEditor({ choice: 'original' })}
+    oncancel={() => finishEditor({ choice: 'cancel' })}
+  />
+{/if}
 
 <style>
   .composer { display: flex; flex-direction: column; gap: var(--s2); flex: none; max-height: var(--composer-limit); padding: var(--s3) var(--gutter) max(var(--s4), env(safe-area-inset-bottom)); min-width: 0; position: relative; }

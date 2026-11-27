@@ -17,6 +17,10 @@ import { sendNow } from "#lib/timeline/QueueActions.js";
 import { setGoal } from "#lib/api/client.js";
 import { errorText } from "#lib/api/errors.js";
 import { intents } from "#lib/ops/intent.js";
+import { leaveAttachmentNotice } from "#lib/composer/attachmentNotice.js";
+import { imageSize } from "#lib/composer/imageEdit/decode.js";
+import { AttachmentQueue, type EditChoice } from "#lib/composer/imageEdit/queue.js";
+import type { Size } from "#lib/composer/imageEdit/model.js";
 
 const MAX_GOAL_OBJECTIVE_BYTES = 2048;
 
@@ -67,6 +71,10 @@ export interface ComposerDeps {
   now?(): number;
   schedule?(fn: () => void, ms: number): () => void;
   online?(): boolean;
+  /** Размер нужен до редактора: слишком большие картинки идут в лоток без правок. */
+  decodeImage?(file: File): Promise<Size | null>;
+  /** Окно правки открывает композер по первому использованию. */
+  editImage?(file: File): Promise<EditChoice>;
 }
 
 interface Accepted {
@@ -88,9 +96,22 @@ export class ComposerModel {
   #attachmentsInFlight = 0;
   #draftAttachmentIds: string[] = [];
   #reconcileToken = 0;
+  #queue: AttachmentQueue;
 
   constructor(deps: ComposerDeps) {
     this.deps = deps;
+    this.#queue = new AttachmentQueue({
+      decode: (file) => (deps.decodeImage ? deps.decodeImage(file) : imageSize(file)),
+      edit: (file) =>
+        deps.editImage
+          ? deps.editImage(file)
+          : Promise.resolve<EditChoice>({ choice: "original" }),
+      add: (file) => this.#addFile(file),
+      note: (message) => {
+        this.errorMessage = message;
+        leaveAttachmentNotice(deps.conversationId, message);
+      },
+    });
     if (deps.serverDrafts) {
       this.#draft = new DraftSync({
         deviceId: deps.deviceId ?? "local",
@@ -509,23 +530,22 @@ export class ComposerModel {
   }
 
   attach(files: FileList | File[]): void {
+    this.#queue.enqueue(files);
+  }
+
+  /** Файл попадает в лоток только после редактора, поэтому загрузка не идёт дважды. */
+  #addFile(file: File): void {
     const list = this.deps.uploads.list(this.deps.conversationId);
-    let count = list.filter(
+    const count = list.filter(
       (u) => u.phase !== "cancelled" && u.phase !== "failed",
     ).length;
-    const fileArray = Array.from(files);
-
-    for (const file of fileArray) {
-      try {
-        this.deps.uploads.add(this.deps.conversationId, file, count);
-        count += 1;
-      } catch (err) {
-        if (err instanceof UploadLimitError) {
-          if (err.reason === "too_large")
-            this.errorMessage = "Файл больше 100 МиБ";
-          else if (err.reason === "too_many")
-            this.errorMessage = "Не более 10 файлов в одном сообщении";
-        }
+    try {
+      this.deps.uploads.add(this.deps.conversationId, file, count);
+    } catch (err) {
+      if (err instanceof UploadLimitError) {
+        if (err.reason === "too_large") this.errorMessage = "Файл больше 100 МиБ";
+        else if (err.reason === "too_many")
+          this.errorMessage = "Не более 10 файлов в одном сообщении";
       }
     }
   }
