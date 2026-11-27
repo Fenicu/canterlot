@@ -885,9 +885,10 @@ impl OpenCodeAdapter {
     }
 
     // Поток открывается раньше всех запросов: событие до подписки потеряно навсегда.
+    // Срок — как у любого запроса, а не срок готовности: тесты укорачивают последний до
+    // сотен миллисекунд ради своих проверок, и под нагрузкой подписка не успевала.
     async fn open_stream(&mut self) -> Result<(), AdapterError> {
-        let wait = self.ready_wait.min(REQUEST_WAIT);
-        let stream = subscribe(self.http()?, wait)
+        let stream = subscribe(self.http()?, REQUEST_WAIT)
             .await
             .ok_or(AdapterError::StartFailed("server_unreachable"))?;
         self.stream = Some(stream);

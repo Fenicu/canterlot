@@ -1320,13 +1320,14 @@ async fn pending_mcp_past_the_deadline_is_a_diagnostic() {
     bench.close(CloseMode::Graceful).await;
 }
 
-/// Делегированная сессия с заданным ответом `/api/mcp` и коротким сроком ожидания.
+/// Делегированная сессия с заданным ответом `/api/mcp` и коротким сроком ожидания списка.
+/// Срок готовности остаётся обычным: он же срок опроса агентов, и 300 мс под нагрузкой
+/// гейта роняли старт причиной, которую тест не проверяет.
 fn isolated(replies: Vec<Reply>) -> Bench {
     let mut script = session_only();
     script.set_route("GET", "/api/mcp", replies);
     let mut bench = Bench::new(script);
     bench.spec.isolate_mcp = true;
-    bench.adapter.set_ready_wait(Duration::from_millis(300));
     // Срок лишь доказывает, что список не собрался: доказательство не придёт никогда.
     bench.adapter.set_mcp_wait(Duration::from_millis(200));
     bench
@@ -1473,16 +1474,10 @@ fn delegated(replies: Vec<Reply>, owner_has: bool) -> Bench {
         json!({"mcp": {"servers": servers}}).to_string(),
     )
     .unwrap();
-    let ready_wait = Duration::from_millis(300);
     Bench {
-        adapter: {
-            let mut adapter = bench
-                .adapter
-                .with_delegate_mcp_servers(&["context7".to_owned()]);
-            adapter.set_ready_wait(ready_wait);
-            adapter.set_mcp_wait(ready_wait);
-            adapter
-        },
+        adapter: bench
+            .adapter
+            .with_delegate_mcp_servers(&["context7".to_owned()]),
         ..bench
     }
 }
