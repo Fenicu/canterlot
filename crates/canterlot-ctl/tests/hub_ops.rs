@@ -327,6 +327,7 @@ async fn update_runs_worker_after_hub_success_only() {
         version: None,
         from_dir: Some(fx.release(NEW)),
         force: false,
+        hub_chain: false,
     };
     let reports = update(args.clone(), &fx.layout, &fx.runner, &fx.src(), &host())
         .await
@@ -339,6 +340,10 @@ async fn update_runs_worker_after_hub_success_only() {
         calls[0]
             .args
             .starts_with(&["update".into(), "--version".into(), NEW.into()])
+    );
+    assert!(
+        calls[0].args.iter().any(|a| a == "--hub-chain"),
+        "the worker step must wait for the restarted hub: {calls:#?}"
     );
 
     // Неудача хаба (откат) — воркер не обновляется.
@@ -355,4 +360,36 @@ async fn update_runs_worker_after_hub_success_only() {
     assert_eq!(reports.len(), 1);
     assert!(!reports[0].succeeded());
     assert!(worker_calls(&fx).is_empty());
+}
+
+#[tokio::test]
+async fn worker_step_report_shows_child_stderr() {
+    use canterlot_ctl::{
+        cli::UpdateArgs,
+        hub_update::{UpdateReport, update},
+        runner::Output,
+    };
+    let fx = Fixture::new();
+    worker_on_host(&fx);
+    fx.world().worker_output = Some(Output {
+        status: 1,
+        stdout: b"worker stdout line\n".to_vec(),
+        stderr: b"worker stderr line\n".to_vec(),
+    });
+    let args = UpdateArgs {
+        version: None,
+        from_dir: Some(fx.release(NEW)),
+        force: false,
+        hub_chain: false,
+    };
+    let reports = update(args, &fx.layout, &fx.runner, &fx.src(), &host())
+        .await
+        .unwrap();
+    let worker = reports
+        .iter()
+        .find(|r| matches!(r, UpdateReport::Worker { .. }))
+        .expect("worker report");
+    let text = worker.to_string();
+    assert!(text.contains("worker stdout line"), "{text}");
+    assert!(text.contains("worker stderr line"), "{text}");
 }

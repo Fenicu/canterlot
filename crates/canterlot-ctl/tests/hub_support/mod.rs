@@ -144,6 +144,8 @@ pub struct World {
     pub db_size: u64,
     pub manifest: String,
     pub live_sessions: u64,
+    /// Ответ команды от имени воркера: по умолчанию успешный, тест подменяет им отказ.
+    pub worker_output: Option<Output>,
     next_oid: u32,
 }
 
@@ -165,6 +167,7 @@ impl Default for World {
             db_size: GIB,
             manifest: manifest(&[(1, "aa"), (2, "bb"), (3, "cc")]),
             live_sessions: 0,
+            worker_output: None,
             next_oid: 30000,
         }
     }
@@ -198,7 +201,7 @@ impl World {
             "df" => ok(format!("Avail\n{}\n", self.free)),
             "chown" => ok(""),
             "id" => ok("1000\n"),
-            _ if cmd.as_user.is_some() => ok("worker done\n"),
+            _ if cmd.as_user.is_some() => self.worker_output.clone().or_else(|| ok("worker done\n")),
             "sh" => self.redirect(cmd),
             "docker" if cmd.args.first().map(String::as_str) == Some("run") => {
                 if has(cmd, &["migrations", "manifest", "--json"]) {
@@ -636,6 +639,7 @@ impl Fixture {
             version: None,
             from_dir: Some(dir),
             force: false,
+            hub_chain: false,
         }
     }
 

@@ -167,6 +167,9 @@ pub struct WorkerHost {
     /// Опрос воркера: `polls` попыток с шагом `poll_delay` (в работе 180 × 2 с = 6 мин).
     pub polls: u32,
     pub poll_delay: Duration,
+    /// Ожидание связи с обновлённым хабом в цепочке на его хосте (60 × 2 с ≈ 2 мин).
+    pub hub_wait_polls: u32,
+    pub hub_wait_delay: Duration,
     /// Заранее данный ответ на вопрос в терминале (подтверждение `--purge`); в работе пусто.
     pub answer: Option<String>,
 }
@@ -194,6 +197,8 @@ impl WorkerHost {
             in_unit: std::env::var(IN_UNIT_ENV).as_deref() == Ok("1"),
             polls: 180,
             poll_delay: Duration::from_secs(2),
+            hub_wait_polls: 60,
+            hub_wait_delay: Duration::from_secs(2),
             answer: None,
         }
     }

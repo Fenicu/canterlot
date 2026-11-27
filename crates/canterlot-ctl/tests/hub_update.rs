@@ -497,6 +497,7 @@ async fn update_args_version_mismatch_with_from_dir_is_refused() {
         version: Some(v("1.4.0")),
         from_dir: Some(dir),
         force: false,
+        hub_chain: false,
     };
     let err = update_hub(&args, &fx.layout, &fx.runner, &fx.src(), &host())
         .await

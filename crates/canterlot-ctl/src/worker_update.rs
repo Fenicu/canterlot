@@ -137,6 +137,9 @@ async fn launch_in_unit(
     if args.force {
         args_out.push("--force".into());
     }
+    if args.hub_chain {
+        args_out.push("--hub-chain".into());
+    }
     let mut run = cmd("systemd-run", &[]);
     run.args = args_out;
     let out = runner.run(run).await?;
@@ -207,6 +210,32 @@ fn check_hub_first(status: &WorkerStatus, target: &Version, force: bool) -> Resu
         });
     }
     Ok(())
+}
+
+/// В цепочке на хосте хаба воркер обновляется сразу после перезапуска хаба и может ещё
+/// не видеть его новую версию (переподключение идёт с задержкой). Ждём ограниченное
+/// время и возвращаем последнюю причину; отдельный вызов обновления падает сразу.
+async fn wait_for_hub(
+    runner: &dyn Runner,
+    layout: &Layout,
+    host: &WorkerHost,
+    target: &Version,
+    force: bool,
+) -> Result<WorkerStatus, CtlError> {
+    let mut last = CtlError::HubVersionUnknown;
+    for n in 0..host.hub_wait_polls.max(1) {
+        if n > 0 {
+            tokio::time::sleep(host.hub_wait_delay).await;
+        }
+        match worker::worker_status(runner, layout).await {
+            Ok(status) => match check_hub_first(&status, target, force) {
+                Ok(()) => return Ok(status),
+                Err(err) => last = err,
+            },
+            Err(err) => last = err,
+        }
+    }
+    Err(last)
 }
 
 /// Каталоги релизов, из которых запущены живые сопровождения. Бинарь, которого уже нет
@@ -338,13 +367,17 @@ async fn transaction(
     }
 
     ops::advance(ops_dir, rec, "preflight")?;
-    let before = worker::worker_status(runner, layout).await;
-    let before = match before {
-        Ok(status) => status,
-        Err(_) if args.force => WorkerStatus::default(),
-        Err(_) => return Err(CtlError::HubVersionUnknown),
+    let before = if args.hub_chain {
+        wait_for_hub(runner, layout, host, target, args.force).await?
+    } else {
+        let before = match worker::worker_status(runner, layout).await {
+            Ok(status) => status,
+            Err(_) if args.force => WorkerStatus::default(),
+            Err(_) => return Err(CtlError::HubVersionUnknown),
+        };
+        check_hub_first(&before, target, args.force)?;
+        before
     };
-    check_hub_first(&before, target, args.force)?;
     let in_use = releases_in_use(layout, &before)?;
     let alive: Vec<String> = before.executions.iter().map(|e| e.id.clone()).collect();
 

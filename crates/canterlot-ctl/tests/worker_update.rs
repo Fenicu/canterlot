@@ -107,6 +107,36 @@ fn update_to(v: &str) -> UpdateArgs {
     }
 }
 
+/// Статус воркера по сценарию: шары перебираются по очереди, последний повторяется.
+/// Пара — версия воркера и версия хаба; `None` означает «хаб не подключён».
+fn fake_status_sequence(
+    steps: Vec<(&'static str, Option<&'static str>)>,
+) -> (FakeRunner, Arc<AtomicUsize>) {
+    let runner = FakeRunner::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    runner.respond(move |cmd| {
+        if is_restart(cmd) {
+            return Some(Output::ok(""));
+        }
+        if !is_status(cmd) {
+            return None;
+        }
+        let n = counter.fetch_add(1, Ordering::SeqCst);
+        let (version, hub) = steps[n.min(steps.len() - 1)];
+        Some(Output::ok(
+            json!({
+                "version": version,
+                "connected": hub.is_some(),
+                "hub_version": hub,
+                "executions": [],
+            })
+            .to_string(),
+        ))
+    });
+    (runner, calls)
+}
+
 #[tokio::test]
 async fn worker_update_refuses_past_hub_version() {
     let m = machine(&[OLD]);
@@ -212,7 +242,9 @@ async fn worker_update_runs_inside_transient_unit() {
     let src = release_server(&[NEW]).await;
     let mut outside = host();
     outside.in_unit = false;
-    let result = update_worker(&update_to(NEW), &m.layout, &runner, &src, &outside)
+    let mut args = update_to(NEW);
+    args.hub_chain = true;
+    let result = update_worker(&args, &m.layout, &runner, &src, &outside)
         .await
         .unwrap();
     assert_eq!(result, OpResult::Done);
@@ -237,7 +269,64 @@ async fn worker_update_runs_inside_transient_unit() {
     assert!(args.contains("--wait --collect"), "{args}");
     assert!(args.contains("--setenv=CANTERLOT_CTL_IN_UNIT=1"), "{args}");
     assert!(
-        args.ends_with(&format!("{} update --version {NEW}", ctl.display())),
+        args.ends_with(&format!(
+            "{} update --version {NEW} --hub-chain",
+            ctl.display()
+        )),
         "{args}"
     );
+}
+
+#[tokio::test]
+async fn hub_chain_waits_until_worker_sees_the_new_hub_version() {
+    let m = machine(&[OLD]);
+    // Сразу после перезапуска хаба воркер не подключён, затем видит старую версию,
+    // и только потом — новую. Обычный обновлятор отказался бы на первом шаге.
+    let (runner, statuses) = fake_status_sequence(vec![
+        (OLD, None),
+        (OLD, Some(OLD)),
+        (NEW, Some(NEW)),
+    ]);
+    let src = release_server(&[NEW]).await;
+    let mut args = update_to(NEW);
+    args.hub_chain = true;
+    let result = update_worker(&args, &m.layout, &runner, &src, &host())
+        .await
+        .unwrap();
+    assert_eq!(result, OpResult::Done, "{result:?}");
+    assert!(
+        statuses.load(Ordering::SeqCst) >= 3,
+        "must poll through the stale statuses"
+    );
+}
+
+#[tokio::test]
+async fn hub_chain_gives_up_with_the_last_check_error() {
+    let m = machine(&[OLD]);
+    let (runner, statuses) = fake_status_sequence(vec![(OLD, Some(OLD))]);
+    let src = release_server(&[NEW]).await;
+    let mut chained = host();
+    chained.hub_wait_polls = 3;
+    let mut args = update_to(NEW);
+    args.hub_chain = true;
+    let err = update_worker(&args, &m.layout, &runner, &src, &chained)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CtlError::HubOlderThanTarget { .. }), "{err}");
+    assert_eq!(statuses.load(Ordering::SeqCst), 3);
+    assert!(!m.layout.worker_releases().join(NEW).exists());
+}
+
+#[tokio::test]
+async fn standalone_update_does_not_wait_for_the_hub() {
+    let m = machine(&[OLD]);
+    let (runner, statuses) = fake_status_sequence(vec![(OLD, None)]);
+    let src = release_server(&[NEW]).await;
+    let mut standalone = host();
+    standalone.hub_wait_polls = 10;
+    let err = update_worker(&update_to(NEW), &m.layout, &runner, &src, &standalone)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CtlError::HubVersionUnknown), "{err}");
+    assert_eq!(statuses.load(Ordering::SeqCst), 1);
 }

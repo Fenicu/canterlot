@@ -52,6 +52,8 @@ pub fn host() -> WorkerHost {
         in_unit: true,
         polls: 3,
         poll_delay: Duration::ZERO,
+        hub_wait_polls: 4,
+        hub_wait_delay: Duration::ZERO,
         answer: None,
     }
 }

@@ -151,6 +151,9 @@ pub struct UpdateArgs {
     pub from_dir: Option<PathBuf>,
     #[arg(long)]
     pub force: bool,
+    /// Скрытый флаг цепочки на хосте хаба: воркер ждёт, пока увидит новую версию хаба.
+    #[arg(long, hide = true)]
+    pub hub_chain: bool,
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Default)]

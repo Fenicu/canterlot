@@ -46,6 +46,7 @@ pub enum UpdateReport {
         user: String,
         status: i32,
         output: String,
+        errors: String,
     },
 }
 
@@ -73,8 +74,11 @@ impl fmt::Display for UpdateReport {
                 user,
                 status,
                 output,
+                errors,
             } => {
+                // Причина отказа уходит в stderr, без неё отчёт бесполезен.
                 write!(f, "{output}")?;
+                write!(f, "{errors}")?;
                 if *status != 0 {
                     writeln!(
                         f,
@@ -313,11 +317,15 @@ pub async fn update(
         if args.force {
             child.push("--force");
         }
+        // Воркер на этом хосте обновляется сразу после перезапуска хаба: он должен
+        // дождаться, пока увидит новую версию, иначе проверка «хаб первым» сорвётся.
+        child.push("--hub-chain");
         let out = run_as_worker(runner, layout, &state, &user, &child).await?;
         reports.push(UpdateReport::Worker {
             user,
             status: out.status,
             output: String::from_utf8_lossy(&out.stdout).into_owned(),
+            errors: String::from_utf8_lossy(&out.stderr).into_owned(),
         });
     }
     Ok(reports)
