@@ -37,7 +37,7 @@ pub enum CtlError {
     Busy(Option<OpRecord>),
     #[error("unfinished: {0:?}")]
     Unfinished(OpRecord),
-    #[error("ambiguous: {0:?}")]
+    #[error("ambiguous: {}", ambiguous_text(.0))]
     Ambiguous(OpRecord),
     #[error("op_not_found: {0}")]
     OpNotFound(String),
@@ -86,6 +86,24 @@ pub enum CtlError {
     UserNotFound(String),
     #[error("bad_output: {0}")]
     BadOutput(String),
+    #[error("migrations_incompatible: {0}")]
+    MigrationsIncompatible(String),
+    #[error("insufficient_space: {0}")]
+    InsufficientSpace(String),
+    #[error("hub_not_installed: no hub stack is recorded in /etc/canterlot/install.toml")]
+    HubNotInstalled,
+    #[error(
+        "needs_owner: the last operation {0} stopped for manual steps (see `canterlot status`); after fixing, run the command again with --force"
+    )]
+    NeedsOwnerPending(String),
+    #[error("admit_failed: {0}")]
+    AdmitFailed(String),
+    #[error("live_sessions: {0} live sessions; stop them first or pass --force")]
+    LiveSessions(u64),
+    #[error("confirmation_required: {0}")]
+    ConfirmationRequired(String),
+    #[error("bad_name: {0}")]
+    BadName(String),
     #[error("cancelled")]
     Cancelled,
     #[error(
@@ -128,4 +146,17 @@ pub enum CtlError {
     ConfirmationMismatch(String),
     #[error("{0}")]
     Other(String),
+}
+
+/// Неоднозначная запись: какая операция, на какой фазе и что проверить руками.
+fn ambiguous_text(rec: &OpRecord) -> String {
+    let mut text = format!(
+        "operation {} ({:?}) stopped at phase {} in a state that cannot be continued automatically",
+        rec.id, rec.kind, rec.phase
+    );
+    for step in &rec.details.manual {
+        text.push_str("; ");
+        text.push_str(step);
+    }
+    text
 }

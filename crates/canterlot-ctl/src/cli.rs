@@ -31,6 +31,19 @@ impl Version {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Числовой порядок версий: строковый ставил бы 1.10.0 раньше 1.9.0.
+    pub fn key(&self) -> (u64, u64, u64) {
+        let mut parts = self
+            .0
+            .split('.')
+            .map(|p| p.parse::<u64>().unwrap_or(u64::MAX));
+        (
+            parts.next().unwrap_or_default(),
+            parts.next().unwrap_or_default(),
+            parts.next().unwrap_or_default(),
+        )
+    }
 }
 
 impl FromStr for Version {

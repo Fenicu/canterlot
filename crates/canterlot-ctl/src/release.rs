@@ -174,27 +174,42 @@ pub async fn fetch(
     })
 }
 
-fn version_in_dir(dir: &Path, assets: &[&str]) -> Result<Version, CtlError> {
-    let release = dir.join("RELEASE");
-    if release.is_file() {
-        #[derive(Deserialize)]
-        struct Release {
-            version: String,
+/// Версия каталога выпуска: строка `version=` в `RELEASE` (формат `ключ=значение`, как его
+/// пишет build-release.sh), иначе имя единственного архива хаба в каталоге.
+pub fn dir_version(dir: &Path) -> Result<Version, CtlError> {
+    match fs::read_to_string(dir.join("RELEASE")) {
+        Ok(text) => {
+            for line in text.lines() {
+                if let Some((key, value)) = line.split_once('=')
+                    && key.trim() == "version"
+                {
+                    return Version::parse(value.trim().trim_matches('"'));
+                }
+            }
         }
-        let parsed: Release = toml::from_str(&fs::read_to_string(release)?)?;
-        return Version::parse(&parsed.version);
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
     }
-    for name in assets {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let name = entry?.file_name();
+        let Some(name) = name.to_str() else { continue };
         // Машине воркера нужен только его архив: версия читается и из его имени.
         if let Some(rest) = name
             .strip_prefix("canterlot-hub-")
             .or_else(|| name.strip_prefix("canterlot-worker-"))
-            && let Some(version) = rest.split("-x86_64").next()
+            && let Some(version) = rest.strip_suffix("-x86_64-linux-gnu.tar.gz")
         {
-            return Version::parse(version);
+            let version = Version::parse(version)?;
+            if !found.contains(&version) {
+                found.push(version);
+            }
         }
     }
-    Err(CtlError::AssetMissing("version".into()))
+    match found.as_slice() {
+        [one] => Ok(one.clone()),
+        _ => Err(CtlError::AssetMissing("version".into())),
+    }
 }
 
 pub fn from_dir(dir: &Path, assets: &[&str]) -> Result<Staged, CtlError> {
@@ -214,7 +229,7 @@ pub fn from_dir(dir: &Path, assets: &[&str]) -> Result<Staged, CtlError> {
         files.insert(name.to_string(), path);
     }
     Ok(Staged {
-        version: version_in_dir(dir, assets)?,
+        version: dir_version(dir)?,
         dir: dir.to_path_buf(),
         files,
     })
@@ -361,6 +376,26 @@ mod tests {
         assert_eq!(a.ctl, "canterlot-1.2.3-x86_64-linux.tar.gz");
         assert_eq!(a.install, "install.sh");
         assert_eq!(a.sums, "SHA256SUMS");
+    }
+
+    #[test]
+    fn dir_version_reads_key_value_release_and_falls_back_to_hub_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path()
+                .join("canterlot-hub-1.4.0-x86_64-linux-gnu.tar.gz"),
+            b"",
+        )
+        .unwrap();
+        assert_eq!(dir_version(dir.path()).unwrap().as_str(), "1.4.0");
+        fs::write(
+            dir.path().join("RELEASE"),
+            "sha=0123456789ab\nversion=1.4.0\nsource=0000000000000000000000000000000000000000\n",
+        )
+        .unwrap();
+        assert_eq!(dir_version(dir.path()).unwrap().as_str(), "1.4.0");
+        fs::write(dir.path().join("RELEASE"), "sha=0123456789ab\n").unwrap();
+        assert_eq!(dir_version(dir.path()).unwrap().as_str(), "1.4.0");
     }
 
     #[test]

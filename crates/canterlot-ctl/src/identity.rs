@@ -81,10 +81,20 @@ pub async fn db_identity(runner: &dyn Runner, layout: &Layout) -> Result<DbIdent
         }
         Err(err) => return Err(err.into()),
     }
+    db_identity_of(runner, layout, "canterlot").await
+}
+
+/// Тождество произвольной базы кластера без проверки манифеста: так откат читает
+/// восстановленную копию до того, как она станет `canterlot`.
+pub async fn db_identity_of(
+    runner: &dyn Runner,
+    layout: &Layout,
+    database: &str,
+) -> Result<DbIdentity, CtlError> {
     let out = run_ok(
         runner,
         "psql identity",
-        psql(layout, "canterlot", IDENTITY_SQL),
+        psql(layout, database, IDENTITY_SQL),
     )
     .await?;
     parse_identity(&stdout(&out))

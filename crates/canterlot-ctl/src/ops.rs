@@ -71,6 +71,36 @@ pub struct DbIdentity {
     pub owner_id: Uuid,
 }
 
+/// Подробности обновления хаба, нужные продолжению после сбоя: всё, что откат и проверка
+/// восстановленной базы должны знать о состоянии до обновления.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OpDetails {
+    /// Строки `_sqlx_migrations` до обновления: «версия hex успех».
+    #[serde(default)]
+    pub migrations: Vec<String>,
+    /// Число таблиц схемы `public` до обновления.
+    #[serde(default)]
+    pub tables: Option<u64>,
+    /// Базы, которые создаёт и переименовывает откат этой операции.
+    #[serde(default)]
+    pub restore_db: Option<String>,
+    #[serde(default)]
+    pub restore_oid: Option<u32>,
+    #[serde(default)]
+    pub failed_db: Option<String>,
+    /// Причина отката или отказа; печатается в отчёте.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Мягкие сбои после точки фиксации и ручная проверка для неоднозначного состояния.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub manual: Vec<String>,
+    /// Имя, которое добавляет `tls add-name`.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct OpRecord {
     pub id: OpId,
@@ -84,6 +114,8 @@ pub struct OpRecord {
     pub history: Vec<(DateTime<Utc>, String)>,
     pub result: Option<OpResult>,
     pub workers: Vec<WorkerUpdate>,
+    #[serde(default)]
+    pub details: OpDetails,
 }
 
 impl OpRecord {
@@ -101,6 +133,7 @@ impl OpRecord {
             history: vec![(now, "begin".into())],
             result: None,
             workers: Vec::new(),
+            details: OpDetails::default(),
         }
     }
 }
@@ -164,6 +197,11 @@ pub fn advance(dir: &Path, rec: &mut OpRecord, phase: &str) -> Result<(), CtlErr
     save(dir, rec)
 }
 
+/// Сохраняет изменённые подробности, не меняя фазу.
+pub fn checkpoint(dir: &Path, rec: &OpRecord) -> Result<(), CtlError> {
+    save(dir, rec)
+}
+
 pub fn finish(dir: &Path, rec: &mut OpRecord, result: OpResult) -> Result<(), CtlError> {
     rec.result = Some(result);
     rec.phase = "done".into();
@@ -198,14 +236,30 @@ pub fn unfinished(dir: &Path) -> Result<Option<OpRecord>, CtlError> {
         .find(|rec| rec.result.is_none()))
 }
 
-/// Тождество базы из последней успешно завершённой операции: с ним сверяется повторная
-/// установка поверх сохранённых данных.
+/// Тождество живой базы из последней операции, после которой оно известно точно: с ним
+/// сверяются повторная установка поверх сохранённых данных и каждое обновление. Откат
+/// записывает тождество восстановленной базы (у неё другой oid), отказ до изменений —
+/// прежнее; после `needs_owner` состояние базы решает владелец, такие записи пропускаются.
 pub fn last_identity(dir: &Path) -> Result<Option<DbIdentity>, CtlError> {
     Ok(records(dir)?
         .into_iter()
         .rev()
-        .filter(|rec| rec.result == Some(OpResult::Done))
+        .filter(|rec| {
+            matches!(
+                rec.result,
+                Some(
+                    OpResult::Done
+                        | OpResult::RolledBack { .. }
+                        | OpResult::FailedBeforeChange { .. }
+                )
+            )
+        })
         .find_map(|rec| rec.db_identity))
+}
+
+/// Все записи по возрастанию времени создания: хранение дампов и баз по ним.
+pub fn all(dir: &Path) -> Result<Vec<OpRecord>, CtlError> {
+    records(dir)
 }
 
 pub fn latest(dir: &Path) -> Result<Option<OpRecord>, CtlError> {
