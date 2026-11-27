@@ -105,3 +105,11 @@ retries = 2
 [[profile.default.overrides]]
 filter = 'test(=dictation_buffers_while_loading_and_finishes_with_final)'
 retries = 2
+
+# QUARANTINE: 27.11 упал в проверке main и у делегата #302; отдельно на спокойной машине 1/15 на
+# main и 2/30 на v1.53.1, то есть было и до этих изменений. Родитель получает итог первого
+# хода («Запустила фон») вместо хода пробуждения: окно тишины, видимо, иногда отсчитывается
+# от конца хода, а не от конца фона. Причина не найдена, повтор разрешён только этому тесту.
+[[profile.default.overrides]]
+filter = 'test(=session_tools_e2e::wake_turn_right_after_background_is_the_reported_result)'
+retries = 2
