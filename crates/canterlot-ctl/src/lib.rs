@@ -13,6 +13,7 @@ pub mod layout;
 pub mod ops;
 pub mod release;
 pub mod render;
+pub mod root;
 pub mod runner;
 pub mod stack;
 pub mod state;

@@ -22,6 +22,7 @@ use crate::{
     ops::{self, OpKind, OpRecord, OpResult},
     release::{self, ReleaseSource, Staged},
     render::{self, EXTERNAL_BACKEND_PORT, HUB_BIN, HUB_CONFIG, HUB_GID, HUB_UID},
+    root::ensure_root,
     runner::Runner,
     stack::{cmd, compose, hub_exec, psql, run_ok, stdout},
     state::{self, Components, HostClass, InstallState, WorkerClass},
@@ -804,6 +805,14 @@ pub async fn install(
     src: &ReleaseSource,
     host: &Host,
 ) -> Result<InstallReport, CtlError> {
+    // Утилита сама просит sudo: он сохранит SUDO_USER для пользователя воркера.
+    if !host.is_root {
+        let argv = std::env::args_os()
+            .skip(1)
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        ensure_root(&argv)?;
+    }
     // Проверки без побочных эффектов идут до первой команды и первой записи.
     let worker_user = if args.hub_only {
         None
@@ -815,9 +824,6 @@ pub async fn install(
                 .ok_or(CtlError::WorkerUserRequired)?,
         )
     };
-    if !host.is_root {
-        return Err(CtlError::RootRequired);
-    }
     let class = state::classify_hub(layout)?;
     if class == HostClass::NativeInstall {
         return Err(CtlError::NativeInstallFound);
