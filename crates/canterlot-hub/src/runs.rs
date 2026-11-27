@@ -11,6 +11,8 @@ const MAX_GIT_FILES: usize = 200;
 const MAX_GIT_SUBJECT_BYTES: usize = 256;
 const MAX_GIT_PATH_BYTES: usize = 1024;
 const MAX_GIT_BYTES: usize = 32 * 1024;
+/// Веток в пробе слияния: столько хаб и просит (`reminders::plan::MAX_MERGE_BRANCHES`).
+const MAX_GIT_MERGES: usize = 10;
 
 /// Форма `runs.git`; тексты коммитов и пути не попадают ни в журнал, ни в `Debug`.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -29,6 +31,20 @@ struct StoredGit {
     commits: Vec<StoredCommit>,
     #[serde(default)]
     files: Vec<StoredFile>,
+    /// Проба слияния веток делегатов в HEAD на конец хода; пусто у старого воркера.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    merges: Vec<StoredMerge>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct StoredMerge {
+    branch: String,
+    #[serde(default)]
+    tip: String,
+    #[serde(default)]
+    unmerged: u32,
+    #[serde(default)]
+    missing: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -75,6 +91,16 @@ impl From<&GitFacts> for StoredGit {
                     status: f.status.clone(),
                 })
                 .collect(),
+            merges: facts
+                .merges
+                .iter()
+                .map(|m| StoredMerge {
+                    branch: m.branch.clone(),
+                    tip: m.tip.clone(),
+                    unmerged: m.unmerged,
+                    missing: m.missing,
+                })
+                .collect(),
         }
     }
 }
@@ -90,6 +116,10 @@ impl StoredGit {
         }
         self.head_after = later.head_after;
         self.dirty = later.dirty;
+        // Слияние — снимок на конец хода: позднее состояние заменяет прежнее целиком.
+        if !later.merges.is_empty() {
+            self.merges = later.merges;
+        }
         self.truncated |= later.truncated;
         for commit in later.commits {
             if !self.commits.iter().any(|c| c.sha == commit.sha) {
@@ -148,6 +178,11 @@ pub fn bound_git(facts: &mut GitFacts) {
         clip_text(&mut file.status, 8);
         truncated |= clip_text(&mut file.path, MAX_GIT_PATH_BYTES);
     }
+    facts.merges.truncate(MAX_GIT_MERGES);
+    // Обрезанное имя ветки или вершина ни с чем не совпадут: такую запись проще выбросить.
+    facts
+        .merges
+        .retain(|m| !m.branch.contains('\0') && m.branch.len() <= 255 && m.tip.len() <= 64);
     facts.truncated = truncated;
     while facts.encoded_len() > MAX_GIT_BYTES {
         facts.truncated = true;

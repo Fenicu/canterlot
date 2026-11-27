@@ -31,10 +31,14 @@ pub const DIGEST_INTERVAL_SECS: i64 = 3 * 3600;
 pub const MAX_LINES: usize = 5;
 /// Название задачи в строке сводки.
 const TITLE_CHARS: usize = 60;
+/// Веток делегатов, о слиянии которых хаб спрашивает воркер за один ход.
+pub const MAX_MERGE_BRANCHES: i64 = 10;
 
 /// Почему задача попала в сводку. Порядок вариантов — порядок проверки.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
+    /// Ветка исполнителя уже слита в HEAD оркестратора: остаётся принять результат.
+    Merged,
     /// На проверке, а исполнителя уже нет: принят, в архиве, в корзине или удалён.
     ReviewOrphan,
     /// На проверке дольше [`REVIEW_IDLE_SECS`] у простаивающего исполнителя.
@@ -50,6 +54,7 @@ pub enum Reason {
 impl Reason {
     fn key(self) -> &'static str {
         match self {
+            Self::Merged => "merged",
             Self::ReviewOrphan => "review_orphan",
             Self::ReviewIdle => "review_idle",
             Self::ExecutorStopped | Self::NoExecutor => "no_executor",
@@ -77,6 +82,39 @@ pub struct TaskFacts {
     pub executor_busy: bool,
     /// Ходов оркестратора, закончившихся после правки задачи.
     pub orchestrator_runs: i64,
+    /// Ветка рабочей копии исполнителя, пока копия есть или ветка оставлена.
+    pub executor_branch: Option<String>,
+    /// HEAD исполнителя на конец его последнего хода с фактами git.
+    pub executor_head: Option<String>,
+    /// Исполнитель сделал хотя бы один коммит.
+    pub executor_commits: bool,
+}
+
+/// Проба слияния ветки из последнего хода оркестратора (`runs.git.merges`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct Merge {
+    pub branch: String,
+    #[serde(default)]
+    pub tip: String,
+    #[serde(default)]
+    pub unmerged: u32,
+    #[serde(default)]
+    pub missing: bool,
+}
+
+/// Вершина ветки исполнителя, если вся его работа уже в HEAD оркестратора: в `git cherry`
+/// не осталось строк `+`, ветка указывает туда же, где исполнитель закончил, в ней есть
+/// его коммиты, и он сейчас не работает. Пустая ветка без коммитов слитой не считается.
+pub fn merged<'a>(task: &TaskFacts, merges: &'a [Merge]) -> Option<&'a str> {
+    let branch = task.executor_branch.as_deref()?;
+    let merge = merges.iter().find(|merge| merge.branch == branch)?;
+    (!merge.missing
+        && merge.unmerged == 0
+        && !merge.tip.is_empty()
+        && task.executor_head.as_deref() == Some(merge.tip.as_str())
+        && task.executor_commits
+        && !task.executor_busy)
+        .then_some(merge.tip.as_str())
 }
 
 /// Причина или `None`, если задача выглядит живой.
@@ -137,6 +175,12 @@ fn title(text: &str) -> String {
 pub fn line(task: &TaskFacts, reason: Reason) -> String {
     let head = format!("#{} \"{}\"", task.number, title(&task.title));
     match reason {
+        Reason::Merged => format!(
+            "{head} is {}, and its branch {} is merged into your HEAD: session_accept {} marks it done and removes the worktree.",
+            task.state,
+            task.executor_branch.as_deref().unwrap_or_default(),
+            task.executor_conversation_id.unwrap_or_default()
+        ),
         Reason::ReviewOrphan => format!(
             "{head} is in_review, but its executor is accepted, archived or deleted: set done or cancelled with plan_update."
         ),
@@ -194,7 +238,17 @@ select t.id, t.number, t.title, t.state, t.revision, t.executor_conversation_id,
                      or x.phase in ('generating', 'running_tool', 'context_maintenance',
                                     'awaiting_permission', 'awaiting_answer'))) as executor_busy,
        (select count(*) from runs r where r.conversation_id = t.orchestrator_conversation_id
-          and r.finished_at > t.updated_at) as orchestrator_runs
+          and r.finished_at > t.updated_at) as orchestrator_runs,
+       case when e.worktree->>'state' = 'active'
+                 or coalesce((e.worktree->>'branch_kept')::boolean, false)
+            then e.worktree->>'branch' end as executor_branch,
+       (select r.git->>'head_after' from runs r
+         where r.conversation_id = t.executor_conversation_id
+           and r.git->>'available' = 'true' and coalesce(r.git->>'head_after', '') <> ''
+         order by r.finished_at desc nulls last limit 1) as executor_head,
+       exists(select 1 from runs r where r.conversation_id = t.executor_conversation_id
+                and jsonb_array_length(coalesce(r.git->'commits', '[]'::jsonb)) > 0)
+         as executor_commits
 from plan_tasks t
 left join conversations e on e.id = t.executor_conversation_id
 where t.orchestrator_conversation_id = $1 and t.archived_at is null
@@ -239,21 +293,30 @@ pub async fn take_in_tx(
         .bind(orchestrator)
         .fetch_all(&mut *conn)
         .await?;
+    let merges = last_merges(conn, orchestrator).await?;
     let mut keep = BTreeMap::new();
     let mut picked = Vec::new();
     for task in &tasks {
-        let Some(reason) = classify(task) else {
+        // Слитая ветка называется по вершине: новые коммиты в ту же ветку — новый факт.
+        let found = match merged(task, &merges) {
+            Some(tip) => Some((Reason::Merged, format!("merged:{tip}"))),
+            None => classify(task).map(|reason| {
+                let key = format!("{}:{}", reason.key(), task.revision);
+                (reason, key)
+            }),
+        };
+        let Some((reason, key)) = found else {
             if let Some(key) = noted.0.get(&task.id) {
                 keep.insert(task.id, key.clone());
             }
             continue;
         };
-        let key = format!("{}:{}", reason.key(), task.revision);
         if noted.0.get(&task.id) == Some(&key) {
             keep.insert(task.id, key);
             continue;
         }
-        if due {
+        // Слитая ветка — свежий факт, по которому есть что сделать: она идёт вне срока.
+        if due || reason == Reason::Merged {
             picked.push((task, reason, key));
         } else if let Some(key) = noted.0.get(&task.id) {
             keep.insert(task.id, key.clone());
@@ -266,6 +329,8 @@ pub async fn take_in_tx(
         }
         return Ok(None);
     }
+    // Слитые первыми: при обрезке сводки они важнее.
+    picked.sort_by_key(|(task, reason, _)| (*reason != Reason::Merged, task.number));
     let lines: Vec<String> = picked
         .iter()
         .map(|(task, reason, _)| line(task, *reason))
@@ -276,6 +341,50 @@ pub async fn take_in_tx(
     }
     store(conn, orchestrator, &keep, due).await?;
     Ok(Some((digest(&lines), json!(numbers))))
+}
+
+/// Пробы слияния последнего законченного хода оркестратора: устаревший снимок не держится,
+/// следующий ход без пробы его обнуляет.
+async fn last_merges(
+    conn: &mut PgConnection,
+    orchestrator: Uuid,
+) -> Result<Vec<Merge>, sqlx::Error> {
+    let merges: Option<Json<Vec<Merge>>> = sqlx::query_scalar(
+        "select coalesce(git->'merges', '[]'::jsonb) from runs
+         where conversation_id = $1 and finished_at is not null and git is not null
+         order by finished_at desc limit 1",
+    )
+    .bind(orchestrator)
+    .fetch_optional(conn)
+    .await?;
+    Ok(merges.map(|merges| merges.0).unwrap_or_default())
+}
+
+/// Ветки, о слиянии которых спросить воркер при выдаче ввода оркестратору: рабочие копии
+/// исполнителей открытых задач в том же репозитории на той же машине, свежие задачи первыми.
+pub async fn merge_branches_in_tx(
+    conn: &mut PgConnection,
+    orchestrator: Uuid,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select e.worktree->>'branch' from plan_tasks t
+         join conversations e on e.id = t.executor_conversation_id
+         join conversations o on o.id = t.orchestrator_conversation_id
+         where t.orchestrator_conversation_id = $1 and t.archived_at is null
+           and t.state in ('in_progress', 'in_review', 'blocked')
+           and e.machine_id = o.machine_id
+           and e.worktree->>'branch' like 'canterlot/%'
+           and (e.worktree->>'state' = 'active'
+                or coalesce((e.worktree->>'branch_kept')::boolean, false))
+           and e.worktree->>'source_workdir' = coalesce(o.worktree->>'source_workdir', o.workdir)
+         group by e.worktree->>'branch'
+         order by max(t.number) desc
+         limit $2",
+    )
+    .bind(orchestrator)
+    .bind(MAX_MERGE_BRANCHES)
+    .fetch_all(conn)
+    .await
 }
 
 async fn store(
@@ -314,7 +423,50 @@ mod tests {
             executor_live: true,
             executor_busy: false,
             orchestrator_runs: 0,
+            executor_branch: Some("canterlot/00000001".into()),
+            executor_head: Some("a1".into()),
+            executor_commits: true,
         }
+    }
+
+    #[test]
+    fn merged_needs_the_executor_tip_and_its_commits() {
+        let merge = |tip: &str, unmerged: u32, missing: bool| Merge {
+            branch: "canterlot/00000001".into(),
+            tip: tip.into(),
+            unmerged,
+            missing,
+        };
+        let t = task("in_review");
+        assert_eq!(merged(&t, &[merge("a1", 0, false)]), Some("a1"));
+        assert_eq!(merged(&t, &[merge("a1", 1, false)]), None, "a + line left");
+        assert_eq!(merged(&t, &[merge("", 0, true)]), None, "no branch");
+        assert_eq!(
+            merged(&t, &[merge("b2", 0, false)]),
+            None,
+            "not the executor's tip"
+        );
+        assert_eq!(merged(&t, &[]), None, "nothing probed");
+        let mut empty = task("in_review");
+        empty.executor_commits = false;
+        assert_eq!(merged(&empty, &[merge("a1", 0, false)]), None, "no commits");
+        let mut busy = task("in_progress");
+        busy.executor_busy = true;
+        assert_eq!(
+            merged(&busy, &[merge("a1", 0, false)]),
+            None,
+            "still working"
+        );
+        let mut removed = task("in_review");
+        removed.executor_branch = None;
+        assert_eq!(merged(&removed, &[merge("a1", 0, false)]), None);
+        assert_eq!(
+            line(&t, Reason::Merged),
+            format!(
+                "#7 \"Свести план\" is in_review, and its branch canterlot/00000001 is merged into your HEAD: session_accept {} marks it done and removes the worktree.",
+                Uuid::nil()
+            )
+        );
     }
 
     #[test]

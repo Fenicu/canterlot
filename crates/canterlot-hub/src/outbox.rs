@@ -72,6 +72,9 @@ struct InputPayload {
     /// Сводка о родителе для бокового чата; пусто у обычной сессии.
     #[serde(default)]
     side_preface: String,
+    /// Ветки делегатов для пробы слияния на конец хода (`git_merge_probe_v1`).
+    #[serde(default)]
+    merge_branches: Vec<String>,
 }
 #[derive(Deserialize)]
 struct SettingsPayload {
@@ -376,6 +379,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                     permission_mode: s.permission_mode.unwrap_or_default(),
                     instructions: instructions_proto(&s.instructions),
                 }),
+                merge_branches: payload.merge_branches,
             })
         }
         "start_execution" => command::Kind::StartExecution(StartExecution {

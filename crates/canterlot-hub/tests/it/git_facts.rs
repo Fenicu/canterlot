@@ -29,6 +29,7 @@ fn facts(before: &str, after: &str, commits: &[(&str, &str)], files: &[(&str, &s
                 status: (*status).into(),
             })
             .collect(),
+        merges: Vec::new(),
     }
 }
 
@@ -173,5 +174,48 @@ async fn terminal_git_facts_leave_a_finished_turn_alone() -> TestResult {
     let (forced, stored) = closed_run(&pool, &r).await;
     assert!(!forced);
     assert_eq!(stored.unwrap()["head_after"], "bbb");
+    Ok(())
+}
+
+/// Проба слияния веток хранится рядом с коммитами; имя с NUL и лишние записи отбрасываются.
+#[tokio::test]
+async fn ingest_stores_branch_merges() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let mut r = Run::new(&pool).await;
+    let i = r.input(&pool).await;
+    let ms = Utc::now().timestamp_millis();
+    r.send(vec![accepted(i.command_id, ms)]).await;
+    let mut git = facts("aaa", "aaa", &[], &[]);
+    git.merges = (0..12)
+        .map(|n| BranchMerge {
+            branch: format!("canterlot/0000000{n}"),
+            tip: format!("t{n}"),
+            unmerged: n,
+            missing: false,
+        })
+        .collect();
+    git.merges[1].branch = "canterlot/\0bad".into();
+    git.merges[2] = BranchMerge {
+        branch: "canterlot/00000002".into(),
+        missing: true,
+        ..Default::default()
+    };
+    r.send(vec![with_git(
+        finished(&r, i.command_id, ms + 1000),
+        Some(git),
+        false,
+    )])
+    .await;
+    let merges = stored(&pool).await.unwrap()["merges"].clone();
+    let merges = merges.as_array().unwrap();
+    assert_eq!(merges.len(), 9, "ten kept, one dropped: {merges:?}");
+    assert_eq!(
+        merges[0],
+        json!({"branch": "canterlot/00000000", "tip": "t0", "unmerged": 0, "missing": false})
+    );
+    assert_eq!(
+        merges[1],
+        json!({"branch": "canterlot/00000002", "tip": "", "unmerged": 0, "missing": true})
+    );
     Ok(())
 }

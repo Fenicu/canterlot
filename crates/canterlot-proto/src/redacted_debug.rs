@@ -16,6 +16,7 @@ impl fmt::Debug for DeliverInput {
             .field("input_id", &self.input_id)
             .field("conversation_id", &self.conversation_id)
             .field("content", &self.content)
+            .field("merge_branches", &self.merge_branches.len())
             .finish()
     }
 }
@@ -203,6 +204,18 @@ impl fmt::Debug for crate::worker::v1::GitFacts {
             .field("truncated", &self.truncated)
             .field("commits", &self.commits.len())
             .field("files", &self.files.len())
+            .field("merges", &self.merges)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Имя ветки — уровень сообщения, как пути: в отладочный вывод идёт только длина.
+impl fmt::Debug for crate::worker::v1::BranchMerge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BranchMerge")
+            .field("branch_bytes", &self.branch.len())
+            .field("unmerged", &self.unmerged)
+            .field("missing", &self.missing)
             .finish_non_exhaustive()
     }
 }

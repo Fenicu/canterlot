@@ -70,6 +70,8 @@ pub const CAPABILITY_RUNNERS_V1: &str = "runners_v1";
 /// не берёт задержку выключения у logind, и всё идёт как раньше: `machine_rebooted`
 /// после загрузки.
 pub const CAPABILITY_SHUTDOWN_STOP_V1: &str = "shutdown_stop_v1";
+/// Воркер отвечает на `DeliverInput.merge_branches` пробой `git cherry` в `GitFacts.merges`.
+pub const CAPABILITY_GIT_MERGE_PROBE_V1: &str = "git_merge_probe_v1";
 
 /// Параллельных предпроверок на машину: одна попытка на расписание.
 pub const MAX_PRECHECKS_PER_MACHINE: usize = 4;

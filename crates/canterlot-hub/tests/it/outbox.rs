@@ -1309,6 +1309,21 @@ fn settings_are_withheld_if_reconnected_session_lacks_pilot_v1() {
 }
 
 #[test]
+fn deliver_input_carries_merge_branches_from_the_payload() {
+    use canterlot_hub::outbox::to_proto;
+    let row = command_row(
+        "deliver_input",
+        json!({"input_id":Uuid::now_v7(),"conversation_id":Uuid::now_v7(),
+               "content":[{"type":"text","text":"text"}],"settings":null,"settings_rev":null,
+               "merge_branches":["canterlot/00000001"]}),
+    );
+    let Some(command::Kind::DeliverInput(input)) = to_proto(&row).unwrap().kind else {
+        panic!("not a deliver_input");
+    };
+    assert_eq!(input.merge_branches, ["canterlot/00000001"]);
+}
+
+#[test]
 fn to_proto_builds_deliver_decision_from_command_payload() {
     use canterlot_hub::outbox::to_proto;
     use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};

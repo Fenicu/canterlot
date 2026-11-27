@@ -1893,8 +1893,8 @@ fn background_work_changed_keeps_its_wire_shape() {
 #[test]
 fn session_tools_messages_are_stable() {
     use canterlot_proto::worker::v1::{
-        GitCommit, GitFacts, GitFile, MachineReport, RemoveWorktree, RunFinished, WorktreeRemoved,
-        WorktreeSpec,
+        BranchMerge, GitCommit, GitFacts, GitFile, MachineReport, RemoveWorktree, RunFinished,
+        WorktreeRemoved, WorktreeSpec,
     };
 
     let spec = WorktreeSpec {
@@ -2013,9 +2013,16 @@ fn session_tools_messages_are_stable() {
             path: "secret/path.rs".into(),
             status: "M".into(),
         }],
+        merges: vec![BranchMerge {
+            branch: "canterlot/0190abcd".into(),
+            tip: "5d6e7f8".into(),
+            unmerged: 2,
+            missing: false,
+        }],
     };
     let bytes = facts.encode_to_vec();
     assert_eq!(bytes[0], 0x08, "available is field 1");
+    assert!(bytes.contains(&0x42), "merges is field 8");
     assert!(bytes.contains(&0x32), "commits is field 6");
     assert!(bytes.contains(&0x3A), "files is field 7");
     assert_roundtrip(facts.clone());

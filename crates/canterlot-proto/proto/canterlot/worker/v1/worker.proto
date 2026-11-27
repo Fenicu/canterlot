@@ -466,6 +466,9 @@ message DeliverInput {
   string conversation_id = 2;
   repeated ContentBlock content = 3;
   SettingsOverride settings = 4;
+  // Ветки делегатов (`canterlot/…`, не больше 10), для которых на конец хода нужен
+  // `GitFacts.merges` относительно HEAD рабочего каталога. Только при `git_merge_probe_v1`.
+  repeated string merge_branches = 5;
 }
 
 message ContentBlock {
@@ -963,6 +966,18 @@ message GitFacts {
   bool truncated = 5;
   repeated GitCommit commits = 6;
   repeated GitFile files = 7;
+  // По одной записи на ветку из `DeliverInput.merge_branches` хода.
+  repeated BranchMerge merges = 8;
+}
+
+// Слита ли ветка в HEAD рабочего каталога в смысле `git cherry HEAD <branch>`.
+message BranchMerge {
+  string branch = 1;
+  // Вершина ветки; пусто, если ветки нет.
+  string tip = 2;
+  // Коммитов ветки без равного патча в HEAD (строки `+`).
+  uint32 unmerged = 3;
+  bool missing = 4;
 }
 
 message WorktreeRemoved {

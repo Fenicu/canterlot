@@ -4536,6 +4536,7 @@ mod tests {
                         )),
                     }],
                     settings: None,
+                    merge_branches: Vec::new(),
                 })),
             }),
             files: Vec::new(),

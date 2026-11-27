@@ -199,13 +199,17 @@ async fn owner_input(pool: &PgPool, seed: &Seed, text: &str) -> delivery::Submit
 }
 
 async fn dispatched_content(pool: &PgPool, seed: &Seed) -> Value {
+    dispatched_payload(pool, seed, &[]).await["content"].clone()
+}
+
+async fn dispatched_payload(pool: &PgPool, seed: &Seed, capabilities: &[&str]) -> Value {
     let outcome = dispatch_next(
         pool,
         seed.conversation_id,
         GateInputs {
             machine_available: true,
             machine_reconciled: true,
-            session_capabilities: Vec::new(),
+            session_capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
         },
         Uuid::now_v7(),
     )
@@ -214,7 +218,7 @@ async fn dispatched_content(pool: &PgPool, seed: &Seed) -> Value {
     let DispatchOutcome::Dispatched { command_id, .. } = outcome else {
         panic!("input did not dispatch: {outcome:?}");
     };
-    sqlx::query_scalar("select payload->'content' from commands where id=$1")
+    sqlx::query_scalar("select payload from commands where id=$1")
         .bind(command_id)
         .fetch_one(pool)
         .await
@@ -554,6 +558,136 @@ async fn todo_reminder_skips_finished_lists_side_chats_and_the_setting(pool: PgP
     );
 }
 
+/// Законченный ход с фактами git `runs.git`; исполнение заводится, если его нет.
+async fn run_with_git(pool: &PgPool, conversation_id: Uuid, git: Value) {
+    let execution: Option<(Uuid, i64)> = sqlx::query_as(
+        "select id, generation from executions where conversation_id = $1
+         order by generation desc limit 1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap();
+    let (execution_id, generation) = match execution {
+        Some(row) => row,
+        None => {
+            let id = Uuid::now_v7();
+            sqlx::query(
+                "insert into executions (id, conversation_id, generation, state)
+                 values ($1, $2, 1, 'stopped')",
+            )
+            .bind(id)
+            .bind(conversation_id)
+            .execute(pool)
+            .await
+            .unwrap();
+            (id, 1)
+        }
+    };
+    let command_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into commands (id, machine_id, conversation_id, execution_id,
+                               execution_generation, kind, payload, delivery_state)
+         select $1, machine_id, id, $3, $4, 'deliver_input', '{}', 'completed'
+         from conversations where id = $2",
+    )
+    .bind(command_id)
+    .bind(conversation_id)
+    .bind(execution_id)
+    .bind(generation)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into runs (input_command_id, execution_id, conversation_id, started_at,
+                           finished_at, git)
+         values ($1, $2, $3, clock_timestamp(), clock_timestamp(), $4)",
+    )
+    .bind(command_id)
+    .bind(execution_id)
+    .bind(conversation_id)
+    .bind(git)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn merged_branch_is_told_outside_the_digest_interval(pool: PgPool) {
+    let seed = orchestrator(&pool).await;
+    let executor = child(&pool, &seed).await;
+    let branch = "canterlot/00000001";
+    sqlx::query(
+        "update conversations set worktree = $2, parent_conversation_id = $3, spawn_depth = 1
+         where id = $1",
+    )
+    .bind(executor)
+    .bind(
+        json!({"source_workdir": "/tmp/w", "path": "/tmp/w-wt", "branch": branch,
+                 "base": "HEAD", "state": "active", "detail": null, "branch_kept": null}),
+    )
+    .bind(seed.conversation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    task(&pool, &seed, 1, "in_review", Some(executor), "10 minutes").await;
+    run_with_git(
+        &pool,
+        executor,
+        json!({"available": true, "head_before": "a0", "head_after": "a1",
+               "commits": [{"sha": "a1", "subject": "Сделать"}], "files": []}),
+    )
+    .await;
+
+    owner_input(&pool, &seed, "слил ветку").await;
+    let payload = dispatched_payload(&pool, &seed, &["git_merge_probe_v1"]).await;
+    assert_eq!(payload["merge_branches"], json!([branch]));
+    assert_eq!(
+        payload["content"].as_array().unwrap().len(),
+        1,
+        "nothing to tell yet"
+    );
+
+    // Ход оркестратора кончился с пробой: ветка слита, а сводка только что была.
+    sqlx::query(
+        "insert into plan_reminders (orchestrator_conversation_id, last_digest_at)
+         values ($1, clock_timestamp())
+         on conflict (orchestrator_conversation_id)
+         do update set last_digest_at = excluded.last_digest_at",
+    )
+    .bind(seed.conversation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let probe = |tip: &str, unmerged: u32| {
+        json!({"available": true, "head_before": "o1", "head_after": "o2", "commits": [],
+               "files": [], "merges": [{"branch": branch, "tip": tip, "unmerged": unmerged,
+                                         "missing": false}]})
+    };
+    run_with_git(&pool, seed.conversation_id, probe("a1", 1)).await;
+    assert!(
+        prepare(&pool, seed.conversation_id, "plan_reminder")
+            .await
+            .is_empty(),
+        "a + line is left"
+    );
+    run_with_git(&pool, seed.conversation_id, probe("a1", 0)).await;
+    let notes = prepare(&pool, seed.conversation_id, "plan_reminder").await;
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].contains(&format!(
+            "#1 \"Задача 1\" is in_review, and its branch {branch} is merged into your HEAD: session_accept {executor} marks it done and removes the worktree."
+        )),
+        "{}",
+        notes[0]
+    );
+    assert!(
+        prepare(&pool, seed.conversation_id, "plan_reminder")
+            .await
+            .is_empty(),
+        "the same tip is told once"
+    );
+}
+
 /// Напоминания: настройка, план, список задач.
 /// Перед каждым случаем база возвращается к снимку пустой базы.
 #[tokio::test]
@@ -565,6 +699,7 @@ async fn agent_reminder_cases() {
         plan_digest_rides_the_next_dispatched_input,
         plan_digest_is_not_repeated_and_waits_three_hours,
         orphaned_reviews_are_capped_and_the_setting_turns_them_off,
+        merged_branch_is_told_outside_the_digest_interval,
         todo_in_progress_after_three_quiet_turns,
         todo_pending_only_after_ten_turns,
         todo_reminder_skips_finished_lists_side_chats_and_the_setting,

@@ -7,7 +7,7 @@ use crate::{
     events::{self, NewEvent, Scope},
     executions,
     model::{ExecutionState, HoldReason, PauseReason, RunSlot},
-    session::CAPABILITY_INSTRUCTIONS_V1,
+    session::{CAPABILITY_GIT_MERGE_PROBE_V1, CAPABILITY_INSTRUCTIONS_V1},
 };
 
 #[derive(Debug, Clone)]
@@ -294,6 +294,29 @@ pub async fn dispatch_next(
                 .execute(&mut *conn)
                 .await?;
         }
+    }
+    // Пробу слияния веток делегатов воркер делает на конец хода; список свежий на каждую
+    // выдачу, старый воркер поле не получает.
+    let branches = if gate
+        .session_capabilities
+        .iter()
+        .any(|v| v == CAPABILITY_GIT_MERGE_PROBE_V1)
+    {
+        crate::reminders::plan::merge_branches_in_tx(&mut *conn, conversation_id).await?
+    } else {
+        Vec::new()
+    };
+    if branches.is_empty() {
+        sqlx::query("update commands set payload = payload - 'merge_branches' where id=$1 and payload ? 'merge_branches'")
+            .bind(command_id)
+            .execute(&mut *conn)
+            .await?;
+    } else {
+        sqlx::query("update commands set payload = payload || jsonb_build_object('merge_branches', $2::text[]) where id=$1")
+            .bind(command_id)
+            .bind(&branches)
+            .execute(&mut *conn)
+            .await?;
     }
     // Напоминания складываются заметками прямо перед сборкой приставки и едут с этим вводом;
     // откат выдачи откатывает и их, и отметку о том, что они сказаны.
