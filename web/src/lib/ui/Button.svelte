@@ -12,6 +12,8 @@
   .primary, .primary:hover { background: var(--accent); color: var(--accent-ink); }
   .text-button { background: var(--transparent); color: var(--secondary); }
   .full { width: 100%; }
+  /* Кнопка во всю ширину не сжимается: её край ушёл бы из-под указателя. */
+  button:not(.full):active { transform: scale(var(--scale-press)); }
   button:disabled { color: var(--muted); opacity: var(--opacity-dim); cursor: default; background: var(--button-bg, var(--raised)); }
   .primary:disabled, .primary:disabled:hover { color: var(--muted); background: var(--accent-soft); }
   .text-button:disabled { background: var(--transparent); }

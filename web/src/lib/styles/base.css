@@ -23,7 +23,7 @@ textarea { resize: none; }
 svg { stroke-linecap: round; stroke-linejoin: round; }
 @media (hover: hover) and (pointer: fine) { button:hover { background: var(--hover); } }
 button:active, a:active, summary:active { background: var(--hover); }
-button:active { transform: scale(var(--scale-press)); }
+/* Сжатие при нажатии задают только компактные элементы: у широкой строки сжатие уводит край из-под указателя, и нажатие теряется. */
 :focus-visible { outline: var(--focus-width) solid var(--accent); outline-offset: var(--s1); }
 h1, h2, h3, p, pre { margin: var(--s0); }
 h1 { font-size: var(--fs-heading); font-weight: var(--weight-semibold); line-height: var(--lh-tight); letter-spacing: var(--tracking-tight); }

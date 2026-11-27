@@ -9,6 +9,7 @@
 <button type="button" aria-label={label} aria-expanded={expanded} aria-pressed={pressed} {...state} class:filled class:active onclick={inert ? undefined : onclick}><Icon name={icon} filled={solid} /></button>
 <style>
   button { min-width: var(--target); min-height: var(--target); display: inline-flex; align-items: center; justify-content: center; border: var(--s0); background: var(--transparent); color: inherit; padding: var(--s0); flex-shrink: 0; border-radius: var(--radius-round); }
+  button:active { transform: scale(var(--scale-press)); }
   .filled { background: var(--chat-bg); }
   /* Включённый переключатель получает акцент: заливка значка и есть отметка. */
   .active { color: var(--accent-link); }
