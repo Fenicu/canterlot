@@ -19,12 +19,12 @@
       }
     },
     "crates/canterlot-hub/tests/it/singletons.rs": {
-      "rust_sleep": {
-        "count": 16,
-        "reason": "перенесены тесты одиночек из final_wave.rs и rereview.rs: ожидание замка и состояния опросом, окна паузы захвата"
-      },
       "rust_clock": {
         "count": 3,
+        "reason": "перенесены тесты одиночек из final_wave.rs и rereview.rs: ожидание замка и состояния опросом, окна паузы захвата"
+      },
+      "rust_sleep": {
+        "count": 16,
         "reason": "перенесены тесты одиночек из final_wave.rs и rereview.rs: ожидание замка и состояния опросом, окна паузы захвата"
       }
     },
@@ -75,23 +75,14 @@
       "rust_clock": 2,
       "rust_sleep": 5
     },
-    "crates/canterlot-hub/tests/it/auth_geo.rs": {
-      "rust_clock": 1
-    },
     "crates/canterlot-hub/tests/it/auth_qr.rs": {
       "rust_sleep": 2
     },
     "crates/canterlot-hub/tests/it/auth_ws.rs": {
       "rust_sleep": 1
     },
-    "crates/canterlot-hub/tests/it/conversation_trash.rs": {
-      "rust_sleep": 3
-    },
     "crates/canterlot-hub/tests/it/conversations_api.rs": {
       "rust_sleep": 1
-    },
-    "crates/canterlot-hub/tests/it/credential_pushes.rs": {
-      "rust_clock": 1
     },
     "crates/canterlot-hub/tests/it/crunch.rs": {
       "rust_sleep": 3
@@ -103,7 +94,7 @@
       "rust_sleep": 4
     },
     "crates/canterlot-hub/tests/it/dictation.rs": {
-      "rust_sleep": 6
+      "rust_sleep": 2
     },
     "crates/canterlot-hub/tests/it/event_log.rs": {
       "rust_sleep": 1
@@ -112,14 +103,10 @@
       "rust_sleep": 1
     },
     "crates/canterlot-hub/tests/it/file_probe.rs": {
-      "rust_clock": 1,
-      "rust_sleep": 2
+      "rust_sleep": 1
     },
     "crates/canterlot-hub/tests/it/grpc_session.rs": {
       "rust_sleep": 5
-    },
-    "crates/canterlot-hub/tests/it/history_search.rs": {
-      "rust_clock": 1
     },
     "crates/canterlot-hub/tests/it/http_core.rs": {
       "rust_clock": 2,
@@ -134,42 +121,24 @@
     "crates/canterlot-hub/tests/it/ingest.rs": {
       "rust_sleep": 1
     },
-    "crates/canterlot-hub/tests/it/machine_info.rs": {
-      "rust_sleep": 6
-    },
     "crates/canterlot-hub/tests/it/machines.rs": {
       "rust_sleep": 2
     },
     "crates/canterlot-hub/tests/it/media.rs": {
       "rust_clock": 1
     },
-    "crates/canterlot-hub/tests/it/nudge.rs": {
-      "rust_sleep": 4
-    },
     "crates/canterlot-hub/tests/it/outbox.rs": {
-      "rust_sleep": 7,
-      "rust_clock": 1
+      "rust_clock": 1,
+      "rust_sleep": 7
     },
     "crates/canterlot-hub/tests/it/owner_push.rs": {
       "rust_clock": 7,
       "rust_sleep": 2
     },
-    "crates/canterlot-hub/tests/it/plan_board.rs": {
-      "rust_sleep": 3
-    },
     "crates/canterlot-hub/tests/it/presence.rs": {
       "rust_clock": 3
     },
-    "crates/canterlot-hub/tests/it/presets.rs": {
-      "rust_sleep": 1
-    },
-    "crates/canterlot-hub/tests/it/prompt_suggestions.rs": {
-      "rust_sleep": 2
-    },
     "crates/canterlot-hub/tests/it/requests_integration.rs": {
-      "rust_sleep": 1
-    },
-    "crates/canterlot-hub/tests/it/reserve_settings.rs": {
       "rust_sleep": 1
     },
     "crates/canterlot-hub/tests/it/scheduler.rs": {
@@ -191,8 +160,8 @@
       "rust_sleep": 4
     },
     "crates/canterlot-hub/tests/it/singletons.rs": {
-      "rust_sleep": 16,
-      "rust_clock": 3
+      "rust_clock": 3,
+      "rust_sleep": 16
     },
     "crates/canterlot-hub/tests/it/snapshot_boundary.rs": {
       "rust_sleep": 3
@@ -341,12 +310,9 @@
     "crates/canterlot-worker/tests/it/exec_media.rs": {
       "rust_clock": 1
     },
-    "crates/canterlot-worker/tests/it/git_facts.rs": {
-      "rust_clock": 1
-    },
     "crates/canterlot-worker/tests/it/instructions.rs": {
-      "rust_clock": 9,
-      "rust_sleep": 3
+      "rust_clock": 3,
+      "rust_sleep": 1
     },
     "crates/canterlot-worker/tests/it/lease.rs": {
       "rust_clock": 6,
