@@ -521,7 +521,9 @@ async fn agent_call_logs_contain_no_arguments() {
     let pool = canterlot_hub::testkit::db().await;
     capture_logs();
     let fx = Fx::new(pool).await;
-    let marker = format!("СЕКРЕТ_АРГУМЕНТОВ_{}", Uuid::now_v7());
+    // Шестнадцатеричный UUID без дефисов: с дефисами он изредка проходит порог энтропии
+    // сканера секретов, и пресет отклоняется как looks_like_secret.
+    let marker = format!("СЕКРЕТ АРГУМЕНТОВ {}", Uuid::now_v7().simple());
     let call_id = Uuid::now_v7();
     let response = fx
         .agent(
@@ -571,7 +573,7 @@ async fn tool_failure_logs_no_text() {
     let pool = canterlot_hub::testkit::db().await;
     capture_logs();
     let fx = Fx::new(pool).await;
-    let marker = format!("СЕКРЕТ_ТЕКСТА_{}", Uuid::now_v7());
+    let marker = format!("СЕКРЕТ ТЕКСТА {}", Uuid::now_v7().simple());
     let cases = [
         (
             json!({"session_id": Uuid::now_v7(), "text": marker}),
@@ -651,7 +653,7 @@ async fn argument_errors_name_the_field_and_never_echo_values() {
         missing.error_message
     );
     // Неверный тип: поле названо, значение не повторяется.
-    let marker = format!("СЕКРЕТ_{}", Uuid::now_v7());
+    let marker = format!("СЕКРЕТ {}", Uuid::now_v7().simple());
     let mistyped = fx
         .agent(
             "sessions.spawn",
