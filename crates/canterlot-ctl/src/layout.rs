@@ -79,6 +79,28 @@ impl Layout {
         self.root.join("run/canterlot-host")
     }
 
+    /// Каталог Caddyfile: монтируется в caddy целиком, без остальных файлов compose.
+    pub fn caddy_dir(&self) -> PathBuf {
+        self.compose_dir().join("caddy")
+    }
+
+    pub fn caddy_data(&self) -> PathBuf {
+        self.root.join("var/lib/canterlot/caddy")
+    }
+
+    /// Временные каталоги загрузки релиза (0700 внутри).
+    pub fn staging(&self) -> PathBuf {
+        self.root.join("var/lib/canterlot/staging")
+    }
+
+    pub fn ctl_release(&self, v: &Version) -> PathBuf {
+        self.root.join("opt/canterlot/ctl").join(v.as_str())
+    }
+
+    pub fn ctl_link(&self) -> PathBuf {
+        self.root.join("usr/local/bin/canterlot")
+    }
+
     pub fn worker_release(&self, v: &Version) -> PathBuf {
         self.home()
             .join(".local/opt/canterlot/releases")

@@ -70,8 +70,9 @@ impl InstallState {
     }
 
     pub fn save(&self, layout: &Layout) -> Result<(), CtlError> {
+        // install.toml только для root: в нём пути, которые удаляет uninstall.
         let text = toml::to_string_pretty(self)?;
-        ops::write_atomic(&layout.install_toml(), text.as_bytes())
+        crate::fsx::write_atomic_mode(&layout.install_toml(), text.as_bytes(), 0o600)
     }
 }
 

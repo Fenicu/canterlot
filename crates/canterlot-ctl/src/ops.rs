@@ -198,6 +198,16 @@ pub fn unfinished(dir: &Path) -> Result<Option<OpRecord>, CtlError> {
         .find(|rec| rec.result.is_none()))
 }
 
+/// Тождество базы из последней успешно завершённой операции: с ним сверяется повторная
+/// установка поверх сохранённых данных.
+pub fn last_identity(dir: &Path) -> Result<Option<DbIdentity>, CtlError> {
+    Ok(records(dir)?
+        .into_iter()
+        .rev()
+        .filter(|rec| rec.result == Some(OpResult::Done))
+        .find_map(|rec| rec.db_identity))
+}
+
 pub fn latest(dir: &Path) -> Result<Option<OpRecord>, CtlError> {
     Ok(records(dir)?.pop())
 }

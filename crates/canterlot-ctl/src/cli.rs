@@ -74,7 +74,7 @@ pub enum Command {
     Adopt,
     Update(UpdateArgs),
     Uninstall(UninstallArgs),
-    Status,
+    Status(StatusArgs),
     #[command(subcommand)]
     Tls(TlsCommand),
     HostAgent,
@@ -140,6 +140,13 @@ pub struct UninstallArgs {
     pub purge: bool,
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Default)]
+pub struct StatusArgs {
+    /// Отчёт одним JSON-объектом вместо текста.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Subcommand, Clone, PartialEq)]

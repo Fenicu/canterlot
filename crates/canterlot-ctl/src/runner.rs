@@ -25,6 +25,14 @@ pub struct Output {
 }
 
 impl Output {
+    pub fn failed(status: i32, stderr: impl Into<Vec<u8>>) -> Self {
+        Self {
+            status,
+            stdout: Vec::new(),
+            stderr: stderr.into(),
+        }
+    }
+
     pub fn ok(stdout: impl Into<Vec<u8>>) -> Self {
         Self {
             status: 0,
@@ -112,8 +120,11 @@ struct Script {
     output: Output,
 }
 
+type Responder = Box<dyn Fn(&Cmd) -> Option<Output> + Send + Sync>;
+
 #[derive(Default)]
 struct FakeState {
+    responders: Vec<Responder>,
     scripts: Vec<Script>,
     default: Output,
     calls: Vec<Cmd>,
@@ -139,6 +150,11 @@ impl FakeRunner {
         });
     }
 
+    /// Ответ по произвольному условию (stdin, пользователь); проверяется раньше префиксов.
+    pub fn respond(&self, f: impl Fn(&Cmd) -> Option<Output> + Send + Sync + 'static) {
+        self.state.lock().unwrap().responders.push(Box::new(f));
+    }
+
     pub fn set_default(&self, output: Output) {
         self.state.lock().unwrap().default = output;
     }
@@ -157,6 +173,11 @@ impl Runner for FakeRunner {
     async fn run(&self, cmd: Cmd) -> Result<Output, CtlError> {
         let mut state = self.state.lock().unwrap();
         state.calls.push(cmd.clone());
+        for responder in &state.responders {
+            if let Some(output) = responder(&cmd) {
+                return Ok(output);
+            }
+        }
         for script in &state.scripts {
             if script.program == cmd.program
                 && cmd.args.len() >= script.args.len()
