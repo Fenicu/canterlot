@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Публикует собранный заранее выпуск на Forgejo и на зеркале GitHub: архивы хаба, воркера и PWA,
-# CSP, SHA256SUMS и раздел CHANGES.rst как описание. Ничего не собирает: берёт готовый каталог
-# .superpowers/deploy/dist/<sha12>/, который кладёт scripts/build-release.sh.
+# Публикует собранный заранее выпуск на Forgejo и на зеркале GitHub: готовые файлы
+# publish/, включая install.sh и SHA256SUMS, и раздел CHANGES.rst как описание.
+# Ничего не собирает: берёт каталог .superpowers/deploy/dist/<sha12>/, который
+# кладёт scripts/build-release.sh.
 #
-#   scripts/publish-release.sh v1.11.0             собрать архивы и опубликовать
-#   scripts/publish-release.sh v1.11.0 --dry-run   только собрать архивы и показать описание
+#   scripts/publish-release.sh v1.11.0             опубликовать
+#   scripts/publish-release.sh v1.11.0 --dry-run   показать файлы и описание без сети
 #
 # Каталог сборок можно указать в CANTERLOT_DIST_ROOT (по умолчанию в этой рабочей копии).
 # Токен Forgejo с правом write:repository читается из FORGEJO_TOKEN_FILE
@@ -36,32 +37,16 @@ for bin in hub/bin/canterlot-hub worker/bin/canterlot-worker; do
     [[ "$got" == "$version" ]] || { echo "$bin --version = $got, ожидалась $version" >&2; exit 1; }
 done
 
-out=$(mktemp -d)
-trap 'rm -rf "$out"' EXIT
-mtime=$(git log -1 --format=%ct "$sha")
-# Без корневой записи «./»: распаковка в /usr/local/bin не трогает права самого каталога.
-pack() {
-    local name=$1 dir=$2
-    local -a entries
-    mapfile -t entries < <(cd "$dir" && LC_ALL=C ls -A)
-    tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$mtime" --mode="u+rwX,go+rX,go-w" \
-        -C "$dir" -cf - -- "${entries[@]}" | gzip -n -9 >"$out/$name"
-}
+# Загружаем ровно то, что собрал in-container.sh, без переупаковки.
+out=$dist/publish
 triple=x86_64-linux-gnu
-pack "canterlot-hub-$version-$triple.tar.gz" "$dist/hub/bin"
-pack "canterlot-worker-$version-$triple.tar.gz" "$dist/worker/bin"
-pack "canterlot-web-$version.tar.gz" "$dist/web"
-# CSP с примером домена: при развёртывании chat.example.com заменяется на свой адрес PWA.
-node --input-type=module -e '
-    import { readFileSync } from "node:fs";
-    import { createHash } from "node:crypto";
-    import { productionCsp } from "./web/csp.mjs";
-    const shell = readFileSync(process.argv[1], "utf8");
-    const hashes = [...shell.matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)]
-        .map(m => `sha256-${createHash("sha256").update(m[1]).digest("base64")}`);
-    process.stdout.write(productionCsp({ websocketOrigin: "wss://chat.example.com", scriptHashes: hashes }) + "\n");
-' "$dist/web/200.html" >"$out/canterlot-csp-$version.txt"
-(cd "$out" && sha256sum -- *.tar.gz *.txt >SHA256SUMS)
+[[ -f "$out/SHA256SUMS" ]] || { echo "нет $out/SHA256SUMS: соберите выпуск scripts/build-release.sh $tag" >&2; exit 1; }
+(cd "$out" && sha256sum --quiet -c SHA256SUMS) || { echo "$out не сходится с SHA256SUMS" >&2; exit 1; }
+for f in install.sh "canterlot-hub-$version-$triple.tar.gz" \
+    "canterlot-worker-$version-$triple.tar.gz" "canterlot-web-$version.tar.gz" \
+    "canterlot-csp-$version.txt" "canterlot-$version-x86_64-linux.tar.gz"; do
+    [[ -f "$out/$f" ]] || { echo "в $out нет $f" >&2; exit 1; }
+done
 
 # Раздел выпуска из CHANGES.rst: заголовки разделов RST превращаются в заголовки Markdown.
 body=$(awk -v start=".. _$tag:" '
@@ -75,7 +60,7 @@ body=$(awk -v start=".. _$tag:" '
     END { for (i = 0; i < n; i++) print lines[i] }
 ')
 [[ -n "${body//[[:space:]]/}" ]] || { echo "в CHANGES.rst нет раздела $tag" >&2; exit 1; }
-body+=$'\n\n### Файлы\n\nХаб и воркер собраны для x86_64 под glibc Debian 13 (2.41) и новее. PWA — статические файлы для Caddy, `canterlot-csp-*.txt` — заголовок CSP для них с примером домена chat.example.com. Контрольные суммы — в `SHA256SUMS`.'
+body+=$'\n\n### Файлы\n\nХаб и воркер собраны для x86_64 под glibc Debian 13 (2.41) и новее. PWA — статические файлы для Caddy, `canterlot-csp-*.txt` — заголовок CSP для них с примером домена из сборки. Утилита лежит в `canterlot-X-x86_64-linux.tar.gz`, однострочная установка — в `install.sh`. Контрольные суммы — в `SHA256SUMS`.'
 
 if ((dry_run)); then
     ls -l "$out"

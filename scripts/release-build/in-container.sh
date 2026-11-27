@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Сборка выпуска внутри контейнера canterlot-release-build: хаб, воркер,
-# синтетический воркер, служба распознавания речи и PWA из смонтированного
-# чистого чекаута.
+# синтетический воркер, служба распознавания речи, утилита canterlot и PWA из
+# смонтированного чистого чекаута. Публикуемые файлы складываются в publish/.
 #
 #   scripts/release-build/in-container.sh --src DIR --out DIR --sha SHA12 --commit SHA40
 #
@@ -122,6 +122,38 @@ phase "PWA"
 )
 phase_done "PWA"
 
+# Публикуемый набор готовится здесь же, из этого же чекаута: publish-release.sh
+# больше не собирает архивы и не генерирует CSP.
+phase "утилита и публикуемые файлы"
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$src/Cargo.toml" | head -n1)
+printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    || die "в Cargo.toml нет версии X.Y.Z: $version"
+(
+    cd "$src"
+    cargo build --release --locked -p canterlot-ctl
+)
+mkdir -p "$out/ctl/bin" "$out/publish"
+install -m 0755 "$CARGO_TARGET_DIR/release/canterlot" "$out/ctl/bin/"
+"$out/ctl/bin/canterlot" --help >/dev/null || die "утилита canterlot не запускается"
+cp "$src/scripts/install.sh" "$out/publish/install.sh"
+mtime=$(git -C "$src" log -1 --format=%ct "$commit" || true)
+[[ "$mtime" =~ ^[0-9]+$ ]] || die "не удалось прочитать время коммита $commit"
+pack() {
+    local name=$1 dir=$2
+    local -a entries
+    mapfile -t entries < <(cd "$dir" && LC_ALL=C ls -A)
+    tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$mtime" --mode="u+rwX,go+rX,go-w" \
+        -C "$dir" -cf - -- "${entries[@]}" | gzip -n -9 >"$out/publish/$name"
+}
+triple=x86_64-linux-gnu
+pack "canterlot-hub-$version-$triple.tar.gz" "$out/hub/bin"
+pack "canterlot-worker-$version-$triple.tar.gz" "$out/worker/bin"
+pack "canterlot-web-$version.tar.gz" "$out/web"
+pack "canterlot-$version-x86_64-linux.tar.gz" "$out/ctl/bin"
+cp "$out/csp.txt" "$out/publish/canterlot-csp-$version.txt"
+(cd "$out/publish" && sha256sum -- *.tar.gz *.txt install.sh >SHA256SUMS)
+phase_done "утилита и публикуемые файлы"
+
 phase "укладка dist"
 html_files=$(find "$src/web/build" -name '*.html')
 [[ "$html_files" = "$src/web/build/200.html" ]] || die "ожидался только build/200.html, получено: $html_files"
@@ -138,7 +170,7 @@ migrations_last=$(find "$src/crates/canterlot-hub/migrations" -maxdepth 1 -name 
 expect_of "$out/worker/bin/canterlot-worker" >"$out/EXPECT"
 (
     cd "$out"
-    find . -type f ! -name 'SHA256SUMS*' -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS.new
+    find . -type f ! -path './SHA256SUMS' -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS.new
     mv SHA256SUMS.new SHA256SUMS
 )
 phase_done "укладка dist"
@@ -185,18 +217,27 @@ grep -qx 'capabilities=[^ ].*' "$out/EXPECT" || die "в EXPECT нет или п�
 grep -qx 'harnesses=[^ ].*' "$out/EXPECT" || die "в EXPECT нет или пуст harnesses="
 expect_of "$out/worker/bin/canterlot-worker" | cmp -s - "$out/EXPECT" \
     || die "EXPECT отличается от вывода боевого воркера capabilities"
+for f in "canterlot-hub-$version-$triple.tar.gz" "canterlot-worker-$version-$triple.tar.gz" \
+    "canterlot-web-$version.tar.gz" "canterlot-$version-x86_64-linux.tar.gz" \
+    "canterlot-csp-$version.txt" install.sh SHA256SUMS; do
+    [[ -f "$out/publish/$f" ]] || die "в publish нет $f"
+done
+cmp -s "$src/scripts/install.sh" "$out/publish/install.sh" || die "publish/install.sh отличается от scripts/install.sh"
+[[ "$(tar -tzf "$out/publish/canterlot-$version-x86_64-linux.tar.gz")" == canterlot ]] \
+    || die "в архиве утилиты есть лишние файлы"
+(cd "$out/publish" && sha256sum --quiet -c SHA256SUMS) || die "publish/SHA256SUMS не сходится"
 (cd "$out" && sha256sum --quiet -c SHA256SUMS) || die "SHA256SUMS не сходится"
 
 # Максимальная версия символа GLIBC: прод — Debian 13 с glibc 2.41, новее нельзя.
 max_glibc() {
     objdump -T "$1" | grep -o 'GLIBC_[0-9.]*' | sed 's/^GLIBC_//' | sort -V | tail -1
 }
-for bin in hub/bin/canterlot-hub hub/bin/canterlot-speech worker/bin/canterlot-worker synthetic/bin/canterlot-worker; do
-    version=$(max_glibc "$out/$bin")
-    [[ -n "$version" ]] || die "у $bin не найдено версий символов GLIBC"
-    highest=$(printf '%s\n2.41\n' "$version" | sort -V | tail -1)
-    [[ "$highest" = "2.41" ]] || die "$bin требует GLIBC_$version > 2.41"
-    printf '    %s: GLIBC_%s, %s байт\n' "$bin" "$version" "$(stat -c %s "$out/$bin")"
+for bin in hub/bin/canterlot-hub hub/bin/canterlot-speech worker/bin/canterlot-worker synthetic/bin/canterlot-worker ctl/bin/canterlot; do
+    glibc_version=$(max_glibc "$out/$bin")
+    [[ -n "$glibc_version" ]] || die "у $bin не найдено версий символов GLIBC"
+    highest=$(printf '%s\n2.41\n' "$glibc_version" | sort -V | tail -1)
+    [[ "$highest" = "2.41" ]] || die "$bin требует GLIBC_$glibc_version > 2.41"
+    printf '    %s: GLIBC_%s, %s байт\n' "$bin" "$glibc_version" "$(stat -c %s "$out/$bin")"
 done
 phase_done "проверки выпуска"
 
