@@ -369,7 +369,7 @@ async fn uninstall_hub_then_removes_this_hosts_worker_as_its_account() {
     assert_eq!(calls.len(), 1, "{calls:#?}");
     let c = &calls[0];
     assert!(c.program.ends_with("usr/local/bin/canterlot"));
-    assert_eq!(c.args, ["uninstall", "--force"]);
+    assert_eq!(c.args, ["uninstall", "--force", "--hub-host"]);
     assert_eq!(env(c, "HOME"), Some("/srv/worker-home"));
     assert_eq!(env(c, "XDG_RUNTIME_DIR"), Some("/run/user/1000"));
     assert_eq!(env(c, "CANTERLOT_CTL_WORKER_ONLY"), Some("1"));
@@ -442,6 +442,10 @@ async fn hub_purge_asks_once_and_passes_confirmation_to_worker() {
     assert_eq!(calls.len(), 1);
     assert!(
         calls[0].args.iter().any(|a| a == "--purge-confirmed"),
+        "{calls:#?}"
+    );
+    assert!(
+        calls[0].args.iter().any(|a| a == "--hub-host"),
         "{calls:#?}"
     );
 }

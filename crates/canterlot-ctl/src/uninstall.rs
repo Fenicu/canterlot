@@ -178,9 +178,11 @@ pub async fn uninstall_worker(
     let _lock = ops::lock(&ops_dir)?;
     let mut rec = ops::begin(&ops_dir, OpRecord::new(OpKind::Uninstall, None))?;
     let id = machine_id(layout);
-    let revoke_hint = id.map(|id| {
-        format!(
-            "sudo {}",
+    // При удалении всего хоста хаба отзывать машину некому: хаб только что снят.
+    let revoke_hint = if args.hub_host {
+        None
+    } else {
+        id.map(|id| {
             hub_hint(
                 layout,
                 &[
@@ -192,8 +194,8 @@ pub async fn uninstall_worker(
                     &id.to_string(),
                 ],
             )
-        )
-    });
+        })
+    };
     let mut report = UninstallReport {
         machine_id: id,
         revoke_hint,
@@ -222,9 +224,13 @@ pub async fn uninstall_worker(
 
     ops::advance(&ops_dir, &mut rec, "files")?;
     let opt = layout.worker_opt();
-    // Ссылка на утилиту снимается, только если ведёт в удаляемый каталог.
+    // Ссылку снимаем только со своих двух целей: удаляемый каталог воркера или общая
+    // утилита хоста хаба, которую удалил root. Чужая ссылка и обычный файл не трогаются;
+    // `read_link` видит и висящую ссылку.
     let link = layout.worker_ctl_link();
-    if std::fs::read_link(&link).is_ok_and(|target| target.starts_with(&opt)) {
+    if std::fs::read_link(&link)
+        .is_ok_and(|target| target.starts_with(&opt) || target == layout.ctl_link())
+    {
         std::fs::remove_file(&link)?;
         report.removed.push(link);
     }
@@ -241,6 +247,13 @@ pub async fn uninstall_worker(
         }
     }
     ops::finish(&ops_dir, &mut rec, OpResult::Done)?;
+    if args.purge {
+        // Запись операции уже дописана: иначе она создала бы каталог заново.
+        let state = layout.worker_ctl_state_dir();
+        if remove_tree(&state)? {
+            report.removed.push(state);
+        }
+    }
     Ok(report)
 }
 
@@ -390,7 +403,7 @@ pub async fn uninstall_hub(
     {
         ops::advance(&ops_dir, &mut rec, "worker")?;
         // Живые сессии уже проверены по базе хаба (она видит и этот воркер), отсюда --force.
-        let mut child = vec!["uninstall", "--force"];
+        let mut child = vec!["uninstall", "--force", "--hub-host"];
         if args.purge {
             child.extend(["--purge", "--purge-confirmed"]);
         }

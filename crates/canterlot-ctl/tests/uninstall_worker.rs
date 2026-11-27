@@ -63,6 +63,96 @@ fn worker_with(executions: &str) -> FakeRunner {
     runner
 }
 
+fn replace_link(layout: &Layout, target: &Path) {
+    let link = layout.worker_ctl_link();
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+fn collect_paths(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        out.push(path.clone());
+        if entry.file_type().is_ok_and(|ty| ty.is_dir()) {
+            collect_paths(&path, out);
+        }
+    }
+}
+
+#[tokio::test]
+async fn uninstall_worker_removes_link_to_the_hub_host_utility() {
+    let m = installed();
+    replace_link(&m.layout, &m.layout.ctl_link());
+    uninstall_worker(
+        &UninstallArgs::default(),
+        &m.layout,
+        &worker_with("[]"),
+        &host(),
+    )
+    .await
+    .unwrap();
+    assert!(std::fs::symlink_metadata(m.layout.worker_ctl_link()).is_err());
+}
+
+#[tokio::test]
+async fn uninstall_worker_removes_a_dangling_link_to_the_hub_host_utility() {
+    let m = installed();
+    let absent = m.layout.ctl_link();
+    assert!(!absent.exists());
+    replace_link(&m.layout, &absent);
+    uninstall_worker(
+        &UninstallArgs::default(),
+        &m.layout,
+        &worker_with("[]"),
+        &host(),
+    )
+    .await
+    .unwrap();
+    assert!(std::fs::symlink_metadata(m.layout.worker_ctl_link()).is_err());
+}
+
+#[tokio::test]
+async fn uninstall_worker_keeps_a_link_to_a_foreign_utility() {
+    let m = installed();
+    let foreign = m.root.join("other/canterlot");
+    replace_link(&m.layout, &foreign);
+    uninstall_worker(
+        &UninstallArgs::default(),
+        &m.layout,
+        &worker_with("[]"),
+        &host(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_link(m.layout.worker_ctl_link()).unwrap(),
+        foreign
+    );
+}
+
+#[tokio::test]
+async fn uninstall_worker_keeps_a_regular_file_at_the_link_path() {
+    let m = installed();
+    let link = m.layout.worker_ctl_link();
+    std::fs::remove_file(&link).unwrap();
+    std::fs::write(&link, "a different utility").unwrap();
+    uninstall_worker(
+        &UninstallArgs::default(),
+        &m.layout,
+        &worker_with("[]"),
+        &host(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&link).unwrap(),
+        "a different utility"
+    );
+}
+
 #[tokio::test]
 async fn uninstall_worker_refuses_live_sessions() {
     let m = installed();
@@ -140,6 +230,21 @@ async fn worker_uninstall_prints_a_revoke_command_for_the_compose_hub() {
 }
 
 #[tokio::test]
+async fn worker_uninstall_within_hub_host_does_not_offer_a_revoke_command() {
+    let m = installed();
+    let args = UninstallArgs {
+        hub_host: true,
+        ..UninstallArgs::default()
+    };
+    let report = uninstall_worker(&args, &m.layout, &worker_with("[]"), &host())
+        .await
+        .unwrap();
+    let text = report.to_string();
+    assert!(report.revoke_hint.is_none(), "{text}");
+    assert!(!text.contains("Revoke the machine"), "{text}");
+}
+
+#[tokio::test]
 async fn uninstall_worker_purge_does_not_follow_symlinks() {
     let m = installed();
     let outside = m.root.join("outside");
@@ -175,4 +280,26 @@ async fn uninstall_worker_purge_does_not_follow_symlinks() {
         std::fs::read_to_string(outside.join("keep")).unwrap(),
         "owner data"
     );
+}
+
+#[tokio::test]
+async fn uninstall_worker_purge_leaves_nothing_of_canterlot_in_the_home() {
+    let m = installed();
+    let args = UninstallArgs {
+        purge: true,
+        ..UninstallArgs::default()
+    };
+    let mut confirmed = host();
+    confirmed.answer = Some(confirmed.hostname.clone());
+    uninstall_worker(&args, &m.layout, &worker_with("[]"), &confirmed)
+        .await
+        .unwrap();
+    let mut paths = Vec::new();
+    collect_paths(m.layout.home.as_deref().unwrap(), &mut paths);
+    let left: Vec<_> = paths
+        .iter()
+        .filter(|p| p.to_string_lossy().contains("canterlot"))
+        .collect();
+    assert!(left.is_empty(), "{left:?} in {paths:?}");
+    assert!(!m.layout.worker_ctl_link().exists());
 }

@@ -165,6 +165,9 @@ pub struct UninstallArgs {
     /// Подтверждение уже дал вызвавший uninstall хоста: воркеру спрашивать не нужно.
     #[arg(long, hide = true)]
     pub purge_confirmed: bool,
+    /// Удаление воркера идёт из uninstall хоста хаба: отзывать машину некуда.
+    #[arg(long, hide = true)]
+    pub hub_host: bool,
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Default)]

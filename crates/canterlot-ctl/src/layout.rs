@@ -121,7 +121,12 @@ impl Layout {
     }
 
     pub fn worker_ops_dir(&self) -> PathBuf {
-        self.home().join(".local/state/canterlot-ctl/ops")
+        self.worker_ctl_state_dir().join("ops")
+    }
+
+    /// Все состояния самой утилиты: записи операций, блокировка и каталог выгрузки.
+    pub fn worker_ctl_state_dir(&self) -> PathBuf {
+        self.home().join(".local/state/canterlot-ctl")
     }
 
     /// Всё, что ставит утилита у воркера: релизы, ссылки и копии самой утилиты.
