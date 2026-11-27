@@ -6,7 +6,9 @@
 }
 
 :80 {
+    @notfront not remote_ip 192.0.2.20/32
     route {
+        abort @notfront
         request_header -Remote-*
         request_header -X-Forwarded-*
         request_header -X-Canterlot-Proxy

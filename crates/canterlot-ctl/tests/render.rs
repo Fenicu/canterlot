@@ -135,6 +135,27 @@ fn caddyfile_external_trusts_only_front_ip() {
 }
 
 #[test]
+fn external_refuses_peers_other_than_front() {
+    let text = render_caddyfile(&state(TlsMode::External), "default-src 'self'");
+    let site = position(&text, ":80 {");
+    let matcher = position(&text, "@notfront not remote_ip 192.0.2.20/32");
+    let route = position(&text, "route {");
+    let abort = position(&text, "abort @notfront");
+    let scrub = position(&text, "request_header -Remote-*");
+    let maint = position(&text, "@maint {");
+    let proxy = position(&text, "reverse_proxy");
+    // Внутри route directive идут в порядке записи; снаружи Caddy поставил бы abort после route.
+    assert!(site < matcher && matcher < route && route < abort);
+    assert!(abort < scrub && abort < maint && abort < proxy);
+    assert!(text.contains("trusted_proxies static 192.0.2.20/32\n"));
+    for mode in [TlsMode::Acme, TlsMode::SelfSigned] {
+        let edge = render_caddyfile(&state(mode), "default-src 'self'");
+        assert!(!edge.contains("@notfront"), "{mode:?}");
+        assert!(!edge.contains("abort"), "{mode:?}");
+    }
+}
+
+#[test]
 fn maintenance_matcher_precedes_api_proxy() {
     for mode in [TlsMode::Acme, TlsMode::External, TlsMode::SelfSigned] {
         let text = render_caddyfile(&state(mode), "default-src 'self'");

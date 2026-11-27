@@ -151,7 +151,7 @@ pub fn render_caddyfile(s: &InstallState, csp: &str) -> String {
     let origin = s.origin.as_deref().unwrap_or("https://localhost");
     let host = host_of(origin);
     let mut out = String::new();
-    let client_ip = match s.tls {
+    let (client_ip, preamble) = match s.tls {
         Some(TlsMode::External) => {
             // Внешнему прокси доверяем ровно по его адресу; strict берёт адрес справа,
             // то есть дописанный самим прокси, а не присланный клиентом.
@@ -166,23 +166,31 @@ pub fn render_caddyfile(s: &InstallState, csp: &str) -> String {
                 out,
                 "{{\n    servers {{\n        trusted_proxies static {front}\n        trusted_proxies_strict\n    }}\n}}\n\n:80 {{\n"
             );
-            "{client_ip}"
+            // Порт опубликован на всех интерфейсах: фаервол обходится напрямую,
+            // поэтому отсекаем чужие пиры здесь. abort идёт первой директивой
+            // внутри route — снаружи Caddy поставил бы её после хендлеров.
+            (
+                "{client_ip}",
+                format!(
+                    "    @notfront not remote_ip {front}\n    route {{\n        abort @notfront\n"
+                ),
+            )
         }
         Some(TlsMode::SelfSigned) => {
             let _ = write!(out, "{host} {{\n    tls internal\n");
-            "{remote_host}"
+            ("{remote_host}", "    route {\n".to_owned())
         }
         Some(TlsMode::Acme) | None => {
             let _ = writeln!(out, "{host} {{");
-            "{remote_host}"
+            ("{remote_host}", "    route {\n".to_owned())
         }
     };
+    out.push_str(&preamble);
     // Порядок директив — канонический блок docs/pwa.md; матчер обслуживания стоит до @api,
     // чтобы во время обновления API отвечал 503, а статика продолжала раздаваться.
     let _ = write!(
         out,
-        r#"    route {{
-        request_header -Remote-*
+        r#"        request_header -Remote-*
         request_header -X-Forwarded-*
         request_header -X-Canterlot-Proxy
         request_header -X-Canterlot-Client-Ip

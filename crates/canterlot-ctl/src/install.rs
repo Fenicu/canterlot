@@ -1094,7 +1094,7 @@ async fn run(
             );
             front_block = Some(render::render_front_block(state, backend));
             caveats.push(format!(
-                "replace 192.0.2.10 in the block with this host's address; allow port {EXTERNAL_BACKEND_PORT} only from the front proxy {} in your firewall.",
+                "replace 192.0.2.10 in the block with this host's address; the site accepts only the front proxy's address {}.",
                 state.front_ip.map(|ip| ip.to_string()).unwrap_or_default()
             ));
         }
