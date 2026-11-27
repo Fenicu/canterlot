@@ -259,9 +259,10 @@
 		font-weight: var(--weight-medium);
 	}
 	.group-head.toggle {
-		white-space: nowrap;
+		/* Перекрывает nowrap кнопок из secondary.css: заголовок группы должен переноситься. */
+		white-space: normal;
 		min-height: var(--target);
-		border-radius: var(--radius-pill);
+		border-radius: var(--radius-card);
 		background: var(--transparent);
 		color: var(--muted);
 		text-align: left;
@@ -270,11 +271,11 @@
 		display: flex;
 		align-items: center;
 		gap: var(--s3);
-		white-space: nowrap;
+		white-space: normal;
 		margin: var(--s0);
 		padding: var(--s0) var(--s3);
 		min-height: var(--target);
-		border-radius: var(--radius-pill);
+		border-radius: var(--radius-card);
 		background: var(--transparent);
 		color: var(--muted);
 		font-size: var(--fs-sm);
@@ -311,6 +312,7 @@
 		display: flex;
 		align-items: center;
 		gap: var(--s4);
+		white-space: normal;
 		min-height: var(--target);
 		padding: var(--s2) var(--s6);
 		border-radius: var(--radius-card);

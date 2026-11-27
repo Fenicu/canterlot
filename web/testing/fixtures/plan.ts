@@ -69,6 +69,20 @@ export function seedPlan(api: FakeHubApi, opts: { reportAt?: number; history?: n
 	return { orchestrator, executors: { working, review, failed, accepted }, reportBlockId: report.id, reportSeq: Number(report.created_seq), tasks };
 }
 
+/** План с длинными названиями: проверка переноса заголовка задачи на узком экране. */
+export function seedPlanWithLongTitles(api: FakeHubApi): PlanSeed & { longTitles: string[] } {
+	const seed = seedPlan(api);
+	const longTitles = [
+		'Гейт на workstation: exec_e2e withdraw и cutover-signals TERM во время PWA',
+		'Установщик в одну строку: install/update/uninstall, compose для хаба, кнопка обновления в PWA, перенос прода',
+		'Сводка лимитов OpenCode: пятичасовое окно, неделя и прогноз сгорания без учёта ночных прогонов'
+	];
+	const long = longTitles.map((title, index) =>
+		api.pushPlanTask({ orchestrator_id: seed.orchestrator, title, state: index === 1 ? 'waiting' : 'in_progress' })
+	);
+	return { ...seed, tasks: [...seed.tasks, ...long], longTitles };
+}
+
 /** Тот же план плюс две архивные задачи с нейтральными названиями. */
 export function seedPlanWithArchive(api: FakeHubApi): PlanSeed {
 	const seed = seedPlan(api);

@@ -76,7 +76,8 @@
   .files { padding: var(--s8); background: var(--surface); border-radius: var(--radius-card); }
   small { display: block; color: var(--muted); }
   input { display: block; width: 100%; min-height: var(--target); margin-block: var(--s4); padding: var(--s6); border-radius: var(--radius-pill); border: var(--s0); background: var(--surface); color: var(--text); }
-  .choice-content { width: 100%; text-align: left; }
+  /* Название сессии может быть длинным: nowrap кнопок из secondary.css здесь не нужен. */
+  .choice-content { width: 100%; text-align: left; white-space: normal; }
   .choice { display: block; width: 100%; margin-block: var(--s4); text-align: left; }
   .new { display: block; min-height: var(--target); padding: var(--s6); }
   .shared-text { white-space: pre-wrap; }

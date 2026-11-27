@@ -449,6 +449,8 @@
   .inline input { flex: 1 1 var(--bar-56); min-height: var(--target); padding: var(--s5) var(--s8); border: 0; border-radius: var(--radius-pill); background: var(--field-bg, var(--raised)); font-size: var(--fs-input); }
   .add { display: grid; gap: var(--s4); }
   .task-foot { display: flex; justify-content: flex-end; color: var(--danger); }
+  /* Название типа задачи задаёт владелец и может быть длинным: nowrap из secondary.css раздвигал экран. */
+  .task-foot :global(button) { white-space: normal; }
   .providers { display: grid; gap: var(--s4); }
   fieldset { display: flex; flex-wrap: wrap; gap: var(--s4); margin: var(--s0); padding: var(--s4) var(--s6) var(--s6); border: var(--s0); border-radius: var(--radius-card); background: var(--surface); }
   legend { float: left; width: 100%; padding: var(--s0); font-weight: var(--weight-medium); }
