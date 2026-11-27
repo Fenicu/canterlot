@@ -16,8 +16,9 @@ use crate::{
     install::Host,
     layout::Layout,
     ops::{self, OpKind, OpRecord, OpResult},
+    render::HUB_CONFIG,
     runner::Runner,
-    stack::{cmd, compose, psql, run_ok, stdout},
+    stack::{cmd, compose, hub_hint, psql, run_ok, stdout},
     state::InstallState,
     worker::{self, WorkerHost},
 };
@@ -27,6 +28,8 @@ pub struct UninstallReport {
     pub removed: Vec<PathBuf>,
     pub kept: Vec<PathBuf>,
     pub machine_id: Option<Uuid>,
+    /// Готовая команда отзыва на хосте хаба: на хосте нет `canterlot-hub` в PATH.
+    pub revoke_hint: Option<String>,
     pub notes: Vec<String>,
 }
 
@@ -39,10 +42,10 @@ impl fmt::Display for UninstallReport {
         for path in &self.kept {
             writeln!(f, "kept:    {}", path.display())?;
         }
-        if let Some(id) = self.machine_id {
+        if let Some(hint) = &self.revoke_hint {
             writeln!(
                 f,
-                "Revoke the machine on the hub: PWA «Машины», or on the hub host `canterlot-hub machine revoke --machine-id {id}`."
+                "Revoke the machine on the hub: PWA «Машины», or on the hub host `{hint}`."
             )?;
         }
         for note in &self.notes {
@@ -165,8 +168,26 @@ pub async fn uninstall_worker(
     let ops_dir = layout.worker_ops_dir();
     let _lock = ops::lock(&ops_dir)?;
     let mut rec = ops::begin(&ops_dir, OpRecord::new(OpKind::Uninstall, None))?;
+    let id = machine_id(layout);
+    let revoke_hint = id.map(|id| {
+        format!(
+            "sudo {}",
+            hub_hint(
+                layout,
+                &[
+                    "machine",
+                    "revoke",
+                    "--config",
+                    HUB_CONFIG,
+                    "--machine-id",
+                    &id.to_string(),
+                ],
+            )
+        )
+    });
     let mut report = UninstallReport {
-        machine_id: machine_id(layout),
+        machine_id: id,
+        revoke_hint,
         ..UninstallReport::default()
     };
 

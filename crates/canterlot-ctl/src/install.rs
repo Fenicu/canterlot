@@ -21,10 +21,10 @@ use crate::{
     layout::Layout,
     ops::{self, OpKind, OpRecord, OpResult},
     release::{self, ReleaseSource, Staged},
-    render::{self, EXTERNAL_BACKEND_PORT, HUB_BIN, HUB_CONFIG, HUB_GID, HUB_UID},
+    render::{self, EXTERNAL_BACKEND_PORT, HUB_CONFIG, HUB_GID, HUB_UID},
     root::ensure_root,
     runner::Runner,
-    stack::{cmd, compose, hub_exec, psql, run_ok, stdout},
+    stack::{cmd, compose, hub_exec, hub_hint, psql, run_ok, stdout},
     state::{self, Components, HostClass, InstallState, WorkerClass},
     tls,
     worker::{self, MachineIds},
@@ -1116,12 +1116,6 @@ async fn run(
     };
     ops::finish(&ops_dir, rec, OpResult::Done)?;
 
-    let compose_file = layout.compose_dir().join("compose.yaml");
-    let compose_file = Path::new("/").join(
-        compose_file
-            .strip_prefix(&layout.root)
-            .unwrap_or(&compose_file),
-    );
     let mut caveats = Vec::new();
     let mut front_block = None;
     match state.tls {
@@ -1146,9 +1140,16 @@ async fn run(
         version: version.clone(),
         pwa_url: state.origin.clone().unwrap_or_default(),
         recovery_link,
-        add_machine: format!(
-            "docker compose -f {} exec hub {HUB_BIN} machine join-code --config {HUB_CONFIG} --name <machine name>",
-            compose_file.display()
+        add_machine: hub_hint(
+            layout,
+            &[
+                "machine",
+                "join-code",
+                "--config",
+                HUB_CONFIG,
+                "--name",
+                "<machine name>",
+            ],
         ),
         caveats,
         front_block,

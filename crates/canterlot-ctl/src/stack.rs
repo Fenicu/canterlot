@@ -1,5 +1,7 @@
 //! Команды к стеку compose. Всё идёт через `Runner`, секреты — только через stdin.
 
+use std::path::Path;
+
 use crate::{
     error::CtlError,
     layout::Layout,
@@ -41,6 +43,24 @@ pub fn hub_exec(layout: &Layout, args: &[&str]) -> Cmd {
     all.extend_from_slice(args);
     all.extend_from_slice(&["--config", HUB_CONFIG]);
     compose(layout, &all)
+}
+
+/// Текст команды хаба в контейнере для печати владельцу. Путь compose показывается
+/// как на хосте: корень установки в тестах подменён, в работе это `/`.
+pub fn hub_hint(layout: &Layout, args: &[&str]) -> String {
+    let file = layout.compose_dir().join("compose.yaml");
+    let host_file = Path::new("/").join(file.strip_prefix(&layout.root).unwrap_or(&file));
+    let mut parts = vec![
+        "docker".to_owned(),
+        "compose".into(),
+        "-f".into(),
+        host_file.display().to_string(),
+        "exec".into(),
+        "hub".into(),
+        HUB_BIN.to_owned(),
+    ];
+    parts.extend(args.iter().map(|a| (*a).to_owned()));
+    parts.join(" ")
 }
 
 /// SQL суперпользователем через локальный сокет контейнера postgres; текст запроса — в stdin.

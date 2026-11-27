@@ -119,6 +119,22 @@ async fn uninstall_worker_keeps_identity() {
 }
 
 #[tokio::test]
+async fn worker_uninstall_prints_a_revoke_command_for_the_compose_hub() {
+    let m = installed();
+    let report = uninstall_worker(&UninstallArgs::default(), &m.layout, &worker_with("[]"), &host())
+        .await
+        .unwrap();
+    let text = report.to_string();
+    let want = format!(
+        "sudo docker compose -f /etc/canterlot/compose/compose.yaml exec hub \
+         /opt/canterlot/hub/current/bin/canterlot-hub machine revoke \
+         --config /etc/canterlot/hub/hub.toml --machine-id {MACHINE}"
+    );
+    assert!(text.contains(&want), "{text}");
+    assert!(!text.contains("`canterlot-hub machine revoke"), "{text}");
+}
+
+#[tokio::test]
 async fn uninstall_worker_purge_does_not_follow_symlinks() {
     let m = installed();
     let outside = m.root.join("outside");
