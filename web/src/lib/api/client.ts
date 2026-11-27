@@ -308,6 +308,20 @@ export function putPromptSuggestionSettings(
   return http("PUT", "/api/v1/prompt-suggestion-settings", body, keyed(key, opts));
 }
 
+export function getAgentReminderSettings(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_agent_reminder_settings"]>>> {
+  return http("GET", "/api/v1/agent-reminder-settings", undefined, opts);
+}
+
+export function putAgentReminderSettings(
+  body: Body<operations["put__api_v1_agent_reminder_settings"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["put__api_v1_agent_reminder_settings"]>>> {
+  return http("PUT", "/api/v1/agent-reminder-settings", body, keyed(key, opts));
+}
+
 export function getClaudeAutoMemorySettings(
   opts?: RequestOptions,
 ): Promise<HttpResponse<Ok<operations["get__api_v1_claude_auto_memory_settings"]>>> {

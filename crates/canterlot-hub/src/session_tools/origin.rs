@@ -176,6 +176,12 @@ pub struct HubEvent {
     /// Ответ кончается вопросом в тексте, а не карточкой.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asks_in_text: Option<bool>,
+    /// `plan_reminder`: номера задач плана, названных в сводке.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_tasks: Option<Vec<i32>>,
+    /// `todo_reminder`: ревизия списка задач, о которой напомнили.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub todo_revision: Option<i64>,
 }
 
 impl HubEvent {

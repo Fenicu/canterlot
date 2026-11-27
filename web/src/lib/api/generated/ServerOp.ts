@@ -197,6 +197,8 @@ export interface HubEvent {
   detail?: string;
   nudges?: number;
   nudge_exhausted?: boolean;
+  plan_tasks?: number[];
+  todo_revision?: number;
   turn_hung_action?: string;
   turn_hung_notice?: boolean;
   turn_hung_episode?: Uuid;

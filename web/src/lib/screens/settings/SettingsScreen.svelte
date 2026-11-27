@@ -29,6 +29,7 @@
   import LimitSettings from './LimitSettings.svelte';
   import CloudSettings from './CloudSettings.svelte';
   import PromptSuggestionSetting from './PromptSuggestionSetting.svelte';
+  import AgentReminderSetting from './AgentReminderSetting.svelte';
   import MemoryScreen from './MemoryScreen.svelte';
   import HibernateSetting from './HibernateSetting.svelte';
   import DictationSettings from './DictationSettings.svelte';
@@ -160,6 +161,7 @@
           <div class="group">
             <section class="setting"><h3>Enter на клавиатуре</h3><p class="note">Авто: на телефоне новая строка, на компьютере отправка. Shift+Enter добавляет строку</p><Segmented name="enter" label="Enter на клавиатуре" options={[{ value: 'auto', label: 'Авто' }, { value: 'send', label: 'Отправка' }, { value: 'newline', label: 'Новая строка' }]} bind:value={enter} /></section>
             <div class="setting embedded"><PromptSuggestionSetting /></div>
+            <div class="setting embedded"><AgentReminderSetting /></div>
           </div>
           <DictationSettings />
           <SnippetsSettings />

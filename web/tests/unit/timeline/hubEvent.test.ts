@@ -175,6 +175,19 @@ test('approval_line_names_the_outcome', () => {
   );
 });
 
+test('reminder_lines_are_quiet', () => {
+  expect(eventLine({ kind: 'plan_reminder', plan_tasks: [258, 257] }, '')).toBe(
+    'Напоминание о плане: задачи #258, #257'
+  );
+  expect(eventLine({ kind: 'plan_reminder', plan_tasks: [12] }, '')).toBe(
+    'Напоминание о плане: задача #12'
+  );
+  expect(eventLine({ kind: 'plan_reminder' }, '')).toBe('Напоминание о плане');
+  expect(eventLine({ kind: 'todo_reminder', todo_revision: 4 }, '')).toBe(
+    'Напоминание о списке задач'
+  );
+});
+
 test('stopped_and_deleted_lines_are_quiet', () => {
   expect(eventLine({ kind: 'stopped' }, 'Сборка')).toBe('«Сборка» остановлена');
   expect(eventLine({ kind: 'deleted' }, 'Сборка')).toBe('«Сборка» удалена');

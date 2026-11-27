@@ -1535,6 +1535,23 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: { enabled: api.promptSuggestionsEnabled } });
   });
 
+  // Напоминания агентам: состояние живёт в маршруте, остальной FakeHub о нём не знает.
+  let agentReminders = { plan_enabled: true, todo_enabled: true };
+  await page.route('**/api/v1/agent-reminder-settings', async (route) => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ headers: headers(), json: agentReminders });
+      return;
+    }
+    if (method !== 'PUT') return route.fallback();
+    if (!route.request().headers()['idempotency-key']) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    agentReminders = route.request().postDataJSON() as typeof agentReminders;
+    await route.fulfill({ headers: headers(), json: agentReminders });
+  });
+
   await page.route('**/api/v1/claude-auto-memory-settings', async (route) => {
     const method = route.request().method();
     if (method === 'GET') {

@@ -3819,6 +3819,8 @@ export interface components {
             nudges?: number | null;
             outcome?: string | null;
             phase?: string | null;
+            /** @description `plan_reminder`: номера задач плана, названных в сводке. */
+            plan_tasks?: number[] | null;
             process_alive?: boolean | null;
             provider?: string | null;
             question?: string | null;
@@ -3842,6 +3844,11 @@ export interface components {
             state?: string | null;
             /** @description Итоги тестовых прогонов последнего хода: nextest, Playwright, vitest. */
             tests?: components["schemas"]["TestSummary"][] | null;
+            /**
+             * Format: int64
+             * @description `todo_reminder`: ревизия списка задач, о которой напомнили.
+             */
+            todo_revision?: number | null;
             /** Format: int64 */
             tokens_in?: number | null;
             /** Format: int64 */

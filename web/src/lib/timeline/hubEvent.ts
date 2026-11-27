@@ -226,6 +226,13 @@ export function eventLine(event: HubEvent, title: string): string | null {
       return event.turn_hung_action === 'steered'
         ? 'Ход завис в генерации, влито и продолжено'
         : 'Ход завис в генерации, прерван и продолжен';
+    case 'plan_reminder': {
+      const tasks = (event.plan_tasks ?? []).map((n) => `#${n}`);
+      if (tasks.length === 0) return 'Напоминание о плане';
+      return `Напоминание о плане: ${tasks.length === 1 ? 'задача' : 'задачи'} ${tasks.join(', ')}`;
+    }
+    case 'todo_reminder':
+      return 'Напоминание о списке задач';
     case 'spawn_queue':
       switch (event.state) {
         case 'started':

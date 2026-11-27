@@ -19746,6 +19746,17 @@
               "null"
             ]
           },
+          "plan_tasks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "description": "`plan_reminder`: номера задач плана, названных в сводке."
+          },
           "process_alive": {
             "type": [
               "boolean",
@@ -19825,6 +19836,14 @@
               "$ref": "#/components/schemas/TestSummary"
             },
             "description": "Итоги тестовых прогонов последнего хода: nextest, Playwright, vitest."
+          },
+          "todo_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`todo_reminder`: ревизия списка задач, о которой напомнили."
           },
           "tokens_in": {
             "type": [
