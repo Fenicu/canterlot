@@ -136,6 +136,16 @@
   --avatar-dot-small: 10px;
   --rail-width: 78px;
 }
+/* Разметка снимка не меняет цвет вместе с темой: красный остаётся красным на любой картинке. */
+:root {
+  --mark-red: #e5484d;
+  --mark-yellow: #f5d90a;
+  --mark-green: #30a46c;
+  --mark-blue: #3b82f6;
+  --mark-outline: rgb(0 0 0 / 35%);
+  --mark-scrim: rgb(0 0 0 / 45%);
+  --mark-frame: #ffffff;
+}
 [data-palette=aquamarine][data-theme=dark] {
   color-scheme: dark;
   --bg: #183135;
