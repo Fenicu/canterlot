@@ -107,12 +107,42 @@ grep -q 'адрес пилота' "$out" || fail "проверка не види
 printf '%s\n' "connect-src wss://chat.example.com wss://chat.example.com" >"$tmp/two-csp"
 run 1 check_published_csp "$tmp/two-csp" https://hub.example.internal
 grep -q 'ровно один' "$out" || fail "проверка не отказывает на два адреса примера"
+
+# В контейнере /src — рабочая копия git, чей .git ведёт на путь хоста, которого там нет:
+# git внутри не работает, время коммита для архивов приходит с хоста в SOURCE_DATE_EPOCH.
+grep -nE '^[^#]*\bgit\b' "$ic" && fail "in-container.sh вызывает git, а в контейнере его репозитория нет"
+[[ "$(grep -c 'SOURCE_DATE_EPOCH=' "$build")" = "2" ]] \
+    || fail "build-release.sh не передаёт SOURCE_DATE_EPOCH в обе команды docker run"
+# Архив PWA пакуется из $out/web: дерево должно лечь туда раньше упаковки.
+# shellcheck disable=SC2016 # ищется буквальный текст скрипта
+web_copy=$(grep -nF 'cp -a "$src/web/build/." "$out/web/"' "$ic" | cut -d: -f1)
+# shellcheck disable=SC2016 # ищется буквальный текст скрипта
+web_pack=$(grep -nF 'pack "canterlot-web-$version.tar.gz" "$out/web"' "$ic" | cut -d: -f1)
+[[ -n "$web_copy" && -n "$web_pack" ]] || fail "в in-container.sh не найдены копирование или упаковка PWA"
+((web_copy < web_pack)) || fail "PWA пакуется до копирования в \$out/web: архив выйдет пустым"
+# Общий SHA256SUMS выпуска покрывает и publish/, но не себя и не свой временный файл.
+eval "$(sed -n '/^dist_sums() {$/,/^}$/p' "$ic")"
+declare -F dist_sums >/dev/null || fail "в in-container.sh нет dist_sums"
+mkdir -p "$tmp/dist/publish"
+printf 'a\n' >"$tmp/dist/RELEASE"
+printf 'b\n' >"$tmp/dist/publish/SHA256SUMS"
+(dist_sums "$tmp/dist") || fail "dist_sums завершился с ошибкой"
+(cd "$tmp/dist" && sha256sum --quiet -c SHA256SUMS) || fail "SHA256SUMS после dist_sums не сходится"
+grep -q 'publish/SHA256SUMS' "$tmp/dist/SHA256SUMS" || fail "dist_sums не учёл publish/SHA256SUMS"
+grep -q 'SHA256SUMS.new' "$tmp/dist/SHA256SUMS" && fail "dist_sums посчитал свой временный файл"
+[[ ! -e "$tmp/dist/SHA256SUMS.new" ]] || fail "dist_sums оставил SHA256SUMS.new"
+eval "$(sed -n '/^commit_mtime() {$/,/^}$/p' "$ic")"
+declare -F commit_mtime >/dev/null || fail "в in-container.sh нет commit_mtime"
+[[ "$(SOURCE_DATE_EPOCH=1795756995 commit_mtime)" = "1795756995" ]] || fail "commit_mtime не вернул SOURCE_DATE_EPOCH"
+run 1 env -u SOURCE_DATE_EPOCH bash -c "$(declare -f die commit_mtime); commit_mtime"
+run 1 env SOURCE_DATE_EPOCH=abc bash -c "$(declare -f die commit_mtime); commit_mtime"
 run 0 check_published_csp "$tmp/good-csp" https://chat.example.com
 
 # EXPECT пишется до SHA256SUMS, иначе он не попадёт в суммы выпуска.
 # shellcheck disable=SC2016 # ищется буквальный текст скрипта
 expect_line=$(grep -nF '>"$out/EXPECT"' "$ic" | cut -d: -f1)
-sums_line=$(grep -nF 'sha256sum >SHA256SUMS.new' "$ic" | cut -d: -f1)
+# shellcheck disable=SC2016 # ищется буквальный текст скрипта
+sums_line=$(grep -nxF 'dist_sums "$out"' "$ic" | cut -d: -f1)
 [[ -n "$expect_line" && -n "$sums_line" ]] || fail "в in-container.sh нет записи EXPECT или SHA256SUMS"
 ((expect_line < sums_line)) || fail "EXPECT пишется после SHA256SUMS"
 

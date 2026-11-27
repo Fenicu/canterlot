@@ -65,6 +65,7 @@ version=${BASH_REMATCH[1]}
 git -C "$repo" rev-parse --verify --quiet "refs/tags/$tag" >/dev/null \
     || die "локального тега $tag нет: сначала поставьте и запушьте его"
 commit=$(git -C "$repo" rev-parse --verify "$tag^{commit}")
+commit_time=$(git -C "$repo" log -1 --format=%ct "$commit")
 sha12=$(git -C "$repo" rev-parse --short=12 "$tag^{commit}")
 dist_root=${CANTERLOT_DIST_ROOT:-.superpowers/deploy/dist}
 dist="$dist_root/$sha12"
@@ -241,11 +242,11 @@ if [[ "$mode" == remote ]]; then
     # $(id -u) должен раскрыться на сборочной машине, поэтому строка собирается
     # здесь, а значения путей проходят через %q.
     # shellcheck disable=SC2016 # $(id -u) раскрывает удалённый shell
-    cmd=$(printf 'set -e; exec 9>%q; flock 9; docker run --rm --user "$(id -u):$(id -g)" --cpus 24 --memory 40g --pids-limit 4096 -v %q:/src -v %q:/cache/cargo -v %q:/cache/target -v %q:/cache/npm -v %q:/out -v %q:/build/in-container.sh:ro -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target -e npm_config_cache=/cache/npm -e %q -e %q -e %q -w /src %q bash /build/in-container.sh --src /src --out /out --sha %q --commit %q; bash %q prune %q %q || echo "    ВНИМАНИЕ: старые кэши нативной сборки не убраны"' \
+    cmd=$(printf 'set -e; exec 9>%q; flock 9; docker run --rm --user "$(id -u):$(id -g)" --cpus 24 --memory 40g --pids-limit 4096 -v %q:/src -v %q:/cache/cargo -v %q:/cache/target -v %q:/cache/npm -v %q:/out -v %q:/build/in-container.sh:ro -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target -e npm_config_cache=/cache/npm -e %q -e %q -e %q -e %q -w /src %q bash /build/in-container.sh --src /src --out /out --sha %q --commit %q; bash %q prune %q %q || echo "    ВНИМАНИЕ: старые кэши нативной сборки не убраны"' \
         "$lock_file" "$src" "$cargo_cache" "$native_target" "$npm_cache" "$src/.release-out" "$script_path" \
         "SITE_ORIGIN=${CANTERLOT_SITE_ORIGIN:-https://hub.example.com}" \
         "WSS_ORIGIN=${CANTERLOT_WSS_ORIGIN:-wss://hub.example.com}" \
-        "TRANSCRIBE_CMAKE_ARGS=$native_settings" "$image" "$sha12" "$commit" \
+        "TRANSCRIBE_CMAKE_ARGS=$native_settings" "SOURCE_DATE_EPOCH=$commit_time" "$image" "$sha12" "$commit" \
         "$remote_tools/cache.sh" "$target_root" "$native_key")
     remote "$cmd" || die "сборка в контейнере на $host не удалась"
 else
@@ -265,6 +266,7 @@ else
         -e "SITE_ORIGIN=${CANTERLOT_SITE_ORIGIN:-https://hub.example.com}" \
         -e "WSS_ORIGIN=${CANTERLOT_WSS_ORIGIN:-wss://hub.example.com}" \
         -e "TRANSCRIBE_CMAKE_ARGS=$native_settings" \
+        -e "SOURCE_DATE_EPOCH=$commit_time" \
         -w /src \
         "$image" \
         bash /build/in-container.sh --src /src --out /out --sha "$sha12" --commit "$commit" \
@@ -297,7 +299,9 @@ phase "проверка на этой машине"
 grep -qx "sha=$sha12" "$staging/RELEASE" || die "$staging/RELEASE собран не из $sha12"
 grep -qx "source=$commit" "$staging/RELEASE" || die "$staging/RELEASE собран не из $commit"
 top=$(find "$staging" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
-[[ "$(printf '%s\n' "$top" | wc -l)" == "9" ]] || die "неожиданный состав $staging: $(printf '%s' "$top" | tr '\n' ' ')"
+# Точный состав верхнего уровня: при расхождении видно, чего не хватает или что лишнее.
+want_top=$(printf '%s\n' EXPECT RELEASE SHA256SUMS csp.txt ctl hub publish synthetic web worker | sort)
+[[ "$top" == "$want_top" ]] || die "неожиданный состав $staging: $(printf '%s' "$top" | tr '\n' ' ')"
 for f in hub/bin/canterlot-hub hub/bin/canterlot-speech worker/bin/canterlot-worker synthetic/bin/canterlot-worker \
     web/200.html web/_app/version.json csp.txt EXPECT; do
     [[ -f "$staging/$f" ]] || die "в $staging нет $f"

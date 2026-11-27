@@ -54,6 +54,24 @@ phase() { printf '\n==> %s\n' "$1"; phase_started=$SECONDS; }
 phase_done() { printf '    %s: %ds\n' "$1" $((SECONDS - phase_started)); }
 die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
 
+# Общий SHA256SUMS выпуска: все файлы, включая publish/, кроме самого списка и его
+# временного файла (перенаправление создаёт его раньше, чем find обходит каталог).
+dist_sums() {
+    (
+        cd "$1"
+        find . -type f ! -path './SHA256SUMS' ! -path './SHA256SUMS.new' -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS.new
+        mv SHA256SUMS.new SHA256SUMS
+    )
+}
+
+# Время коммита для архивов считает хост: /src здесь — рабочая копия git, чей .git
+# ведёт на путь хоста, которого в контейнере нет.
+commit_mtime() {
+    [[ "${SOURCE_DATE_EPOCH:-}" =~ ^[0-9]+$ ]] \
+        || die "SOURCE_DATE_EPOCH не задан числом: время коммита передаёт build-release.sh"
+    printf '%s\n' "$SOURCE_DATE_EPOCH"
+}
+
 # Публикуемый CSP строится только для адреса примера: настоящий домен пилота
 # остаётся в непубликуемом csp.txt и в выпуск не попадает.
 publish_csp() {
@@ -139,6 +157,10 @@ phase "PWA"
     npm ci
     PWA_VERSION="$sha" npm run build
 )
+html_files=$(find "$src/web/build" -name '*.html')
+[[ "$html_files" = "$src/web/build/200.html" ]] || die "ожидался только build/200.html, получено: $html_files"
+# Дерево ложится в $out/web до упаковки: архив PWA собирается из него.
+cp -a "$src/web/build/." "$out/web/"
 phase_done "PWA"
 
 # Публикуемый набор готовится здесь же, из этого же чекаута: publish-release.sh
@@ -155,8 +177,7 @@ mkdir -p "$out/ctl/bin" "$out/publish"
 install -m 0755 "$CARGO_TARGET_DIR/release/canterlot" "$out/ctl/bin/"
 "$out/ctl/bin/canterlot" --help >/dev/null || die "утилита canterlot не запускается"
 cp "$src/scripts/install.sh" "$out/publish/install.sh"
-mtime=$(git -C "$src" log -1 --format=%ct "$commit" || true)
-[[ "$mtime" =~ ^[0-9]+$ ]] || die "не удалось прочитать время коммита $commit"
+mtime=$(commit_mtime)
 pack() {
     local name=$1 dir=$2
     local -a entries
@@ -174,10 +195,7 @@ publish_csp "$out" "$src" "$version"
 phase_done "утилита и публикуемые файлы"
 
 phase "укладка dist"
-html_files=$(find "$src/web/build" -name '*.html')
-[[ "$html_files" = "$src/web/build/200.html" ]] || die "ожидался только build/200.html, получено: $html_files"
 node "$src/web/scripts/print-csp.mjs" "$site_origin" >"$out/csp.txt"
-cp -a "$src/web/build/." "$out/web/"
 migrations_last=$(find "$src/crates/canterlot-hub/migrations" -maxdepth 1 -name '*.sql' -printf '%f\n' | sort | tail -1)
 [[ -n "$migrations_last" ]] || die "в crates/canterlot-hub/migrations нет *.sql"
 {
@@ -187,11 +205,7 @@ migrations_last=$(find "$src/crates/canterlot-hub/migrations" -maxdepth 1 -name 
     printf 'source=%s\n' "$commit"
 } >"$out/RELEASE"
 expect_of "$out/worker/bin/canterlot-worker" >"$out/EXPECT"
-(
-    cd "$out"
-    find . -type f ! -path './SHA256SUMS' -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS.new
-    mv SHA256SUMS.new SHA256SUMS
-)
+dist_sums "$out"
 phase_done "укладка dist"
 
 phase "проверки выпуска"
