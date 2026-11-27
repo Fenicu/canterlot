@@ -143,6 +143,110 @@ pub fn pin_of(der: &[u8]) -> String {
     out
 }
 
+/// Имя или адрес для SAN: DNS-имя из букв, цифр, точек и дефисов или IP-адрес.
+fn valid_name(name: &str) -> bool {
+    if name.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    !name.is_empty()
+        && name.len() <= 253
+        && !name.starts_with(['-', '.'])
+        && !name.ends_with('-')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+}
+
+/// `canterlot tls add-name`: новый сертификат хаба от того же УЦ с прежними именами и новым,
+/// затем пересоздание хаба. Отпечаток УЦ не меняется, поэтому воркеры доверяют дальше.
+/// Под блокировкой хоста и с записью операции; повтор после сбоя продолжает её.
+pub async fn add_name(
+    name: &str,
+    layout: &Layout,
+    runner: &dyn crate::runner::Runner,
+    host: &crate::install::Host,
+) -> Result<crate::ops::OpRecord, CtlError> {
+    use crate::{
+        ops::{self, OpKind, OpRecord, OpResult},
+        stack::{cmd, compose, run_ok},
+        state::InstallState,
+    };
+    if !valid_name(name) {
+        return Err(CtlError::BadName(name.into()));
+    }
+    crate::hub_update::elevate(host)?;
+    let ops_dir = layout.ops_dir();
+    fsx::ensure_dir(&layout.root, &ops_dir, 0o700)?;
+    let _lock = ops::lock(&ops_dir)?;
+    let mut state = InstallState::load(layout)?
+        .filter(|s| s.components.hub)
+        .ok_or(CtlError::HubNotInstalled)?;
+    let current = fs::read_link(layout.hub_current())
+        .ok()
+        .and_then(|t| t.file_name().and_then(|n| n.to_str()).map(str::to_owned))
+        .ok_or_else(|| CtlError::Other("hub_current_missing".into()))
+        .and_then(|v| crate::cli::Version::parse(&v))?;
+    let mut rec = match ops::unfinished(&ops_dir)? {
+        Some(rec)
+            if rec.kind == OpKind::TlsAddName && rec.details.name.as_deref() == Some(name) =>
+        {
+            rec
+        }
+        Some(rec) => return Err(CtlError::Unfinished(rec)),
+        None => {
+            let mut rec = OpRecord::new(OpKind::TlsAddName, Some(current.clone()));
+            rec.details.name = Some(name.to_owned());
+            ops::begin(&ops_dir, rec)?
+        }
+    };
+    if state.hub_names.iter().any(|n| n == name) && rec.phase == "begin" {
+        // Имя уже в сертификате: перевыпуск и перезапуск не нужны.
+        ops::finish(&ops_dir, &mut rec, OpResult::Done)?;
+        return Ok(rec);
+    }
+    if !state.hub_names.iter().any(|n| n == name) {
+        ops::advance(&ops_dir, &mut rec, "issue")?;
+        let mut known = state.hub_names.clone();
+        known.push(name.to_owned());
+        let ca = load_ca(layout)?;
+        let (cert, key) = issue_hub_cert(&ca, &hub_names(&known))?;
+        let dir = layout.hub_etc().join("tls");
+        fsx::write_atomic_mode(&dir.join("hub.key"), key.as_bytes(), 0o640)?;
+        fsx::write_atomic_mode(&dir.join("hub.crt"), cert.as_bytes(), 0o640)?;
+        // Новые файлы созданы root; хаб читает их через группу.
+        run_ok(
+            runner,
+            "chown",
+            cmd(
+                "chown",
+                &[
+                    "-h",
+                    &format!("0:{}", state.hub_gid),
+                    "--",
+                    &dir.join("hub.key").display().to_string(),
+                    &dir.join("hub.crt").display().to_string(),
+                ],
+            ),
+        )
+        .await?;
+        state.hub_names = known;
+        state.save(layout)?;
+    }
+    ops::advance(&ops_dir, &mut rec, "restart")?;
+    run_ok(
+        runner,
+        "compose up hub",
+        compose(
+            layout,
+            &["up", "-d", "--force-recreate", "--no-deps", "hub"],
+        ),
+    )
+    .await?;
+    crate::hub_update::probe(runner, layout, host, &current).await?;
+    ops::finish(&ops_dir, &mut rec, OpResult::Done)?;
+    Ok(rec)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

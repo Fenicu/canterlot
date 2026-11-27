@@ -41,6 +41,12 @@ const KEEP_WEB: usize = 4;
 pub enum UpdateReport {
     UpToDate(Version),
     Finished(Box<OpRecord>),
+    /// Обновление воркера этого хоста от имени его учётной записи.
+    Worker {
+        user: String,
+        status: i32,
+        output: String,
+    },
 }
 
 impl UpdateReport {
@@ -48,6 +54,7 @@ impl UpdateReport {
         match self {
             Self::UpToDate(_) => true,
             Self::Finished(rec) => rec.result == Some(OpResult::Done),
+            Self::Worker { status, .. } => *status == 0,
         }
     }
 }
@@ -62,6 +69,20 @@ impl fmt::Display for UpdateReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let rec = match self {
             Self::UpToDate(v) => return writeln!(f, "The hub is already at {v}."),
+            Self::Worker {
+                user,
+                status,
+                output,
+            } => {
+                write!(f, "{output}")?;
+                if *status != 0 {
+                    writeln!(
+                        f,
+                        "The worker update as {user} exited with {status}; run `canterlot update` as {user} to retry."
+                    )?;
+                }
+                return Ok(());
+            }
             Self::Finished(rec) => rec,
         };
         let (from, to) = (opt_version(&rec.previous), opt_version(&rec.target));
@@ -121,6 +142,62 @@ fn link_version(link: &Path) -> Result<Version, CtlError> {
     Version::parse(name)
 }
 
+/// Операции хоста хаба идут от root: без него утилита перезапускает себя через sudo с теми
+/// же аргументами (как `install`). Путь воркера сюда не попадает: он работает от пользователя.
+pub(crate) fn elevate(host: &Host) -> Result<(), CtlError> {
+    if host.is_root {
+        return Ok(());
+    }
+    let argv: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    crate::root::ensure_root(&argv)
+}
+
+/// Отметка вызова от имени воркера на хосте хаба: такой вызов обслуживает только воркер.
+pub const WORKER_ONLY_ENV: &str = "CANTERLOT_CTL_WORKER_ONLY";
+
+/// Хост хаба: есть `install.toml`, и это не вызов утилиты от имени воркера (ни прямой,
+/// ни изнутри транзакции воркера в `systemd-run --user`).
+pub fn hub_host(layout: &Layout) -> bool {
+    layout.install_toml().is_file()
+        && std::env::var_os(WORKER_ONLY_ENV).is_none()
+        && std::env::var(crate::worker::IN_UNIT_ENV).as_deref() != Ok("1")
+}
+
+/// `canterlot <args>` от имени учётной записи воркера этого хоста: с её домашним каталогом
+/// и пользовательским менеджером systemd, с отметкой «только воркер».
+pub(crate) async fn run_as_worker(
+    runner: &dyn Runner,
+    layout: &Layout,
+    state: &InstallState,
+    user: &str,
+    args: &[&str],
+) -> Result<crate::runner::Output, CtlError> {
+    let id = run_ok(runner, "id -u", cmd("id", &["-u", user])).await?;
+    let uid: u32 = stdout(&id)
+        .parse()
+        .map_err(|_| CtlError::UserNotFound(user.into()))?;
+    let home = state
+        .worker_home
+        .clone()
+        .ok_or_else(|| CtlError::UserNotFound(user.into()))?;
+    let mut c = cmd(&layout.ctl_link().display().to_string(), args);
+    c.as_user = Some(user.to_owned());
+    c.env = vec![
+        ("HOME".into(), home.display().to_string()),
+        ("USER".into(), user.to_owned()),
+        ("XDG_RUNTIME_DIR".into(), format!("/run/user/{uid}")),
+        (
+            "DBUS_SESSION_BUS_ADDRESS".into(),
+            format!("unix:path=/run/user/{uid}/bus"),
+        ),
+        (WORKER_ONLY_ENV.into(), "1".into()),
+    ];
+    runner.run(c).await
+}
+
 /// Обновление стека хаба. Возвращает итог операции; `Err` — отказ до начала операции,
 /// неоднозначная запись или прерванная фиксация, которую надо довести повтором.
 pub async fn update_hub(
@@ -130,6 +207,7 @@ pub async fn update_hub(
     src: &ReleaseSource,
     host: &Host,
 ) -> Result<UpdateReport, CtlError> {
+    elevate(host)?;
     let ops_dir = layout.ops_dir();
     fsx::ensure_dir(&layout.root, &ops_dir, 0o700)?;
     let _lock = ops::lock(&ops_dir)?;
@@ -210,19 +288,38 @@ pub async fn update(
     src: &ReleaseSource,
     host: &Host,
 ) -> Result<Vec<UpdateReport>, CtlError> {
-    let state = InstallState::load(layout)?;
-    if !state.as_ref().is_some_and(|s| s.components.hub) {
-        // Хост только с воркером обновляет worker_update (задача воркера).
-        return Err(CtlError::HubNotInstalled);
-    }
+    // install.toml читает только root: права повышаются до его чтения.
+    elevate(host)?;
+    let state = InstallState::load(layout)?
+        .filter(|s| s.components.hub)
+        .ok_or(CtlError::HubNotInstalled)?;
     let report = update_hub(&args, layout, runner, src, host).await?;
-    let ok = report.succeeded();
-    let reports = vec![report];
-    if !ok {
-        return Ok(reports);
+    let target = match &report {
+        UpdateReport::UpToDate(v) => Some(v.clone()),
+        UpdateReport::Finished(rec) if report.succeeded() => rec.target.clone(),
+        _ => None,
+    };
+    let mut reports = vec![report];
+    // Воркер этого хоста — после хаба и только при его успехе, той же версии, от имени
+    // своей учётной записи (его транзакция идёт в её `systemd-run --user`).
+    if let (Some(target), true, Some(user)) =
+        (target, state.components.worker, state.worker_user.clone())
+    {
+        let from = args.from_dir.as_ref().map(|d| d.display().to_string());
+        let mut child = vec!["update", "--version", target.as_str()];
+        if let Some(dir) = &from {
+            child.extend(["--from-dir", dir.as_str()]);
+        }
+        if args.force {
+            child.push("--force");
+        }
+        let out = run_as_worker(runner, layout, &state, &user, &child).await?;
+        reports.push(UpdateReport::Worker {
+            user,
+            status: out.status,
+            output: String::from_utf8_lossy(&out.stdout).into_owned(),
+        });
     }
-    // Место подключения обновления воркера этого хоста (`install.toml`: worker_user):
-    // оно идёт от имени его учётной записи после успешного обновления хаба.
     Ok(reports)
 }
 

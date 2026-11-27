@@ -197,6 +197,8 @@ impl World {
         match cmd.program.as_str() {
             "df" => ok(format!("Avail\n{}\n", self.free)),
             "chown" => ok(""),
+            "id" => ok("1000\n"),
+            _ if cmd.as_user.is_some() => ok("worker done\n"),
             "sh" => self.redirect(cmd),
             "docker" if cmd.args.first().map(String::as_str) == Some("run") => {
                 if has(cmd, &["migrations", "manifest", "--json"]) {
