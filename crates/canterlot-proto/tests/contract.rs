@@ -768,13 +768,12 @@ fn reconcile_report_roundtrip() {
         restore_generation: "generation".into(),
         committed: vec![],
         capabilities: vec!["exec_v1".into()],
+        hub_version: "1.2.3".into(),
     });
-    assert!(
-        Accepted::decode([].as_slice())
-            .unwrap()
-            .capabilities
-            .is_empty()
-    );
+    let empty = Accepted::decode([].as_slice()).unwrap();
+    assert!(empty.capabilities.is_empty());
+    // Хаб старше поля его не шлёт: пустая строка значит «версия неизвестна».
+    assert!(empty.hub_version.is_empty());
 }
 
 #[test]

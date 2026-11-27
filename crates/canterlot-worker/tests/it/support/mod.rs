@@ -133,6 +133,7 @@ impl Service {
                     .cloned()
                     .collect(),
                 restore_generation: self.behavior.generation.to_string(),
+                hub_version: String::new(),
                 committed: hello
                     .cursors
                     .iter()

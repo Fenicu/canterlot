@@ -683,6 +683,8 @@ pub struct Worker {
     /// Уборка файлов секретов: живёт столько же, сколько менеджер исполнений.
     sweeper: Option<tokio::task::JoinHandle<()>>,
     lease: Option<crate::lease::server::LeaseServer>,
+    /// Версия хаба и время последнего принятого рукопожатия для `canterlot-worker status`.
+    hub_link: std::sync::Arc<std::sync::Mutex<(Option<String>, Option<String>)>>,
     /// Сокет `canterlot-worker job run`; только у несущей.
     owner_jobs: Option<crate::owner_jobs::server::OwnerJobServer>,
     runners: Option<RunnersLink>,
@@ -840,6 +842,7 @@ impl Worker {
             catalog_tasks: Vec::new(),
             sweeper: None,
             lease: None,
+            hub_link: Default::default(),
             owner_jobs: None,
             #[cfg(feature = "fault-injection")]
             probe: Default::default(),
@@ -897,6 +900,26 @@ impl Worker {
 
     fn transition(&self, state: SessionState) {
         transition(&self.state, state);
+    }
+
+    /// Снимок для `canterlot-worker status`: только чтение состояния сеанса и исполнений.
+    fn status_source(&self, manager: &ExecutionManager) -> crate::status::StatusSource {
+        let state = self.state.subscribe();
+        let hub = self.hub_link.clone();
+        let executions = manager.status_source();
+        crate::status::StatusSource::new(move || {
+            let (hub_version, connected_since) = hub.lock().expect("hub link lock").clone();
+            crate::status::WorkerStatusView {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                connected: matches!(
+                    *state.borrow(),
+                    SessionState::Live | SessionState::ControlOnly
+                ),
+                connected_since,
+                hub_version,
+                executions: executions(),
+            }
+        })
     }
 
     pub async fn run(mut self, shutdown: watch::Receiver<bool>) -> Result<(), WorkerError> {
@@ -1000,16 +1023,6 @@ impl Worker {
         // Тестовая сборка не поднимает сокет аренды в общем каталоге сокетов.
         let runtime_allowed =
             crate::exec::maintenance::ensure_test_runtime_allowed(runtime_dir.as_deref()).is_ok();
-        if runtime_allowed {
-            self.lease = Some(crate::lease::server::LeaseServer::start(
-                crate::lease::server::ServerConfig::new(
-                    runtime_dir.as_deref(),
-                    &self.config.data_dir,
-                    self.config.machine.lease_slots,
-                ),
-                shutdown.clone(),
-            ));
-        }
         let jobs_socket =
             crate::owner_jobs::socket_path(runtime_dir.as_deref(), &self.config.data_dir);
         let manager = ExecutionManager::new_with_attachments_and_runtime_dir(
@@ -1017,8 +1030,20 @@ impl Worker {
             self.store.client(),
             sender,
             self.config.attachments.clone(),
-            runtime_dir,
+            runtime_dir.clone(),
         );
+        if runtime_allowed {
+            let mut lease = crate::lease::server::ServerConfig::new(
+                runtime_dir.as_deref(),
+                &self.config.data_dir,
+                self.config.machine.lease_slots,
+            );
+            lease.worker_status = Some(self.status_source(&manager));
+            self.lease = Some(crate::lease::server::LeaseServer::start(
+                lease,
+                shutdown.clone(),
+            ));
+        }
         // Облачные подключения переживают соединения и рестарт воркера: состояние лежит в
         // каталоге данных, а задача носителя поднимает раннеров по тем же записям.
         let cloud = self.runners.as_ref().map(|_| {
@@ -1609,6 +1634,10 @@ impl Worker {
         })
         .await
         .map_err(|_| WorkerError::Timeout)??;
+        *self.hub_link.lock().expect("hub link lock") = (
+            Some(accepted.hub_version.clone()).filter(|v| !v.is_empty()),
+            Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        );
         let pilot = accepted.capabilities.iter().any(|cap| cap == "pilot_v1");
         let hub_records = data::HubRecords::from_capabilities(&accepted.capabilities);
         // Последнее рукопожатие решает и тогда, когда к выключению связи с хабом уже нет:

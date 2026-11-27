@@ -25,6 +25,7 @@ pub mod secret;
 pub mod session;
 pub mod session_store;
 pub mod shutdown;
+pub mod status;
 pub mod store;
 pub mod supervisor;
 pub mod watchdog;

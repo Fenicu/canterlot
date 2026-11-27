@@ -45,6 +45,8 @@ pub struct ServerConfig {
     pub slots: u32,
     /// Сколько придерживать выдачу после восстановления непустой очереди.
     pub restore_grace: Duration,
+    /// Ответ на `worker_status`; без него запрос получает ошибку.
+    pub worker_status: Option<crate::status::StatusSource>,
 }
 
 impl ServerConfig {
@@ -54,6 +56,7 @@ impl ServerConfig {
             state_file: data_dir.join(super::STATE_FILE),
             slots,
             restore_grace: RESTORE_GRACE,
+            worker_status: None,
         }
     }
 }
@@ -123,6 +126,7 @@ struct Shared {
     nproc: u32,
     /// Ошибка чтения `/proc` уже залогирована: не повторять её каждые 500 мс.
     liveness_warned: AtomicBool,
+    worker_status: Option<crate::status::StatusSource>,
 }
 
 /// Работающий сервер; снимок очереди идёт в хаб.
@@ -151,6 +155,7 @@ impl LeaseServer {
             write: Arc::new(write_state),
             nproc: super::nproc(),
             liveness_warned: AtomicBool::new(false),
+            worker_status: config.worker_status.clone(),
         });
         {
             let state = shared.state.lock().expect("lease state");
@@ -746,6 +751,15 @@ async fn connection(shared: Arc<Shared>, stream: UnixStream, uid: u32) -> io::Re
             }
             send(&mut write, ServerMessage::Status(snapshot)).await
         }
+        ClientMessage::WorkerStatus => {
+            let reply = match &shared.worker_status {
+                Some(source) => ServerMessage::WorkerStatus(source.snapshot()),
+                None => ServerMessage::Error {
+                    reason: "worker status unavailable".into(),
+                },
+            };
+            send(&mut write, reply).await
+        }
         ClientMessage::Attach { lease_id } => {
             let attached = {
                 let state = shared.state.lock().expect("lease state");
@@ -992,6 +1006,7 @@ mod tests {
             write,
             nproc: 4,
             liveness_warned: AtomicBool::new(false),
+            worker_status: None,
         }
     }
 
@@ -1074,6 +1089,7 @@ mod tests {
             write: Arc::new(write_state),
             nproc: 4,
             liveness_warned: AtomicBool::new(false),
+            worker_status: None,
         };
         shared.sweep().await;
         assert_eq!(

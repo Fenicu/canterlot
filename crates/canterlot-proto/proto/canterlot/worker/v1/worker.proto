@@ -68,6 +68,9 @@ message Accepted {
   string restore_generation = 1;
   repeated JournalCommitted committed = 2;
   repeated string capabilities = 3;
+  // Версия хаба (`X.Y.Z`); пусто у хабов старше поля. По ней `canterlot update` на машине
+  // воркера соблюдает правило «хаб первым».
+  string hub_version = 4;
 }
 
 message JournalCommitted {

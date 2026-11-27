@@ -477,15 +477,19 @@ impl Fixture {
             .join(self.execution.to_string())
     }
 
+    /// Дочерние сценарии задают свой временный XDG_RUNTIME_DIR; остальные тесты — приватный.
+    fn runtime_dir(&self) -> PathBuf {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|path| path.starts_with(std::env::temp_dir()))
+            .unwrap_or_else(|| self.config.data_dir.join("runtime"))
+    }
+
     async fn start_worker(&mut self) {
         let store = WorkerStore::open(&self.config.data_dir)
             .unwrap()
             .with_probe(self.store_probe.clone());
-        // Дочерние сценарии задают свой временный XDG_RUNTIME_DIR; остальные тесты — приватный.
-        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .filter(|path| path.starts_with(std::env::temp_dir()))
-            .unwrap_or_else(|| self.config.data_dir.join("runtime"));
+        let runtime_dir = self.runtime_dir();
         let worker = Worker::new(self.config.clone(), store)
             .with_runtime_dir(runtime_dir)
             .with_session_probe(self.session_probe.clone());
@@ -1005,6 +1009,45 @@ async fn conversation_turn_end_to_end() {
     assert_eq!(transmissions(&fixture.sj().2, input.command_id), [1]);
     fixture.assert_never_left_running().await;
     fixture.assert_same_processes(identities);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn status_json_reports_attached_executions() {
+    let pool = canterlot_hub::testkit::db().await;
+    let fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    // `status` берёт из конфига только каталог данных: остальное ему не нужно.
+    let config = fixture.root.path().join("worker.toml");
+    let data_dir = fixture.config.data_dir.display().to_string();
+    fs::write(
+        &config,
+        toml::to_string(&toml::toml! { data_dir = data_dir }).unwrap(),
+    )
+    .unwrap();
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
+        .args(["status", "--json", "--config"])
+        .arg(&config)
+        .env("XDG_RUNTIME_DIR", fixture.runtime_dir())
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let status: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(status["version"], version, "{status}");
+    assert_eq!(status["connected"], true, "{status}");
+    assert_eq!(status["hub_version"], version, "{status}");
+    assert!(status["connected_since"].is_string(), "{status}");
+    let executions = status["executions"].as_array().unwrap();
+    assert_eq!(executions.len(), 1, "{status}");
+    assert_eq!(executions[0]["id"], fixture.execution.to_string());
+    assert_eq!(executions[0]["attached"], true);
+    let exe = PathBuf::from(executions[0]["supervisor_exe"].as_str().unwrap());
+    assert!(exe.is_file(), "{}", exe.display());
     fixture.finish().await;
 }
 

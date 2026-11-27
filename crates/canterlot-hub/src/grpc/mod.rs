@@ -674,6 +674,7 @@ impl HubGrpc {
                     .collect(),
                 restore_generation: self.installation.restore_generation.to_string(),
                 committed,
+                hub_version: env!("CARGO_PKG_VERSION").to_owned(),
             })),
         })
     }

@@ -74,6 +74,8 @@ pub enum ClientMessage {
         lease_id: String,
     },
     Status,
+    /// Состояние самого воркера для `canterlot-worker status` (связь, версии, исполнения).
+    WorkerStatus,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -157,6 +159,7 @@ pub enum ServerMessage {
         lease_id: String,
     },
     Status(Snapshot),
+    WorkerStatus(crate::status::WorkerStatusView),
     Error {
         reason: String,
     },

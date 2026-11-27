@@ -1060,6 +1060,36 @@ impl ExecutionManager {
         list
     }
 
+    /// Живые исполнения для `canterlot-worker status`. Замыкание держит общее состояние и
+    /// вызывается из задачи сокета аренды; блокировки берутся по одной, не вложенно.
+    pub fn status_source(
+        &self,
+    ) -> impl Fn() -> Vec<crate::status::ExecutionStatusView> + Send + Sync + 'static {
+        let shared = self.shared.clone();
+        move || {
+            let probes = shared.probes.lock().expect("probes lock").clone();
+            let infos = shared.infos.lock().expect("infos lock");
+            let mut list: Vec<_> = infos
+                .iter()
+                .filter(|(_, info)| {
+                    !info.retired
+                        && !matches!(info.state.as_str(), "stopped" | "failed" | "owner_lost")
+                })
+                .map(|(id, info)| crate::status::ExecutionStatusView {
+                    id: id.to_string(),
+                    attached: info.attached,
+                    // Первый член пробы — сопровождение (pid и время старта из владения).
+                    supervisor_exe: probes
+                        .get(id)
+                        .and_then(|probe| probe.members.first())
+                        .and_then(|(pid, ticks)| crate::status::process_exe(*pid, *ticks)),
+                })
+                .collect();
+            list.sort_by(|a, b| a.id.cmp(&b.id));
+            list
+        }
+    }
+
     /// Беседы живых исполнений: предлагать их же для продолжения нельзя.
     pub fn live_native_ids(&self) -> Vec<String> {
         let infos = self.shared.infos.lock().expect("infos lock");

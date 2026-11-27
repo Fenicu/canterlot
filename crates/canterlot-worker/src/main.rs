@@ -81,6 +81,16 @@ enum Command {
         #[command(subcommand)]
         command: JobCommand,
     },
+    /// Состояние работающего воркера: версия, связь с хабом, версия хаба, исполнения.
+    ///
+    /// Только чтение через локальный сокет воркера; каталог данных берётся из конфига.
+    Status {
+        #[arg(long)]
+        config: PathBuf,
+        /// Одна строка JSON вместо текста.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -196,6 +206,9 @@ async fn main() -> ExitCode {
         return code;
     }
     if let Some(code) = memory() {
+        return code;
+    }
+    if let Some(code) = worker_status().await {
         return code;
     }
     if let Some(code) = codex_replay().await {
@@ -351,6 +364,13 @@ async fn owner_job() -> Option<ExitCode> {
     )
 }
 
+async fn worker_status() -> Option<ExitCode> {
+    let Command::Status { config, json } = Cli::try_parse().ok()?.command else {
+        return None;
+    };
+    Some(canterlot_worker::status::run(&config, json).await)
+}
+
 async fn job_shim() -> Option<ExitCode> {
     let Command::JobShim { dir } = Cli::try_parse().ok()?.command else {
         return None;
@@ -466,6 +486,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         | Command::Capabilities
         | Command::Memory { .. }
         | Command::Job { .. }
+        | Command::Status { .. }
         | Command::Lease { .. } => {
             return Ok(());
         }
