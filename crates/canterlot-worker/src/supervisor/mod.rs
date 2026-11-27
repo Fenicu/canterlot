@@ -158,7 +158,7 @@ impl SupervisorFaults {
     pub fn decision_held(&self) -> bool {
         false
     }
-    pub fn take_survivor(&self) -> bool {
+    pub fn take_survivor(&self, _exec_dir: &Path) -> bool {
         false
     }
     pub fn take_error(&self) -> bool {

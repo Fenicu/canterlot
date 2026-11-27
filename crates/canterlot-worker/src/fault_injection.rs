@@ -131,6 +131,9 @@ pub struct SupervisorFaults {
     hold_attach: bool,
     hold_decision: bool,
     survivors: std::sync::atomic::AtomicU32,
+    /// Выжившие до файла `survivors_release` в каталоге исполнения: тест сам решает,
+    /// когда группа опустеет, и не гонится с раундами `stop_retry`.
+    hold_survivors: bool,
     errors: std::sync::atomic::AtomicU32,
 }
 
@@ -154,6 +157,8 @@ impl SupervisorFaults {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(0),
             ),
+            hold_survivors: std::env::var("CANTERLOT_FAULT_TERMINATE_SURVIVORS").as_deref()
+                == Ok("until_release"),
         }
     }
 
@@ -177,7 +182,10 @@ impl SupervisorFaults {
         self.hold_decision
     }
 
-    pub fn take_survivor(&self) -> bool {
+    pub fn take_survivor(&self, exec_dir: &std::path::Path) -> bool {
+        if self.hold_survivors {
+            return !exec_dir.join("survivors_release").exists();
+        }
         self.survivors
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
                 left.checked_sub(1)

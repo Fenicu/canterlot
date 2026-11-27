@@ -1283,7 +1283,7 @@ async fn stop_execution_reaches_stopped_only_after_group_empty() {
         let fixture = Fixture::new(
             &pool,
             "synthetic",
-            &[("CANTERLOT_FAULT_TERMINATE_SURVIVORS", "4")],
+            &[("CANTERLOT_FAULT_TERMINATE_SURVIVORS", "until_release")],
         )
         .await;
         let identities = fixture.identities();
@@ -1317,11 +1317,14 @@ async fn stop_execution_reaches_stopped_only_after_group_empty() {
         );
         let stop = fixture.stop_execution(force).await;
         fixture.wait_state("stopping").await;
+        // Раунды выживших идут, пока тест не отпустит группу: четыре выживших по сроку
+        // под нагрузкой кончались раньше, чем тест успевал их увидеть (флейк 1.55.0).
         for _ in 0..4 {
             assert!(same_process(child));
             assert_eq!(fixture.state().await, "stopping");
             sleep(Duration::from_millis(80)).await;
         }
+        fs::write(fixture.exec_dir().join("survivors_release"), []).unwrap();
         fixture.wait_state("stopped").await;
         assert!(!same_process(child) && !same_process(identities.1));
         let outcome: String = sqlx::query_scalar("select outcome from executions where id = $1")

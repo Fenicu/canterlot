@@ -3757,7 +3757,7 @@ impl Supervisor {
         } else {
             self.spec.timers.stop_grace
         };
-        let fake = self.faults.take_survivor();
+        let fake = self.faults.take_survivor(&self.exec_dir);
         let error = self.faults.take_error();
         let containment = self.containment.clone();
         self.terminate = Some(tokio::spawn(async move {
