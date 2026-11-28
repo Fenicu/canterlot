@@ -2424,7 +2424,22 @@ async fn wave2_n3_runtime_child(pool: PgPool, case: &str) {
 #[tokio::test]
 async fn wave2_n1_draining_delivery_releases_slot() {
     let pool = canterlot_hub::testkit::db().await;
-    let fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    // Коммит SJ держится паузой весь тест. С `range_ack` в 3 с воркер после повтора
+    // перезапускал поток данных, хаб ронял задержанный обработчик вместе с паузой, и под
+    // нагрузкой `resume.send` падал: срок подтверждения здесь длиннее любого ожидания теста.
+    let fixture = Fixture::new_full_with_timers(
+        &pool,
+        "synthetic",
+        &[],
+        false,
+        true,
+        None,
+        WorkerTimers {
+            range_ack: WAIT * 4,
+            ..worker_timers()
+        },
+    )
+    .await;
     let paused = fixture.faults().pause_next(Point::BeforeSjCommit);
     let stop = fixture.stop_execution(true).await;
     let resume = timeout(WAIT, paused).await.unwrap().unwrap();
