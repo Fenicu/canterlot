@@ -69,7 +69,8 @@
   h3 { margin: var(--s6) var(--s0) var(--s2); color: var(--muted); font-size: var(--fs-meta); font-weight: var(--weight-medium); }
   .note { color: var(--muted); font-size: var(--fs-sm); }
   ul { display: flex; flex-direction: column; gap: var(--s2); margin: var(--s0); padding: var(--s0); list-style: none; }
-  button { display: flex; flex-direction: column; gap: var(--s1); width: 100%; min-width: 0; min-height: var(--target); padding: var(--s6) var(--s8); border-radius: var(--radius-card); background: var(--surface); color: var(--text); text-align: start; }
+  /* Перекрывает nowrap кнопок из secondary.css: строка источника (репозиторий @ коммит) должна переноситься, иначе раздвигает экран. Название держит свой nowrap с многоточием. */
+  button { white-space: normal; display: flex; flex-direction: column; gap: var(--s1); width: 100%; min-width: 0; min-height: var(--target); padding: var(--s6) var(--s8); border-radius: var(--radius-card); background: var(--surface); color: var(--text); text-align: start; }
   .top { display: flex; align-items: baseline; gap: var(--s4); min-width: 0; }
   .lead { flex: none; align-self: center; display: inline-flex; }
   .label { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
