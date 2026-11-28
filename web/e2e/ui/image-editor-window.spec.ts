@@ -27,16 +27,28 @@ async function bootChat(page: Page): Promise<void> {
   await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
 }
 
-/** Редактор открывается очередью вложений: файл идёт через тот же вход, что и выбор файлов. */
-async function openEditor(page: Page, image: (typeof IMAGES)[number]): Promise<void> {
+/** Картинка сразу ложится в лоток, а редактор открывает карандаш на её миниатюре. */
+async function openEditor(page: Page, image: (typeof IMAGES)[number], shot: string): Promise<void> {
+  const phone = test.info().project.name === 'phone';
   await page.locator('input.file:not([accept])').setInputFiles({
     name: `${image.name}.png`,
     mimeType: 'image/png',
     buffer: screenshotPng(image.width, image.height, image.hue)
   });
   const dialog = page.locator('dialog.editor');
+  const row = page.locator('section.tray li').filter({ hasText: `${image.name}.png` });
+  const pencil = row.getByRole('button', { name: 'Редактировать изображение' });
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  await expect(pencil).toBeVisible({ timeout: 15_000 });
+  await expect(dialog).toBeHidden();
+  const tap = (await pencil.boundingBox())!;
+  expect(Math.min(tap.width, tap.height)).toBeGreaterThanOrEqual(44);
+  await page.screenshot({ path: shot, animations: 'disabled' });
+  if (phone) await pencil.tap();
+  else await pencil.click();
   await expect(dialog).toBeVisible({ timeout: 15_000 });
   await expect(dialog.locator('.stage[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(dialog.getByRole('button', { name: 'Без правок' })).toHaveCount(0);
 }
 
 test('редактор — окно с полями по краям, холст внутри и панель инструментов сверху', async ({ page }) => {
@@ -49,7 +61,7 @@ test('редактор — окно с полями по краям, холст 
   mkdirSync(TMP, { recursive: true });
 
   for (const image of IMAGES) {
-    await openEditor(page, image);
+    await openEditor(page, image, resolve(TMP, `image-editor-${phone ? 'phone' : 'desktop'}-${image.name}-tray.png`));
     const dialog = page.locator('dialog.editor');
     const box = (await dialog.boundingBox())!;
     const canvas = (await dialog.locator('canvas').boundingBox())!;
@@ -100,9 +112,14 @@ test('редактор — окно с полями по краям, холст 
       await page.mouse.click(2, 2);
       expect(await dialog.evaluate((node) => (node as HTMLDialogElement).open)).toBe(true);
     }
-    if (phone) await dialog.getByRole('button', { name: 'Отмена' }).tap();
+    // Высокий снимок закрывается кнопкой «Отмена», широкий — клавишей Escape.
+    if (image.name === 'wide') await page.keyboard.press('Escape');
+    else if (phone) await dialog.getByRole('button', { name: 'Отмена' }).tap();
     else await dialog.getByRole('button', { name: 'Отмена' }).click();
     await expect(dialog).toBeHidden();
+    // «Отмена» оставляет вложение в лотке как было.
+    await expect(page.locator('section.tray li').filter({ hasText: `${image.name}.png` })).toHaveCount(1);
   }
+  await expect(page.locator('section.tray li')).toHaveCount(IMAGES.length);
   expect(errors).toEqual([]);
 });

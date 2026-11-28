@@ -149,42 +149,9 @@ export const EDITABLE_MIMES: ReadonlySet<string> = new Set([
 /** Предел сторона*сторона, который принимает canvas на iOS. */
 export const MAX_IMAGE_PIXELS = 16_777_216;
 
-export type SkipReason = "decode" | "too_large";
-
-export interface SkippedFile {
-  file: File;
-  reason: SkipReason;
-}
-
-export interface RoutePlan {
-  edit: File[];
-  /** Все файлы, которые прикрепляются без редактора, включая пропущенные. */
-  direct: File[];
-  skipped: SkippedFile[];
-}
-
-export function routeFiles(
-  files: readonly File[],
-  sizes: ReadonlyMap<File, Size>,
-): RoutePlan {
-  const plan: RoutePlan = { edit: [], direct: [], skipped: [] };
-  for (const file of files) {
-    if (!EDITABLE_MIMES.has(file.type)) {
-      plan.direct.push(file);
-      continue;
-    }
-    const size = sizes.get(file);
-    if (!size) {
-      plan.direct.push(file);
-      plan.skipped.push({ file, reason: "decode" });
-    } else if (size.width * size.height > MAX_IMAGE_PIXELS) {
-      plan.direct.push(file);
-      plan.skipped.push({ file, reason: "too_large" });
-    } else {
-      plan.edit.push(file);
-    }
-  }
-  return plan;
+/** Картинку такого размера canvas осилит и на iOS. */
+export function editableSize(size: Size): boolean {
+  return size.width > 0 && size.height > 0 && size.width * size.height <= MAX_IMAGE_PIXELS;
 }
 
 export interface OutputPlan {

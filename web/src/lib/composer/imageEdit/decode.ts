@@ -48,7 +48,7 @@ export async function loadImage(file: File): Promise<LoadedImage | null> {
   }
 }
 
-/** Размер нужен до открытия редактора, чтобы не показывать его для слишком больших снимков. */
+/** Размер решает, будет ли у вложения карандаш: слишком большой снимок редактор не откроет. */
 export async function imageSize(file: File): Promise<ImageSize | null> {
   const image = await loadImage(file);
   if (!image) return null;

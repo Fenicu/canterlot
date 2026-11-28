@@ -43,7 +43,6 @@ describe('composer/image editor toolbar', () => {
       props: {
         file: new File(['x'], 'shot.png', { type: 'image/png' }),
         ondone: vi.fn(),
-        onoriginal: vi.fn(),
         oncancel: vi.fn()
       }
     });
@@ -66,7 +65,6 @@ describe('composer/image editor toolbar', () => {
     expect(undo.getAttribute('aria-disabled')).toBe('true');
     expect([...document.querySelectorAll('dialog.editor footer button')].map((node) => node.textContent?.trim())).toEqual([
       'Отмена',
-      'Без правок',
       'Готово'
     ]);
   });

@@ -16,7 +16,6 @@
   import { composerPlaceholder, sendActionLabel } from '#lib/composer/copy.js';
   import { takeAttachmentNotice } from '#lib/composer/attachmentNotice.js';
   import { imageSize } from '#lib/composer/imageEdit/decode.js';
-  import type { EditChoice } from '#lib/composer/imageEdit/queue.js';
   import { getEnterPref } from '#lib/composer/prefs.js';
   import { insertDictated, type DraftAnchor } from '#lib/dictation/insertion.js';
   import { insertSnippet } from '#lib/snippets/insert.js';
@@ -106,35 +105,39 @@
   let SnippetsSheet = $state<Component<{ open: boolean; projectKey: string; text: string; onclose: () => void; oninsert: (body: string) => void }> | null>(null);
   // Окно «Отправить позже» открывают нечасто: чанк едет только вместе с ним.
   let SendLater = $state<Component<{ open: boolean; now: () => number; blocked?: boolean; panelId: string; onclose: () => void; onpick: (at: number) => void }> | null>(null);
-  // Редактор картинок открывают редко: чанк едет только когда файл действительно нужно править.
+  // Редактор картинок открывают редко: чанк едет только по карандашу на вложении.
   let ImageEditor = $state<Component<{
     file: File;
     ondone: (edited: File) => void;
-    onoriginal: () => void;
     oncancel: () => void;
   }> | null>(null);
   let editorFile = $state<File | null>(null);
-  let resolveEditor: ((choice: EditChoice) => void) | null = null;
+  let resolveEditor: ((edited: File | null) => void) | null = null;
 
   $effect(() => {
     if (later && !SendLater) import('#lib/composer/SendLater.svelte').then((m) => { SendLater = m.default; });
     if (snippetsOpen && !SnippetsSheet) import('#lib/composer/SnippetsSheet.svelte').then((m) => { SnippetsSheet = m.default; });
-    // Чанк редактора не загрузился (нет сети, старый кэш после выкатки): картинка уходит как есть, очередь не встаёт.
-    if (editorFile && !ImageEditor) import('#lib/composer/ImageEditor.svelte').then((m) => { ImageEditor = m.default; }, () => finishEditor({ choice: 'original' }));
+    // Чанк редактора не загрузился (нет сети, старый кэш после выкатки): вложение остаётся как есть.
+    if (editorFile && !ImageEditor) import('#lib/composer/ImageEditor.svelte').then((m) => { ImageEditor = m.default; }, () => {
+      finishEditor(null);
+      model.errorMessage = 'Не удалось открыть редактор: проверьте связь и повторите';
+    });
   });
 
-  function openEditor(file: File): Promise<EditChoice> {
+  function openEditor(file: File): Promise<File | null> {
+    // Второе окно поверх первого не открывается: правка идёт по одному вложению.
+    if (editorFile) return Promise.resolve(null);
     return new Promise((resolve) => {
       resolveEditor = resolve;
       editorFile = file;
     });
   }
 
-  function finishEditor(choice: EditChoice): void {
+  function finishEditor(edited: File | null): void {
     editorFile = null;
     const resolve = resolveEditor;
     resolveEditor = null;
-    resolve?.(choice);
+    resolve?.(edited);
   }
   const projectKey = $derived((chat.detail?.workdir as string | undefined) ?? '');
 
@@ -741,7 +744,7 @@
     {:else}
       {#if receiving}<p class="dropzone" aria-hidden="true">Отпустите файлы</p>{/if}
       <input bind:this={file} class="file" type="file" multiple tabindex="-1" aria-label="Выбрать файлы" onchange={picked} />
-      <AttachmentTray {uploads} conversationId={chat.id} />
+      <AttachmentTray {uploads} conversationId={chat.id} canEdit={(id) => model.canEdit(id)} onedit={(id) => void model.edit(id)} />
       <textarea
         bind:this={node}
         bind:value={model.text}
@@ -868,9 +871,8 @@
 {#if ImageEditor && editorFile}
   <ImageEditor
     file={editorFile}
-    ondone={(edited) => finishEditor({ choice: 'edited', file: edited })}
-    onoriginal={() => finishEditor({ choice: 'original' })}
-    oncancel={() => finishEditor({ choice: 'cancel' })}
+    ondone={(edited) => finishEditor(edited)}
+    oncancel={() => finishEditor(null)}
   />
 {/if}
 

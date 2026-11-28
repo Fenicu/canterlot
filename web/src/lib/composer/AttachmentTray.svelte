@@ -3,9 +3,21 @@
   import { ticker } from '#lib/ticker.svelte.js';
   import type { Upload, UploadManager } from '#lib/uploads/manager.js';
   import Button from '#lib/ui/Button.svelte';
+  import Icon from '#lib/ui/Icon.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
 
-  let { uploads, conversationId }: { uploads: UploadManager; conversationId: string } = $props();
+  // canEdit и onedit приходят от композера: карандаш есть только у картинки, которую откроет редактор.
+  let {
+    uploads,
+    conversationId,
+    canEdit = () => false,
+    onedit
+  }: {
+    uploads: UploadManager;
+    conversationId: string;
+    canEdit?: (id: string) => boolean;
+    onedit?: (id: string) => void;
+  } = $props();
   let items = $state<Upload[]>([]);
 
   $effect(() => ticker.retain());
@@ -77,7 +89,12 @@
     >
       {#each items as item (item.id)}
         <li data-phase={item.phase}>
-          <span class="tile" aria-hidden="true">{extension(item.name)}</span>
+          <span class="thumb">
+            <span class="tile" aria-hidden="true">{extension(item.name)}</span>
+            {#if onedit && canEdit(item.id)}
+              <button type="button" class="pencil" aria-label="Редактировать изображение" title="Редактировать изображение" onclick={() => onedit(item.id)}><span class="badge"><Icon name="edit" /></span></button>
+            {/if}
+          </span>
           <div class="info">
             <span class="name">{item.name}</span>
             <span class="meta">{`${sizeLabel(item.size)} · `}<span class="status">{statusOf(item)}</span></span>
@@ -104,6 +121,13 @@
   li { display: flex; align-items: center; gap: var(--s4); min-width: 0; padding: var(--s3); border-radius: var(--radius-card); background: var(--chat-bg); }
   li[data-phase='failed'] { background: var(--danger-soft); }
   .tile { display: inline-flex; align-items: center; justify-content: center; flex: none; width: var(--s14); height: var(--s14); border-radius: var(--radius-sm); background: var(--code); color: var(--secondary); font-size: var(--fs-xs); font-weight: var(--weight-semibold); }
+  .thumb { position: relative; display: inline-flex; flex: none; }
+  /* Видимый значок меньше миниатюры, а нажимается вся область --target вокруг него: подсказки наведения на телефоне нет. */
+  .pencil { position: absolute; right: calc(var(--s5) * -1); bottom: calc(var(--s5) * -1); display: inline-flex; align-items: center; justify-content: center; width: var(--target); height: var(--target); padding: var(--s0); border: var(--s0); background: var(--transparent); color: var(--text); border-radius: var(--radius-round); }
+  /* Подпись типа уходит вверх, чтобы карандаш в углу её не закрывал. */
+  .thumb:has(.pencil) .tile { align-items: flex-start; padding-top: var(--s3); }
+  .pencil:active .badge { transform: scale(var(--scale-press)); }
+  .badge { display: inline-flex; align-items: center; justify-content: center; width: var(--s10); height: var(--s10); border: var(--hairline) solid var(--control-line); border-radius: var(--radius-round); background: var(--surface); --icon: var(--s8); }
   .info { display: flex; flex: 1; flex-direction: column; gap: var(--s1); min-width: 0; }
   .name { overflow: hidden; font-size: var(--fs-meta); text-overflow: ellipsis; white-space: nowrap; }
   .meta { color: var(--secondary); font-size: var(--fs-sm); }

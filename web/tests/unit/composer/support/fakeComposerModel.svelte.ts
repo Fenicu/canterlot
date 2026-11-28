@@ -22,6 +22,12 @@ export class FakeComposerModel {
 	takeBack(): void {}
 	remoteDraft(): void {}
 	attach(): void {}
+	canEdit(): boolean {
+		return false;
+	}
+	edit(): Promise<void> {
+		return Promise.resolve();
+	}
 	startDraft(): Promise<void> {
 		return Promise.resolve();
 	}

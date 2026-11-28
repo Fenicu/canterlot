@@ -27,12 +27,10 @@
   let {
     file,
     ondone,
-    onoriginal,
     oncancel
   }: {
     file: File;
     ondone: (edited: File) => void;
-    onoriginal: () => void;
     oncancel: () => void;
   } = $props();
 
@@ -517,7 +515,6 @@
   </div>
   <footer bind:this={footer}>
     <Button variant="text" onclick={oncancel}>Отмена</Button>
-    <Button variant="text" onclick={onoriginal}>Без правок</Button>
     <Button variant="primary" busy={exporting} onclick={() => void done()}>
       <span bind:this={doneButton} tabindex="-1">Готово</span>
     </Button>

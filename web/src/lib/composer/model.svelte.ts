@@ -1,4 +1,4 @@
-import { SvelteDate } from "svelte/reactivity";
+import { SvelteDate, SvelteMap } from "svelte/reactivity";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import type { OpJournal, Op } from "#lib/ops/journal.js";
 import type { DraftStore } from "#lib/drafts/store.js";
@@ -17,10 +17,8 @@ import { sendNow } from "#lib/timeline/QueueActions.js";
 import { setGoal } from "#lib/api/client.js";
 import { errorText } from "#lib/api/errors.js";
 import { intents } from "#lib/ops/intent.js";
-import { leaveAttachmentNotice } from "#lib/composer/attachmentNotice.js";
 import { imageSize } from "#lib/composer/imageEdit/decode.js";
-import { AttachmentQueue, type EditChoice } from "#lib/composer/imageEdit/queue.js";
-import type { Size } from "#lib/composer/imageEdit/model.js";
+import { EDITABLE_MIMES, editableSize, type Size } from "#lib/composer/imageEdit/model.js";
 
 const MAX_GOAL_OBJECTIVE_BYTES = 2048;
 
@@ -71,10 +69,10 @@ export interface ComposerDeps {
   now?(): number;
   schedule?(fn: () => void, ms: number): () => void;
   online?(): boolean;
-  /** Размер нужен до редактора: слишком большие картинки идут в лоток без правок. */
+  /** Размер решает, показывать ли карандаш: слишком большие картинки не правятся. */
   decodeImage?(file: File): Promise<Size | null>;
-  /** Окно правки открывает композер по первому использованию. */
-  editImage?(file: File): Promise<EditChoice>;
+  /** Окно правки открывает композер; null — правка отменена или окно не открылось. */
+  editImage?(file: File): Promise<File | null>;
 }
 
 interface Accepted {
@@ -96,22 +94,11 @@ export class ComposerModel {
   #attachmentsInFlight = 0;
   #draftAttachmentIds: string[] = [];
   #reconcileToken = 0;
-  #queue: AttachmentQueue;
+  /** Исходник каждой правимой картинки лотка: менеджер загрузок отпускает файл после загрузки. */
+  #editable = new SvelteMap<string, File>();
 
   constructor(deps: ComposerDeps) {
     this.deps = deps;
-    this.#queue = new AttachmentQueue({
-      decode: (file) => (deps.decodeImage ? deps.decodeImage(file) : imageSize(file)),
-      edit: (file) =>
-        deps.editImage
-          ? deps.editImage(file)
-          : Promise.resolve<EditChoice>({ choice: "original" }),
-      add: (file) => this.#addFile(file),
-      note: (message) => {
-        this.errorMessage = message;
-        leaveAttachmentNotice(deps.conversationId, message);
-      },
-    });
     if (deps.serverDrafts) {
       this.#draft = new DraftSync({
         deviceId: deps.deviceId ?? "local",
@@ -530,23 +517,64 @@ export class ComposerModel {
   }
 
   attach(files: FileList | File[]): void {
-    this.#queue.enqueue(files);
-  }
-
-  /** Файл попадает в лоток только после редактора, поэтому загрузка не идёт дважды. */
-  #addFile(file: File): void {
     const list = this.deps.uploads.list(this.deps.conversationId);
-    const count = list.filter(
+    let count = list.filter(
       (u) => u.phase !== "cancelled" && u.phase !== "failed",
     ).length;
-    try {
-      this.deps.uploads.add(this.deps.conversationId, file, count);
-    } catch (err) {
-      if (err instanceof UploadLimitError) {
-        if (err.reason === "too_large") this.errorMessage = "Файл больше 100 МиБ";
-        else if (err.reason === "too_many")
-          this.errorMessage = "Не более 10 файлов в одном сообщении";
+    for (const file of Array.from(files)) {
+      try {
+        const upload = this.deps.uploads.add(this.deps.conversationId, file, count);
+        count += 1;
+        this.#checkEditable(upload.id, file);
+      } catch (err) {
+        this.#limitMessage(err);
       }
     }
+  }
+
+  /** Карандаш у вложения: есть только у картинки, которую редактор сможет открыть. */
+  canEdit(id: string): boolean {
+    return this.#editable.has(id);
+  }
+
+  /** «Готово» ставит правленый файл на место старого; «Отмена» оставляет вложение как есть. */
+  async edit(id: string): Promise<void> {
+    const source = this.#editable.get(id);
+    if (!source || !this.deps.editImage) return;
+    const edited = await this.deps.editImage(source);
+    // Вложение могли убрать, пока окно было открыто: возвращать его нельзя.
+    if (!edited || !this.#present(id)) return;
+    try {
+      const upload = this.deps.uploads.replace(id, edited);
+      this.#editable.delete(id);
+      // Правленый файл — обрезка исходника: он заведомо помещается в редактор.
+      this.#editable.set(upload.id, edited);
+    } catch (err) {
+      this.#limitMessage(err);
+    }
+  }
+
+  /** Размер узнаётся в фоне: загрузка не ждёт декодирования. */
+  #checkEditable(id: string, file: File): void {
+    if (!this.deps.editImage || !EDITABLE_MIMES.has(file.type)) return;
+    const decode = this.deps.decodeImage ?? imageSize;
+    void decode(file)
+      .then((size) => {
+        if (size && editableSize(size) && this.#present(id)) this.#editable.set(id, file);
+      })
+      .catch(() => undefined);
+  }
+
+  #present(id: string): boolean {
+    return this.deps.uploads
+      .list(this.deps.conversationId)
+      .some((item) => item.id === id && item.phase !== "cancelled");
+  }
+
+  #limitMessage(err: unknown): void {
+    if (!(err instanceof UploadLimitError)) return;
+    if (err.reason === "too_large") this.errorMessage = "Файл больше 100 МиБ";
+    else if (err.reason === "too_many")
+      this.errorMessage = "Не более 10 файлов в одном сообщении";
   }
 }
