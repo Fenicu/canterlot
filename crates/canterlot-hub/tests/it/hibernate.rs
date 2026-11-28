@@ -737,3 +737,96 @@ async fn reboot_does_not_restart_a_session_the_owner_stopped() -> TestResult {
     assert_eq!(live_executions(&pool, seed.conversation_id).await?, 0);
     Ok(())
 }
+
+/// Фоновая задача сессии, завершившаяся `ended_ago` назад.
+async fn background_task_ended(
+    pool: &PgPool,
+    run: &StartedExecution,
+    conversation: Uuid,
+    ended_ago: Duration,
+) {
+    let ended = Utc::now() - TimeDelta::from_std(ended_ago).unwrap();
+    sqlx::query(
+        "insert into background_tasks(conversation_id,task_id,execution_id,generation,
+             source_revision,kind,description,state,started_at,ended_at)
+         values($1,$2,$3,$4,1,'agent','субагент','completed',$5,$6)",
+    )
+    .bind(conversation)
+    .bind(format!("task-{}", Uuid::now_v7()))
+    .bind(run.execution_id)
+    .bind(run.generation)
+    .bind(ended - TimeDelta::hours(3))
+    .bind(ended)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Ход кончился давно, но фоновый субагент завершился только что: CLI вот-вот начнёт
+/// ход пробуждения с его результатом. Простой отсчитывается от последнего признака
+/// работы, поэтому ни обход, ни перепроверка под замком очереди сессию не усыпляют.
+#[tokio::test]
+async fn background_task_that_just_ended_blocks_hibernation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let (seed, run) = setup(&pool).await;
+    background_task_ended(
+        &pool,
+        &run,
+        seed.conversation_id,
+        Duration::from_secs(61 * 60),
+    )
+    .await;
+    background_task_ended(&pool, &run, seed.conversation_id, Duration::from_secs(1)).await;
+    assert_eq!(hibernate::sweep(&pool, &Presence::default()).await?, 0);
+    let mut conn = pool.acquire().await?;
+    assert!(
+        !hibernate::hibernate_in_tx(&mut conn, seed.conversation_id).await?,
+        "the recheck under the queue lock refuses too"
+    );
+    drop(conn);
+    assert!(stop_command(&pool, seed.conversation_id).await.is_none());
+    Ok(())
+}
+
+/// Последняя фоновая задача кончилась раньше, чем истёк срок простоя: сессия засыпает.
+/// Задача прежнего, уже мёртвого исполнения навсегда осталась `running` без `ended_at`:
+/// она не работает и сессию не держит.
+#[tokio::test]
+async fn background_task_that_ended_long_ago_allows_hibernation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let (seed, run) = setup(&pool).await;
+    background_task_ended(
+        &pool,
+        &run,
+        seed.conversation_id,
+        Duration::from_secs(61 * 60),
+    )
+    .await;
+    sqlx::query(
+        "insert into background_tasks(conversation_id,task_id,execution_id,generation,
+             source_revision,kind,description,state,started_at)
+         values($1,'task-of-a-dead-execution',$2,0,1,'bash','сборка','running',$3)",
+    )
+    .bind(seed.conversation_id)
+    .bind(Uuid::now_v7())
+    .bind(Utc::now() - TimeDelta::hours(5))
+    .execute(&pool)
+    .await?;
+    assert_eq!(hibernate::sweep(&pool, &Presence::default()).await?, 1);
+    assert!(stop_command(&pool, seed.conversation_id).await.is_some());
+    Ok(())
+}
+
+/// Перепроверка под замком сама держит срок простоя: только что начавшийся простой
+/// не усыпляется, даже если вызвать её мимо выборки кандидатов.
+#[tokio::test]
+async fn recheck_refuses_a_fresh_idle_state() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let (seed, _run) = setup(&pool).await;
+    idle_since(&pool, seed.conversation_id, Duration::from_secs(1)).await;
+    let mut conn = pool.acquire().await?;
+    assert!(!hibernate::hibernate_in_tx(&mut conn, seed.conversation_id).await?);
+    drop(conn);
+    assert!(stop_command(&pool, seed.conversation_id).await.is_none());
+    Ok(())
+}

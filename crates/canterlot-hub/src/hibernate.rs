@@ -143,6 +143,11 @@ struct Candidate {
 }
 
 /// Все сессии, которые по данным хаба достаточно долго доказательно простаивают.
+/// Простой отсчитывается от последнего признака работы: начала состояния `idle` и конца
+/// последней фоновой задачи. `activity_since` не сдвигается, когда фон кончается, а CLI
+/// начинает ход с результатом субагента через несколько секунд после его конца.
+/// Работающая задача держит сессию, только пока живо её исполнение: строка задачи
+/// умершего процесса остаётся `running` без `ended_at` навсегда.
 /// Проверки, которые живут только в памяти процесса (присутствие в PWA), делает `sweep`.
 async fn candidates(pool: &PgPool) -> Result<Vec<Candidate>, sqlx::Error> {
     sqlx::query_as(
@@ -157,6 +162,13 @@ async fn candidates(pool: &PgPool) -> Result<Vec<Candidate>, sqlx::Error> {
            and d.activity_since < now() - (
                  case when hs.owner_id is null then $1 else hs.idle_minutes end
                ) * interval '1 minute'
+           and not exists(select 1 from background_tasks bt where bt.conversation_id=c.id
+                          and (bt.ended_at >= now() - (
+                                 case when hs.owner_id is null then $1 else hs.idle_minutes end
+                               ) * interval '1 minute'
+                               or (bt.state='running'
+                                   and exists(select 1 from executions e where e.id=bt.execution_id
+                                              and e.state in ('created','starting','running','stopping')))))
            and exists(select 1 from executions e where e.conversation_id=c.id
                       and e.state in ('created','starting','running','stopping'))
            and not exists(select 1 from conversations child
@@ -248,9 +260,9 @@ pub async fn hibernate_in_tx(
         .bind(conversation_id)
         .fetch_one(&mut *conn)
         .await?;
-    if effective_minutes(&mut *conn, owner_id).await?.is_none() {
+    let Some(idle_minutes) = effective_minutes(&mut *conn, owner_id).await? else {
         return Ok(false);
-    }
+    };
     // Все условия проверяются ещё раз под блокировкой очереди: между выборкой и здесь
     // мог прийти ввод или смениться состояние.
     //
@@ -275,6 +287,13 @@ pub async fn hibernate_in_tx(
             and d.activity_evidence->>'kind'='idle'
             and coalesce((d.activity_evidence->>'process_alive')::bool,false)=true
             and coalesce((d.activity_evidence->>'background_work')::int,0)=0
+            and d.activity_since < now() - $2 * interval '1 minute'
+            and not exists(select 1 from background_tasks bt
+                           where bt.conversation_id=d.conversation_id
+                           and (bt.ended_at >= now() - $2 * interval '1 minute'
+                                or (bt.state='running'
+                                    and exists(select 1 from executions e where e.id=bt.execution_id
+                                               and e.state in ('created','starting','running','stopping')))))
             and not exists(select 1 from inputs i where i.conversation_id=d.conversation_id
                            and i.state in ('queued','dispatched','on_machine','transmitting',
                                            'acceptance_unconfirmed'))
@@ -285,6 +304,7 @@ pub async fn hibernate_in_tx(
          from conversation_derived d where d.conversation_id=$1",
     )
     .bind(conversation_id)
+    .bind(idle_minutes)
     .fetch_optional(&mut *conn)
     .await?
     .unwrap_or(false);
