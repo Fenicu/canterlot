@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { INTERRUPT_FAILED, InterruptControl, type InterruptDeps } from "#lib/composer/interrupt.svelte.js";
+import { INTERRUPT_FAILED, INTERRUPT_IDLE, InterruptControl, type InterruptDeps } from "#lib/composer/interrupt.svelte.js";
 
 describe("InterruptControl", () => {
   it("interrupt_label_stays_until_terminal_status", async () => {
@@ -94,5 +94,39 @@ describe("InterruptControl", () => {
     control.applyStatus("completed");
     control.reset();
     expect(control.label).toBe("Прервать");
+  });
+});
+
+describe("InterruptControl after the next turn", () => {
+  it("late_terminal_status_of_an_interrupt_reset_by_a_newer_turn_is_ignored", async () => {
+    const deps: InterruptDeps = {
+      conversationId: "conv-1",
+      api: async () => ({ requested: { interrupt_command_id: "c1", withdraw_command_id: null } }),
+    };
+    const control = new InterruptControl(deps);
+    await control.interrupt();
+    control.applyStatus("acknowledged", "c1");
+    control.applyStatus("completed", "c1");
+    expect(control.label).toBe("Прервано");
+    // Следующий ход начался: итог прошлого прерывания убран.
+    control.reset();
+    expect(control.label).toBe(INTERRUPT_IDLE);
+    expect(control.stale("c1")).toBe(true);
+    // Машина досылает тот же итог, когда кончается уже новый ход.
+    control.applyStatus("completed", "c1");
+    expect(control.label).toBe(INTERRUPT_IDLE);
+    // Новое прерывание показывает свой итог.
+    control.applyStatus("completed", "c2");
+    expect(control.label).toBe("Прервано");
+    expect(control.stale("c2")).toBe(false);
+  });
+
+  it("interrupt_known_only_from_events_is_also_dismissed_by_reset", () => {
+    const control = new InterruptControl({ conversationId: "conv-1" });
+    control.applyStatus("acknowledged", "c1");
+    control.reset();
+    control.applyStatus("completed", "c1");
+    expect(control.label).toBe(INTERRUPT_IDLE);
+    expect(control.stale("c1")).toBe(true);
   });
 });

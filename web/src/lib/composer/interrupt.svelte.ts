@@ -1,3 +1,4 @@
+import { SvelteSet } from "svelte/reactivity";
 import { intents } from "#lib/ops/intent.js";
 
 /** Сколько ждать итога прерывания от машины, прежде чем вернуть кнопку владельцу. */
@@ -24,6 +25,11 @@ export class InterruptControl {
   label = $state(INTERRUPT_IDLE);
   running = $state(false);
   #timer: ReturnType<typeof setTimeout> | null = null;
+  // Команда последнего прерывания и прерывания, чей итог уже убран новым ходом.
+  // Машина закрывает прерывание вместе с концом хода, а это бывает уже следующий ход:
+  // поздний итог старой команды не должен вернуть строку «Прервано» под новый ход.
+  #command: string | null = null;
+  readonly #dismissed = new SvelteSet<string>();
 
   constructor(private readonly deps: InterruptDeps) {}
 
@@ -50,6 +56,7 @@ export class InterruptControl {
     if (!this.running) return;
     // Живого исполнения нет: прерывать на машине нечего, очередь при этом не встаёт.
     const requested = (outcome as { requested?: { interrupt_command_id?: unknown } } | null)?.requested;
+    if (typeof requested?.interrupt_command_id === "string") this.#command = requested.interrupt_command_id;
     if (requested && requested.interrupt_command_id == null) {
       this.applyStatus("not_applicable");
       return;
@@ -63,7 +70,11 @@ export class InterruptControl {
     }, INTERRUPT_DEADLINE_MS);
   }
 
-  applyStatus(status: string): void {
+  applyStatus(status: string, commandId?: string | null): void {
+    if (commandId) {
+      if (this.#dismissed.has(commandId)) return;
+      this.#command = commandId;
+    }
     const label = terminalInterruptLabel(status);
     if (!label) return;
     if (this.#timer) clearTimeout(this.#timer);
@@ -74,7 +85,15 @@ export class InterruptControl {
 
   /** Новый ход начинается с чистой кнопки, если прошлое прерывание уже закончилось. */
   reset(): void {
-    if (!this.running && this.label !== INTERRUPT_IDLE) this.label = INTERRUPT_IDLE;
+    if (this.running) return;
+    if (this.#command) this.#dismissed.add(this.#command);
+    this.#command = null;
+    if (this.label !== INTERRUPT_IDLE) this.label = INTERRUPT_IDLE;
+  }
+
+  /** Итог этой команды прерывания относится к ходу, после которого уже был новый. */
+  stale(commandId: string | null | undefined): boolean {
+    return !!commandId && this.#dismissed.has(commandId);
   }
 }
 

@@ -254,8 +254,11 @@
 
   const interruptDone = $derived.by(() => {
     if (feed || laneRoot) return false;
-    const status = (chat.interrupt as { status?: string } | null)?.status;
+    const record = chat.interrupt as { status?: string; command_id?: string } | null;
+    const status = record?.status;
     if (status !== 'acknowledged' && status !== 'completed') return false;
+    // Хранилище держит запись до снимка: после нового хода она про прошлый ход.
+    if (interrupt?.stale(record?.command_id)) return false;
     return !turn;
   });
   // Итог прерывания живёт там же, где была живая строка, и после хода без ответа.

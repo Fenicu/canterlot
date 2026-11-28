@@ -82,7 +82,8 @@
 	let armReset = false;
 	$effect(() => {
 		const status = chat.interrupt && typeof chat.interrupt.status === 'string' ? chat.interrupt.status : '';
-		if (status) interrupt.applyStatus(status);
+		const commandId = chat.interrupt && typeof chat.interrupt.command_id === 'string' ? chat.interrupt.command_id : null;
+		if (status) interrupt.applyStatus(status, commandId);
 	});
 	$effect(() => {
 		if (!turn) armReset = true;
