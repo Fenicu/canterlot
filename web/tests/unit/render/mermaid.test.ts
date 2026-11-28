@@ -125,7 +125,8 @@ describe("extractSvgCss", () => {
     const { css } = extractSvgCss(svg);
     expect(css).not.toContain("body:has");
     expect(css).toMatch(/\.mermaid-inline-\d+\{fill:red\}/);
-  });
+    // Холодный import mermaid под нагрузкой гейта шёл 23–27 с: это предел живости, не ожидание.
+  }, 60_000);
 });
 
 describe("sanitizeSvg", () => {
