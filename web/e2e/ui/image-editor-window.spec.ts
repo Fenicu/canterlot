@@ -123,3 +123,55 @@ test('редактор — окно с полями по краям, холст 
   await expect(page.locator('section.tray li')).toHaveCount(IMAGES.length);
   expect(errors).toEqual([]);
 });
+
+test('компактный лоток при открытой клавиатуре — карандаш отдельной кнопкой и не задевает крестик', async ({ page }) => {
+  const phone = test.info().project.name === 'phone';
+  await bootChat(page);
+  await page.locator('input.file:not([accept])').setInputFiles([
+    ...IMAGES.map((image) => ({ name: `${image.name}.png`, mimeType: 'image/png', buffer: screenshotPng(image.width, image.height, image.hue) })),
+    { name: 'report.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 mock') }
+  ]);
+  const rows = page.locator('section.tray li');
+  await expect(rows).toHaveCount(3, { timeout: 15_000 });
+  for (const image of IMAGES)
+    await expect(rows.filter({ hasText: `${image.name}.png` }).getByRole('button', { name: 'Редактировать изображение' })).toBeVisible({ timeout: 15_000 });
+
+  // Клавиатура съедает высоту: ниже 760 px поле ввода переходит в компактный вид.
+  await page.setViewportSize(phone ? { width: 412, height: 420 } : { width: 1280, height: 600 });
+  await expect(page.locator('html[data-compact]')).toHaveCount(1);
+  await page.locator('textarea').focus();
+  mkdirSync(TMP, { recursive: true });
+  await page.screenshot({ path: resolve(TMP, `image-editor-${phone ? 'phone' : 'desktop'}-compact.png`), animations: 'disabled' });
+
+  const overlap = (a: { x: number; y: number; width: number; height: number }, b: typeof a) =>
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+  for (const name of ['tall.png', 'wide.png', 'report.pdf']) {
+    const row = rows.filter({ hasText: name });
+    await row.scrollIntoViewIfNeeded();
+    const close = (await row.getByRole('button', { name: 'Убрать' }).boundingBox())!;
+    const tile = (await row.locator('.tile').boundingBox())!;
+    const label = (await row.locator('.name').boundingBox())!;
+    expect(Math.min(close.width, close.height)).toBeGreaterThanOrEqual(44);
+    const pencils = row.getByRole('button', { name: 'Редактировать изображение' });
+    if (name === 'report.pdf') {
+      await expect(pencils).toHaveCount(0);
+      continue;
+    }
+    await expect(pencils).toBeVisible();
+    const pencil = (await pencils.boundingBox())!;
+    expect(Math.min(pencil.width, pencil.height)).toBeGreaterThanOrEqual(44);
+    expect(overlap(pencil, close)).toBe(false);
+    expect(overlap(pencil, tile)).toBe(false);
+    expect(overlap(pencil, label)).toBe(false);
+  }
+
+  await rows.filter({ hasText: 'tall.png' }).scrollIntoViewIfNeeded();
+  const pencil = rows.filter({ hasText: 'tall.png' }).getByRole('button', { name: 'Редактировать изображение' });
+  if (phone) await pencil.tap();
+  else await pencil.click();
+  const dialog = page.locator('dialog.editor');
+  await expect(dialog).toBeVisible({ timeout: 15_000 });
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(rows).toHaveCount(3);
+});

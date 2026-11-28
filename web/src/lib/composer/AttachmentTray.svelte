@@ -104,7 +104,7 @@
               <span class="retry"><Button onclick={() => uploads.retry(item.id)}>Повторить</Button></span>
             {/if}
           </div>
-          <IconButton icon="close" label="Убрать" onclick={() => uploads.cancel(item.id)} />
+          <span class="remove"><IconButton icon="close" label="Убрать" onclick={() => uploads.cancel(item.id)} /></span>
         </li>
       {/each}
     </ul>
@@ -128,6 +128,7 @@
   .thumb:has(.pencil) .tile { align-items: flex-start; padding-top: var(--s3); }
   .pencil:active .badge { transform: scale(var(--scale-press)); }
   .badge { display: inline-flex; align-items: center; justify-content: center; width: var(--s10); height: var(--s10); border: var(--hairline) solid var(--control-line); border-radius: var(--radius-round); background: var(--surface); --icon: var(--s8); }
+  .remove { display: inline-flex; flex: none; }
   .info { display: flex; flex: 1; flex-direction: column; gap: var(--s1); min-width: 0; }
   .name { overflow: hidden; font-size: var(--fs-meta); text-overflow: ellipsis; white-space: nowrap; }
   .meta { color: var(--secondary); font-size: var(--fs-sm); }
@@ -151,6 +152,14 @@
   :global(html[data-compact]) ul[data-fade-start][data-fade-end] { mask-image: linear-gradient(to right, var(--transparent), var(--text) var(--s6), var(--text) calc(100% - var(--s6)), var(--transparent)); }
   :global(html[data-compact]) li { flex: 0 0 auto; max-width: calc(var(--target) * 5); min-height: var(--target); padding: var(--s2) var(--s3); }
   :global(html[data-compact]) .tile { width: var(--s10); height: var(--s10); }
+  /* Миниатюра в строке клавиатуры слишком мала для значка в углу: карандаш встаёт отдельной кнопкой между именем и крестиком. */
+  :global(html[data-compact]) li:has(.pencil) { max-width: calc(var(--target) * 6); }
+  :global(html[data-compact]) .thumb { display: contents; }
+  :global(html[data-compact]) .thumb:has(.pencil) .tile { align-items: center; padding-top: var(--s0); }
+  :global(html[data-compact]) .pencil,
+  :global(html[data-compact]) .remove { order: 1; }
+  :global(html[data-compact]) .pencil { position: static; flex: none; }
+  :global(html[data-compact]) .badge { width: auto; height: auto; border: var(--s0); background: var(--transparent); --icon: inherit; }
   :global(html[data-compact]) .meta,
   :global(html[data-compact]) .bar { display: none; }
 </style>
