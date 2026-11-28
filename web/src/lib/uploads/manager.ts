@@ -118,6 +118,10 @@ export class UploadManager {
 
   add(conversationId: string, file: File, countInDraft: number): Upload {
     this.#assertLimits(file, countInDraft);
+    return this.#create(conversationId, file);
+  }
+
+  #create(conversationId: string, file: File): Upload {
     const upload: Upload = {
       id: crypto.randomUUID(),
       conversationId,
@@ -138,6 +142,25 @@ export class UploadManager {
     this.#views.set(upload.id, upload);
     this.#records.set(upload.id, record);
     void this.#persistOrNote(record).then(() => this.#enqueue(record));
+    return upload;
+  }
+
+  /**
+   * Правленая картинка встаёт на место старой: лоток сохраняет порядок, а старая загрузка
+   * прерывается и удаляется на хабе. Лимиты проверяются до отмены, чтобы старый файл не пропал зря.
+   */
+  replace(id: string, file: File): Upload {
+    const old = this.#views.get(id);
+    if (!old) throw new Error(`upload ${id} is not in the tray`);
+    this.#assertLimits(file, 0);
+    const upload = this.#create(old.conversationId, file);
+    this.#views = new Map(
+      [...this.#views]
+        .filter(([key]) => key !== upload.id)
+        .map(([key, view]) => (key === id ? [upload.id, upload] : [key, view])),
+    );
+    // Старой строки в лотке уже нет: отмена только прерывает передачу и чистит хаб.
+    void this.#drop(id, old).catch(() => undefined);
     return upload;
   }
 
@@ -213,8 +236,11 @@ export class UploadManager {
     await Promise.all(ids.map((id) => this.cancel(id).catch(() => undefined)));
   }
 
-  async cancel(id: string): Promise<void> {
-    const upload = this.#views.get(id);
+  cancel(id: string): Promise<void> {
+    return this.#drop(id, this.#views.get(id));
+  }
+
+  async #drop(id: string, upload: Upload | undefined): Promise<void> {
     const record = this.#records.get(id);
     this.#queue = this.#queue.filter((item) => item.id !== id);
     this.#controllers.get(id)?.abort();

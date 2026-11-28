@@ -253,6 +253,64 @@ describe("uploads/manager", () => {
     expect(await db.get("uploads", upload.id)).toBeUndefined();
   });
 
+  it("replace_puts_the_new_file_in_the_same_place_and_aborts_the_old_upload", async () => {
+    const db = await openDb(ownerId);
+    const mockDelete = vi.fn().mockResolvedValue(undefined);
+    let created = 0;
+    const signals: AbortSignal[] = [];
+    const mockApi = {
+      createAttachment: vi.fn().mockImplementation(async () => ({
+        id: `att-${++created}`,
+        state: "uploading",
+        upload: { offset: 0, upload_chunk_bytes: 1024 * 1024 },
+      })),
+      headContent: vi.fn().mockResolvedValue({ offset: 0, length: 100 }),
+      // Висит, пока загрузку не прервут, как настоящий fetch с AbortSignal.
+      patchContent: vi.fn().mockImplementation(
+        (_id: string, _chunk: Blob, _offset: number, options?: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            if (options?.signal) signals.push(options.signal);
+            options?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+          }),
+      ),
+      completeAttachment: vi.fn(),
+      deleteAttachment: mockDelete,
+    };
+    const uploading = new UploadManager({ db, api: mockApi });
+    // Готовое вложение не занимает слот загрузки: новый файл не ждёт в очереди.
+    uploading.restore("c-1", [{ id: "att-ready", name: "a.txt", size: 1 }]);
+    const first = uploading.list("c-1")[0]!;
+    const shot = uploading.add("c-1", new File(["old"], "shot.png", { type: "image/png" }), 1);
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    const oldAttachment = shot.attachmentId!;
+    const last = uploading.add("c-1", new File(["c"], "c.txt"), 2);
+
+    const edited = new File(["edited"], "shot.png", { type: "image/png" });
+    const fresh = uploading.replace(shot.id, edited);
+
+    expect(uploading.list("c-1").map((item) => item.id)).toEqual([first.id, fresh.id, last.id]);
+    expect(fresh.size).toBe(edited.size);
+    await vi.waitFor(() => expect(shot.phase).toBe("cancelled"));
+    expect(signals[0]?.aborted).toBe(true);
+    expect(mockDelete).toHaveBeenCalledWith(oldAttachment);
+    expect(await db.get("uploads", shot.id)).toBeUndefined();
+    await vi.waitFor(() =>
+      expect(mockApi.createAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "shot.png", size: edited.size }),
+        expect.anything(),
+      ),
+    );
+  });
+
+  it("replace_with_a_too_large_file_keeps_the_old_upload", () => {
+    const shot = manager.add("c-1", new File(["old"], "shot.png", { type: "image/png" }), 0);
+    const huge = new File(["x"], "shot.png", { type: "image/png" });
+    Object.defineProperty(huge, "size", { value: 104857601 });
+    expect(() => manager.replace(shot.id, huge)).toThrow("Файл больше 100 МиБ");
+    expect(manager.list("c-1").map((item) => item.id)).toEqual([shot.id]);
+    expect(shot.phase).not.toBe("cancelled");
+  });
+
   it("retry_rereads_the_same_record_after_a_failure", async () => {
     const db = await openDb(ownerId);
     const file = new File(["retry me"], "retry.txt");
