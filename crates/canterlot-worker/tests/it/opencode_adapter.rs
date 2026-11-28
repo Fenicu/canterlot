@@ -1906,14 +1906,21 @@ async fn cancelled_start_leaves_no_server_behind() {
 
 #[tokio::test]
 async fn server_exit_reaches_the_supervisor() {
+    // Сервер умирает, когда тест его отпустит после старта: секундная пауза двойника под
+    // нагрузкой кончалась посреди старта, и тот падал с agents_unavailable.
+    let gate = tempfile::tempdir().unwrap();
+    let release = gate.path().join("die");
     let mut script = session_only();
-    script.steps.push(Step::Stall { ms: 1000 });
+    script.steps.push(Step::WaitFile {
+        path: release.clone(),
+    });
     script.steps.push(Step::Die {
         code: 9,
         kill: false,
     });
     let mut bench = Bench::new(script);
     bench.start_ok().await;
+    std::fs::write(&release, []).unwrap();
     loop {
         match bench.event().await {
             AdapterEvent::ProcessExited { code, signal } => {
