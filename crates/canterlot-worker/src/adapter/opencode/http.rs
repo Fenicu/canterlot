@@ -158,6 +158,14 @@ impl Http {
             let mut response = builder.send().await.map_err(|_| HttpError::Lost)?;
             let status = response.status();
             if status.is_success() {
+                // Заявленное тело больше потолка не читается: ответ всё равно отклонят, а
+                // 64 МиБ впустую съедали срок запроса, и под нагрузкой вместо TooLarge выходил Lost.
+                if response
+                    .content_length()
+                    .is_some_and(|length| length > cap as u64)
+                {
+                    return Err(HttpError::TooLarge);
+                }
                 return bounded_body(&mut response, cap).await;
             }
             let body = bounded_body(&mut response, MAX_ERROR_BYTES)
@@ -278,6 +286,34 @@ mod tests {
         assert_eq!(error_tag(b"not json"), "UnknownError");
         let long = format!(r#"{{"_tag":"{}"}}"#, "A".repeat(65));
         assert_eq!(error_tag(long.as_bytes()), "UnknownError");
+    }
+
+    /// Ответ, заявивший тело больше потолка, отклоняется по заголовку: тело не читается вовсе.
+    /// Сервер здесь его и не шлёт, так что чтение тела дождалось бы только срока.
+    #[tokio::test]
+    async fn declared_body_over_the_cap_fails_without_reading_it() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).await.unwrap();
+                head.push(byte[0]);
+            }
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                MAX_BODY_BYTES + 1
+            );
+            stream.write_all(reply.as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let http = Http::new(base, "password".into()).await.unwrap();
+        let reply = http.get("/api/session", Duration::from_secs(60)).await;
+        assert_eq!(reply, Err(HttpError::TooLarge));
+        server.abort();
     }
 
     #[tokio::test]
