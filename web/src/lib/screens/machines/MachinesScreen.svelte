@@ -272,7 +272,8 @@
   <StepUpPrompt password={methods.password} passkey={methods.passkey} />
 </main>
 <style>
-  .add-machine { display: flex; margin-top: var(--s6); }
+  /* Снизу тот же шаг, что между карточками экрана: без него кнопка прилипала к вкладкам машин. */
+  .add-machine { display: flex; margin-block: var(--s6) var(--s4); }
   .pending { background: var(--surface); border-radius: var(--radius-card); padding: var(--s5) var(--s6); margin-block: var(--s4); }
   .pending h2 { margin: var(--s0); font-size: var(--fs-body); font-weight: var(--weight-medium); }
   .pending ul { list-style: none; margin: var(--s4) 0 0; padding: 0; }
