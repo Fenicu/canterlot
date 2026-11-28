@@ -2443,9 +2443,11 @@ async fn wave2_n1_draining_delivery_releases_slot() {
         .await
         .unwrap();
     let input = fixture.submit("late".into()).await;
-    timeout(
-        Duration::from_secs(5),
-        until("deferred", async || {
+    // Срок ожидания — общий у `until`: прежний внешний в 5 с ничего не проверял и под
+    // нагрузкой кончался раньше, чем хаб успевал отложить доставку.
+    until(
+        "draining delivery is deferred without a receipt",
+        async || {
             sqlx::query_scalar::<_, bool>(
                 "select last_status = 'dispatch_deferred' from commands where id = $1",
             )
@@ -2453,10 +2455,9 @@ async fn wave2_n1_draining_delivery_releases_slot() {
             .fetch_one(&pool)
             .await
             .unwrap_or(false)
-        }),
+        },
     )
-    .await
-    .expect("draining delivery has no receipt");
+    .await;
     assert_eq!(fixture.input_state(input.input_id).await, "queued");
     assert_eq!(fixture.slot().await, "free");
     assert!(fixture.cli_receipts(input.command_id).is_empty());
