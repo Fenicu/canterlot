@@ -115,9 +115,6 @@
     "crates/canterlot-hub/tests/it/http_requests.rs": {
       "rust_sleep": 1
     },
-    "crates/canterlot-hub/tests/it/hub_cli.rs": {
-      "rust_sleep": 1
-    },
     "crates/canterlot-hub/tests/it/ingest.rs": {
       "rust_sleep": 1
     },
