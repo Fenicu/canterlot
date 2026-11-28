@@ -15,7 +15,7 @@ use canterlot_worker::{
             catalog::ModelEntry,
             discover, discover_within,
             permissions::PermissionMode,
-            replay::{Reply, Script, Step, evidence_path},
+            replay::{Gather, Reply, Script, Step, evidence_path},
         },
     },
     config::OpenCodeConfig,
@@ -6966,9 +6966,14 @@ async fn children_get_their_rules_at_once() {
     let session = session_of(&capture);
     let mut script = with_rules_route(capture, vec![reply_204()]);
     let children: Vec<String> = (0..3).map(|n| format!("ses_child{n}")).collect();
+    // Каждый ответ потомку ждёт остальных: последовательная рассылка встала бы на первом,
+    // а разом все три проходят. Замер времени под нагрузкой гейта превышал секунду.
     let slow = Reply {
         status: 204,
-        stall_ms: 400,
+        gather: Some(Gather {
+            key: "children".into(),
+            count: 3,
+        }),
         ..Default::default()
     };
     for child in &children {
@@ -7002,13 +7007,7 @@ async fn children_get_their_rules_at_once() {
     bench.until_finished(first.command_id).await;
     let mut second = bench.input("два");
     second.settings = Some(mode_change("read_only"));
-    let started = std::time::Instant::now();
     bench.accepted(&second).await;
-    assert!(
-        started.elapsed() < Duration::from_millis(1000),
-        "{:?}",
-        started.elapsed()
-    );
     let patched = bench
         .fake
         .requests()

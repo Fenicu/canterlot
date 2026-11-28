@@ -84,6 +84,16 @@ pub struct Reply {
     pub raw: Option<String>,
     /// Ответ задержан, а следующие шаги сценария уже идут: приём без подтверждения.
     pub stall_ms: u64,
+    /// Ответ ждёт, пока соберутся все запросы с этим ключом: так проверяется, что они идут
+    /// разом, без замера времени. Последовательные запросы здесь встанут.
+    pub gather: Option<Gather>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Gather {
+    pub key: String,
+    pub count: u32,
 }
 
 impl Default for Reply {
@@ -93,6 +103,7 @@ impl Default for Reply {
             body: None,
             raw: None,
             stall_ms: 0,
+            gather: None,
         }
     }
 }
@@ -393,6 +404,9 @@ struct Shared {
     pid: u32,
     /// Ответы, которые тест дописывает на ходу: идентификаторы создаёт адаптер.
     overrides: Option<PathBuf>,
+    /// Сколько запросов пришло по каждому ключу `gather`.
+    gathered: Mutex<BTreeMap<String, u32>>,
+    gather_wake: Notify,
 }
 
 impl State {
@@ -748,6 +762,30 @@ fn plan_reply(shared: &Shared, request: &Request) -> (Reply, Vec<u8>, bool) {
     (reply, bytes, false)
 }
 
+/// Держит ответ, пока по ключу не придёт `count` запросов, и отпускает их все разом.
+async fn gather_with(shared: &Shared, gather: &Gather) {
+    {
+        let mut gathered = shared.gathered.lock().unwrap();
+        *gathered.entry(gather.key.clone()).or_default() += 1;
+    }
+    shared.gather_wake.notify_waiters();
+    loop {
+        // Ожидание заводится до проверки: пробуждение между ними не теряется.
+        let woken = shared.gather_wake.notified();
+        let arrived = shared
+            .gathered
+            .lock()
+            .unwrap()
+            .get(&gather.key)
+            .copied()
+            .unwrap_or(0);
+        if arrived >= gather.count {
+            return;
+        }
+        woken.await;
+    }
+}
+
 async fn serve_connection(shared: Arc<Shared>, stream: TcpStream) {
     let (read, mut writer) = stream.into_split();
     let mut reader = BufReader::new(read);
@@ -791,6 +829,9 @@ async fn serve_connection(shared: Arc<Shared>, stream: TcpStream) {
             return;
         }
         let (reply, bytes, stepped) = plan_reply(&shared, &request);
+        if let Some(gather) = &reply.gather {
+            gather_with(&shared, gather).await;
+        }
         if reply.stall_ms > 0 {
             shared.wake.notify_one();
             tokio::time::sleep(Duration::from_millis(reply.stall_ms)).await;
@@ -939,6 +980,8 @@ pub async fn main(args: Vec<String>) -> ExitCode {
         version: script.version,
         pid: std::process::id(),
         overrides,
+        gathered: Mutex::default(),
+        gather_wake: Notify::new(),
     });
     // Обработчики раньше строки готовности: сигнал сразу после неё иначе убил бы процесс.
     use tokio::signal::unix::{SignalKind, signal};
