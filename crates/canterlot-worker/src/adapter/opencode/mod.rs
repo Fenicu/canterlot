@@ -674,6 +674,8 @@ pub struct OpenCodeAdapter {
     cli_version_cache: Option<PathBuf>,
     stop_grace: Duration,
     ready_wait: Duration,
+    /// Срок ленивых частей сервера после строки готовности: MCP без изоляции, агенты, модели.
+    warmup_wait: Duration,
     /// Срок доказательства изоляции MCP: не зависит от готовности строки CLI.
     mcp_wait: Duration,
     relay_executable: Option<PathBuf>,
@@ -766,6 +768,7 @@ impl OpenCodeAdapter {
             cli_version_cache: None,
             stop_grace: Duration::from_secs(5),
             ready_wait: READY_WAIT,
+            warmup_wait: READY_WAIT,
             mcp_wait: MCP_READY_WAIT,
             relay_executable: None,
             start_attempted: false,
@@ -828,9 +831,15 @@ impl OpenCodeAdapter {
         self
     }
 
-    /// Срок строки готовности и каждого ожидания на старте.
+    /// Срок строки готовности.
     pub fn set_ready_wait(&mut self, wait: Duration) {
         self.ready_wait = wait;
+    }
+
+    /// Срок ожиданий после строки готовности. Отделён от неё: тест, ужавший опрос агентов
+    /// до сотен миллисекунд, под нагрузкой не дожидался самой строки и падал с server_not_ready.
+    pub fn set_warmup_wait(&mut self, wait: Duration) {
+        self.warmup_wait = wait;
     }
 
     /// Срок ожидания доказательства изоляции MCP; в тестах короче, чтобы не ждать 90 с.
@@ -1054,7 +1063,7 @@ impl OpenCodeAdapter {
             + if self.isolate_mcp {
                 self.mcp_wait
             } else {
-                self.ready_wait
+                self.warmup_wait
             };
         let (state, proven) = loop {
             let (state, proven, foreign_pending) =
@@ -1101,7 +1110,7 @@ impl OpenCodeAdapter {
 
     // Локация поднимается лениво: сразу после старта список пуст.
     async fn wait_agents(&mut self) -> Result<(), AdapterError> {
-        let limit = Instant::now() + self.ready_wait;
+        let limit = Instant::now() + self.warmup_wait;
         loop {
             let agents = self
                 .http()?
@@ -1124,7 +1133,7 @@ impl OpenCodeAdapter {
     // Окно контекста не приходит в событиях. Без каталога ход всё равно работает.
     async fn model_list(&mut self) -> Value {
         match self.http {
-            Some(ref http) => models_reply(http, "/api/model", self.ready_wait)
+            Some(ref http) => models_reply(http, "/api/model", self.warmup_wait)
                 .await
                 .unwrap_or(Value::Null),
             None => Value::Null,

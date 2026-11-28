@@ -1306,7 +1306,7 @@ async fn pending_mcp_past_the_deadline_is_a_diagnostic() {
         script.set_route("GET", "/api/mcp", vec![pending]);
         script
     });
-    bench.adapter.set_ready_wait(Duration::from_millis(300));
+    bench.adapter.set_warmup_wait(Duration::from_millis(300));
     bench.adapter.set_mcp_wait(Duration::from_millis(300));
     bench.start_ok().await;
     assert!(matches!(
@@ -1384,7 +1384,7 @@ async fn slow_proof_of_the_mcp_server_list_is_not_an_isolation_failure() {
     script.set_route("GET", "/api/mcp", replies);
     let mut bench = Bench::new(script);
     bench.spec.isolate_mcp = true;
-    bench.adapter.set_ready_wait(Duration::from_secs(5));
+    bench.adapter.set_warmup_wait(Duration::from_secs(5));
     bench.start_ok().await;
     bench.close(CloseMode::Graceful).await;
 }
@@ -1426,7 +1426,7 @@ async fn server_dying_while_waiting_for_mcp_is_server_unreachable() {
     });
     let mut bench = Bench::new(script);
     bench.spec.isolate_mcp = true;
-    bench.adapter.set_ready_wait(Duration::from_millis(300));
+    bench.adapter.set_warmup_wait(Duration::from_millis(300));
     bench.adapter.set_mcp_wait(Duration::from_secs(5));
     assert_eq!(bench.fail_reason().await, "server_unreachable");
     bench.fake.wait_gone().await;
@@ -1547,7 +1547,7 @@ async fn owner_session_still_starts_when_the_server_list_is_refused() {
     };
     script.set_route("GET", "/api/mcp", vec![refused]);
     let mut bench = Bench::new(script);
-    bench.adapter.set_ready_wait(Duration::from_millis(300));
+    bench.adapter.set_warmup_wait(Duration::from_millis(300));
     bench.start_ok().await;
     assert!(matches!(
         bench.event().await,
@@ -1580,7 +1580,7 @@ async fn empty_agent_list_past_the_deadline_fails_the_start() {
     let empty = script.route("GET", "/api/agent").unwrap().replies[0].clone();
     script.set_route("GET", "/api/agent", vec![empty]);
     let mut bench = Bench::new(script);
-    bench.adapter.set_ready_wait(Duration::from_millis(300));
+    bench.adapter.set_warmup_wait(Duration::from_millis(300));
     assert_eq!(bench.fail_reason().await, "agents_unavailable");
     bench.fake.wait_gone().await;
 }
